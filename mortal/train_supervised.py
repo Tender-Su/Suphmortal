@@ -1,3 +1,4 @@
+import inspect
 import logging
 import time
 from os import path
@@ -2292,7 +2293,8 @@ def train(
         if phase_num_workers > 0:
             kwargs['prefetch_factor'] = phase_prefetch_factor
             kwargs['persistent_workers'] = phase_persistent_workers
-            kwargs['in_order'] = phase_in_order
+            if 'in_order' in inspect.signature(DataLoader.__init__).parameters:
+                kwargs['in_order'] = phase_in_order
         return DataLoader(**kwargs)
 
     def move_batch_to_device(batch):

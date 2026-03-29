@@ -16,6 +16,14 @@
 - 当两个方案强度接近时，优先更小更快。
 - 当强度差异明确时，优先更强方案。
 
+## 计算资源与同步默认
+
+- 主节点：台式机 `i5-13600KF + RTX 5070 Ti`
+- 副节点：笔记本 `i9-13900HX + RTX 4060 Laptop 8GB + 32GB DDR5`
+- 笔记本当前是独立实验节点，不是已配置好的分布式训练成员；默认把它当成“另一台可并行跑完整实验脚手架的 Windows 机器”
+- 跨机器源码同步默认以 `origin/main` 为准；如果笔记本本地目录只是旧拷贝，先同步再信任结果
+- 双机并行纪律：不同机器必须使用不同 run 名称、不同输出目录、不同 checkpoint 文件，避免互相覆盖
+
 ## Stage 0
 
 - 默认主线：`384x3 fp32`
@@ -30,6 +38,12 @@
 - 默认正式训练快路径：
   - train：`num_workers = 4`、`file_batch_size = 10`、`prefetch_factor = 3`
   - val：`val_file_batch_size = 8`、`val_prefetch_factor = 5`
+- 上述 `4/10/3 + 8/5` 是台式机默认，不自动外推到笔记本；笔记本需要单独 benchmark 后再写入默认
+- 当前笔记本的独立 benchmark 结论（`2026-03-30`，本地代表性子集）：
+  - train：`6 / 7 / 3`
+  - val：`7 / 6`
+  - close fallback：`7 / 5`
+- 该笔记本结论当前用于并行实验操作，不覆盖台式机默认，也不等同于“已用笔记本全量数据根完全验收”
 - 当前 `P0` 官方入选 `top3`：
   - `C_A2y_cosine_broad_to_recent_strong_12m_6m`
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
@@ -93,4 +107,5 @@
 - 当前真实进度：`docs/status/stage05-verified-status.md`
 - 运行流程与停点：`docs/agent/experiment-workflow.md`
 - 工程方法与有效经验：`docs/research/stage05/engineering-playbook.md`
+- 笔记本 loader benchmark 记录：`docs/status/laptop-stage05-loader-benchmark-2026-03-30.md`
 - 历史长入口：`docs/archive/agent/current-plan-legacy-2026-03-29.md`

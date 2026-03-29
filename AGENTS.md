@@ -134,6 +134,25 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 - Prefer recommendations that balance DataLoader throughput, CPU preprocessing, disk I/O, and GPU utilization for this hardware pair.
 - For the current `384x3` `fp32` GRP training setup on this machine, treat `num_workers = 10` as the practical default and only move lower or higher with task-specific evidence.
 
+## Multi-Machine Compute Topology
+
+- **Primary desktop**: Intel Core i5-13600KF + NVIDIA GeForce RTX 5070 Ti. This remains the default target when a note only says "this machine".
+- **Secondary laptop node**: Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU (`8 GB` VRAM) + `32 GB` DDR5. Treat it as an additional independent experiment runner, not as an already-wired distributed training worker.
+- Use the laptop for parallel GRP runs, Stage `0.5` loader / validation benchmarking, supervised A/Bs, and shorter Stage `1` probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
+- Source-of-truth code sync should go through `origin/main`. Do not trust an older copied workspace on the laptop without an explicit resync.
+- Laptop repo default path: `C:\Users\numbe\Desktop\MahjongAI`
+- Laptop Conda env: `C:\Users\numbe\miniconda3\envs\mortal`
+- Desktop-to-laptop shell access is available over LAN SSH via the desktop key `C:\Users\numbe\.ssh\mahjong_laptop_ed25519`. The laptop LAN IP can change, so re-check it before hardcoding commands.
+- When running the same stage on both machines, always use distinct run names / output directories tagged by machine, and never let both machines write to the same checkpoint path or log directory.
+- Current laptop Stage `0.5` loader default from the `2026-03-30` local-subset benchmark:
+  - train: `num_workers = 6`, `file_batch_size = 7`, `prefetch_factor = 3`
+  - val: `val_file_batch_size = 7`, `val_prefetch_factor = 6`
+  - close validation fallback: `7 / 5`
+- Benchmark artifacts copied back to the desktop repo:
+  - `logs/laptop_stage05_loader_bench/summary.json`
+  - `logs/laptop_stage05_loader_bench/confirm_summary.json`
+- Important scope note: the laptop benchmark used a copied representative subset because the full dataset root is not yet mirrored onto the laptop. Treat these as the current operational defaults for the laptop, but still prefer a full-data recheck before locking them in as a permanent global default.
+
 ## User Objective
 
 - The primary objective is to build the strongest Mahjong AI possible on this machine, not merely the fastest or cheapest-to-train model.
