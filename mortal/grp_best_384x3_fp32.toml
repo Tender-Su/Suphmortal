@@ -1,0 +1,46 @@
+[grp]
+state_file = "./checkpoints/grp.pth"
+latest_state_file = "./checkpoints/grp_latest.pth"
+best_loss_state_file = "./checkpoints/grp.pth"
+best_acc_state_file = "./checkpoints/grp_best_acc.pth"
+
+[grp.network]
+hidden_size = 384
+num_layers = 3
+dtype = "float32"
+
+[grp.control]
+device = "cuda:0"
+enable_cudnn_benchmark = true
+allow_tf32 = false
+tensorboard_dir = "./tb_log_grp"
+batch_size = 1024
+save_every = 2000
+val_steps = 0
+max_epochs = 30
+min_epochs = 8
+early_stopping_patience = 8
+early_stopping_min_delta = 0.0005
+early_stopping_min_lr_reductions = 2
+
+[grp.dataset]
+train_globs = [
+    "/path/to/grp_pt/train/*.pt",
+]
+val_globs = [
+    "/path/to/grp_pt/val/*.pt",
+]
+file_index = "./checkpoints/grp_file_index_pt.pth"
+file_batch_size = 50
+num_workers = 10
+prefetch_factor = 4
+
+[grp.optim]
+lr = 2e-5
+
+[grp.optim.scheduler]
+factor = 0.5
+patience = 2
+threshold = 0.0005
+cooldown = 1
+min_lr = 1e-6
