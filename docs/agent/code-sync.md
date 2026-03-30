@@ -7,13 +7,23 @@
 - 台式机是源码真源：
   - 工作树：`C:\Users\numbe\Desktop\MahjongAI`
   - 当前分支：`main`
+  - 跟踪分支：`origin/main`
 - 笔记本不是直接从台式机工作树拉代码，而是走一个局域网 bare mirror：
   - bare mirror：`C:\Users\numbe\repos\MahjongAI-desktop.git`
   - 笔记本工作树：`C:\Users\numbe\Desktop\MahjongAI`
+  - 当前分支：`main`
 - 台式机已配置 SSH 别名：
   - `mahjong-laptop`
 - 台式机仓库已配置 remote：
   - `laptop-sync = mahjong-laptop:C:/Users/numbe/repos/MahjongAI-desktop.git`
+  - `origin = https://github.com/Tender-Su/Suphmortal.git`
+
+## 当前仓库状态
+
+- 当前唯一正式开发主线是：`main`
+- 旧的过渡分支 `github-main` 已经清理，不再使用
+- 旧实验分支 `exp/stage05-utilization-pass1` 不属于当前主线历史；它只是本地旧档案，不参与当前同步方案
+- 笔记本 bare mirror 的默认 `HEAD` 已经指向 `main`
 
 ## 为什么这样配
 
@@ -36,6 +46,12 @@
 1. `git push laptop-sync main:refs/heads/main`
 2. 通过 SSH 进入笔记本，把 `C:\Users\numbe\Desktop\MahjongAI` fast-forward 到最新 `main`
 
+如果这次改动也要同步到 GitHub，再额外执行：
+
+```powershell
+git push origin HEAD:main
+```
+
 如果只想更新笔记本 bare mirror，不想动笔记本工作树：
 
 ```powershell
@@ -49,12 +65,20 @@
   - `C:\Users\numbe\repos\MahjongAI-desktop.git`
 - 当前工作分支：
   - `main`
+- 笔记本工作树更新方式：
+  - `git fetch origin`
+  - `git checkout main`
+  - `git pull --ff-only origin main`
 - 旧的非 Git 工作树已整目录备份到：
   - `C:\Users\numbe\Desktop\MahjongAI_pre_git_backup_20260330_231850`
 
 ## 操作纪律
 
 - 默认只在台式机提交代码，笔记本只同步和跑实验
+- 当前默认顺序是：
+  - 先在台式机 `main` 提交
+  - 再运行 `.\scripts\sync_laptop_repo.ps1`
+  - 需要公开同步时，再 `git push origin HEAD:main`
 - 如果确实在笔记本上做了临时改动，不要直接长期分叉；尽快整理回台式机主线
 - 双机并行跑实验时，代码同步和实验输出是两回事：
   - 代码走 Git / bare mirror

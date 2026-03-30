@@ -14,7 +14,7 @@
 - **`docs/agent/mainline.md`** — stable defaults, stage map, frozen conclusions, and current active run.
 - **`docs/agent/experiment-workflow.md`** — current stage workflow, manual stop points, and operating discipline.
 - **`docs/agent/laptop-remote-ops.md`** — laptop-node remote-operation notes: SSH / PowerShell behavior, dataset status, current loader defaults, and proven remote execution patterns.
-- **`docs/agent/code-sync.md`** — default desktop↔laptop code-sync scheme: desktop as source of truth, laptop bare mirror layout, and the one-command sync path.
+- **`docs/agent/code-sync.md`** — default desktop↔laptop code-sync scheme: current canonical branch (`main`), desktop as source of truth, laptop bare mirror layout, and the one-command sync path.
 - **`docs/status/stage05-verified-status.md`** — manually maintained verified Stage 0.5 status; use this when the auto-generated summary lags behind raw artifacts.
 - **`docs/status/p1-selection-canonical.md`** — the only valid P1 winner-selection rubric.
 - **`docs/status/stage05-fidelity-results.md`** — auto-generated Stage 0.5 fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `stage05-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
@@ -141,7 +141,9 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 - **Primary desktop**: Intel Core i5-13600KF + NVIDIA GeForce RTX 5070 Ti. This remains the default target when a note only says "this machine".
 - **Secondary laptop node**: Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU (`8 GB` VRAM) + `32 GB` DDR5. Treat it as an additional independent experiment runner, not as an already-wired distributed training worker.
 - Use the laptop for parallel GRP runs, Stage `0.5` loader / validation benchmarking, supervised A/Bs, and shorter Stage `1` probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
-- Source-of-truth code sync should go through `origin/main`. Do not trust an older copied workspace on the laptop without an explicit resync.
+- Canonical development branch is now local `main`, which tracks `origin/main`.
+- Source-of-truth code lives in the desktop `main` worktree first; sync to the laptop through the documented bare-mirror workflow in `docs/agent/code-sync.md`, then push to GitHub `origin/main` as needed.
+- Do not trust an older copied workspace on the laptop without an explicit resync.
 - Laptop repo default path: `C:\Users\numbe\Desktop\MahjongAI`
 - Laptop Conda env: `C:\Users\numbe\miniconda3\envs\mortal`
 - Desktop-to-laptop shell access is available over LAN SSH via the desktop key `C:\Users\numbe\.ssh\mahjong_laptop_ed25519`. The laptop LAN IP can change, so re-check it before hardcoding commands.

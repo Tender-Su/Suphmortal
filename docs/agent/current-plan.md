@@ -13,6 +13,8 @@
 ## 当前默认
 
 - 总目标：优先做出最强麻将 AI；只有强度接近时才考虑效率。
+- 当前代码主分支固定为：`main`
+- 双机代码同步默认入口：`docs/agent/code-sync.md`
 - `Stage 0.5 / P0` 的事实 `top3` 顺序固定为：
   - `C_A2y_cosine_broad_to_recent_strong_12m_6m`
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`

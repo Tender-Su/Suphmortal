@@ -22,6 +22,8 @@
 
 - 主节点：`i5-13600KF + RTX 5070 Ti`
 - 副节点：`i9-13900HX + RTX 4060 Laptop 8GB + 32GB DDR5`
+- 当前代码主分支：`main`
+- 双机代码同步细节：`docs/agent/code-sync.md`
 - 当前台式机默认 `Stage 0.5` 训练快路径：
   - train：`num_workers = 4`、`file_batch_size = 10`、`prefetch_factor = 3`
   - val：`val_file_batch_size = 8`、`val_prefetch_factor = 5`
