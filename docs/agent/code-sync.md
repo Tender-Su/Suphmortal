@@ -6,7 +6,7 @@
 
 - 台式机是源码真源：
   - 工作树：`C:\Users\numbe\Desktop\MahjongAI`
-  - 当前分支：`github-main`
+  - 当前分支：`main`
 - 笔记本不是直接从台式机工作树拉代码，而是走一个局域网 bare mirror：
   - bare mirror：`C:\Users\numbe\repos\MahjongAI-desktop.git`
   - 笔记本工作树：`C:\Users\numbe\Desktop\MahjongAI`
@@ -33,8 +33,8 @@
 
 它会做两件事：
 
-1. `git push laptop-sync github-main:refs/heads/github-main`
-2. 通过 SSH 进入笔记本，把 `C:\Users\numbe\Desktop\MahjongAI` fast-forward 到最新 `github-main`
+1. `git push laptop-sync main:refs/heads/main`
+2. 通过 SSH 进入笔记本，把 `C:\Users\numbe\Desktop\MahjongAI` fast-forward 到最新 `main`
 
 如果只想更新笔记本 bare mirror，不想动笔记本工作树：
 
@@ -48,7 +48,7 @@
 - 当前 `origin` 指向：
   - `C:\Users\numbe\repos\MahjongAI-desktop.git`
 - 当前工作分支：
-  - `github-main`
+  - `main`
 - 旧的非 Git 工作树已整目录备份到：
   - `C:\Users\numbe\Desktop\MahjongAI_pre_git_backup_20260330_231850`
 

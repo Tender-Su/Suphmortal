@@ -1,5 +1,5 @@
 param(
-    [string]$Branch = 'github-main',
+    [string]$Branch = 'main',
     [string]$LaptopHost = 'mahjong-laptop',
     [string]$LaptopRepo = 'C:\Users\numbe\Desktop\MahjongAI',
     [switch]$SkipWorktreeUpdate
