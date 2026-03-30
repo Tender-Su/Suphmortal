@@ -565,7 +565,17 @@ def fetch_remote_result(worker: WorkerSpec, remote_result_path: str, local_resul
 
 
 def load_task_result(path: Path) -> dict[str, Any]:
-    return fidelity.load_json(path)
+    payload = fidelity.load_json(path)
+    summary = payload.get('summary')
+    if not isinstance(summary, dict):
+        raise RuntimeError(f'task result at {path} is missing summary')
+    if not bool(summary.get('ok')):
+        raise RuntimeError(
+            f'task result at {path} reported training failure: {summary.get("error") or "unknown error"}'
+        )
+    if not bool(summary.get('valid')):
+        raise RuntimeError(f'task result at {path} is not valid for ranking')
+    return payload
 
 
 def build_seed_round_payload(

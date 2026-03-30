@@ -147,6 +147,26 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             self.assertIn('bad json', task_state['error'])
             self.assertFalse(local_result_path.exists())
 
+    def test_load_task_result_rejects_unsuccessful_training_payload(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_path = Path(tmp_dir) / 'result.json'
+            result_path.write_text(
+                json.dumps(
+                    {
+                        'summary': {
+                            'ok': False,
+                            'valid': False,
+                            'error': 'train_supervised entrypoint failed',
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding='utf-8',
+            )
+
+            with self.assertRaisesRegex(RuntimeError, 'reported training failure'):
+                distributed.load_task_result(result_path)
+
     def test_select_winner_refine_seed2_candidates_keeps_floor_and_gap_band(self):
         candidates = [make_candidate(name) for name in ('a', 'b', 'c', 'd')]
         ranking = [

@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,6 +27,22 @@ class FakeLoaderIterator:
 
 
 class TrainSupervisedResumeAuxTests(unittest.TestCase):
+    def test_safe_default_collate_normalizes_numpy_bool_scalars(self):
+        batch = [
+            (np.bool_(True), np.array([1.0, 2.0], dtype=np.float32)),
+            (np.bool_(False), np.array([3.0, 4.0], dtype=np.float32)),
+        ]
+
+        collated = train_supervised.safe_default_collate(batch)
+
+        self.assertTrue(torch.equal(collated[0], torch.tensor([True, False], dtype=torch.bool)))
+        self.assertTrue(
+            torch.equal(
+                collated[1],
+                torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+            )
+        )
+
     def test_loader_uses_oracle_disables_visible_only_validation_loading(self):
         self.assertTrue(
             train_supervised.loader_uses_oracle(

@@ -3,7 +3,9 @@ import logging
 import time
 from os import path
 
+import numpy as np
 import torch
+from torch.utils.data._utils.collate import default_collate
 
 
 def resolve_effective_config_section(config, config_section):
@@ -216,6 +218,22 @@ def loader_uses_oracle(*, training, use_oracle, validation_use_oracle):
 def ensure_init_state_file_exists(init_state_file, *, cfg_prefix):
     if init_state_file and not path.exists(init_state_file):
         raise FileNotFoundError(f'{cfg_prefix}.init_state_file does not exist: {init_state_file}')
+
+
+def normalize_numpy_bool_scalars(value):
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, tuple):
+        return tuple(normalize_numpy_bool_scalars(item) for item in value)
+    if isinstance(value, list):
+        return [normalize_numpy_bool_scalars(item) for item in value]
+    if isinstance(value, dict):
+        return {key: normalize_numpy_bool_scalars(item) for key, item in value.items()}
+    return value
+
+
+def safe_default_collate(batch):
+    return default_collate([normalize_numpy_bool_scalars(item) for item in batch])
 
 
 def paths_match(lhs, rhs):
@@ -2289,6 +2307,7 @@ def train(
             'num_workers': phase_num_workers,
             'pin_memory': phase_pin_memory,
             'worker_init_fn': worker_init_fn,
+            'collate_fn': safe_default_collate,
         }
         if phase_num_workers > 0:
             kwargs['prefetch_factor'] = phase_prefetch_factor
