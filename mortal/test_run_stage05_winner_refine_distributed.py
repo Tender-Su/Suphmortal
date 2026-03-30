@@ -161,7 +161,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
             command[-1],
         )
-        self.assertIn('-PythonArgsJson', command[-1])
+        self.assertIn('-PythonArgsBase64', command[-1])
 
     def test_handle_finished_json_task_retries_remote_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

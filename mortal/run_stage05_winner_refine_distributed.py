@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
 import json
 import math
 import subprocess
@@ -671,12 +672,13 @@ def build_remote_interactive_window_command(
     ]
     repo_root = Path(worker.repo or str(REPO_ROOT))
     window_title = f"MahjongAI winner_refine {task_state['task_id']}"
+    python_args_base64 = base64.b64encode(json.dumps(python_args, ensure_ascii=True).encode('utf-8')).decode('ascii')
     ps_command = (
         f"& {quote_ps(str(repo_root / 'scripts' / 'start_interactive_remote_python.ps1'))} "
         f"-RepoRoot {quote_ps(str(repo_root))} "
         f"-PythonExe {quote_ps(worker.python or sys.executable)} "
         f"-PythonScript {quote_ps(str(repo_root / 'mortal' / SCRIPT_PATH.name))} "
-        f"-PythonArgsJson {quote_ps(json.dumps(python_args, ensure_ascii=True))} "
+        f"-PythonArgsBase64 {quote_ps(python_args_base64)} "
         f"-TaskId {quote_ps(str(task_state['task_id']))} "
         f"-RuntimeRoot {quote_ps(str(remote_runtime_root))} "
         f"-WindowTitle {quote_ps(window_title)}"

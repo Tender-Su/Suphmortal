@@ -5,8 +5,8 @@ param(
     [string]$PythonExe,
     [Parameter(Mandatory = $true)]
     [string]$PythonScript,
-    [Parameter(Mandatory = $true)]
-    [string]$PythonArgsJson,
+    [string]$PythonArgsJson = '',
+    [string]$PythonArgsBase64 = '',
     [Parameter(Mandatory = $true)]
     [string]$TaskId,
     [Parameter(Mandatory = $true)]
@@ -15,6 +15,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($PythonArgsBase64) {
+    $PythonArgsJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($PythonArgsBase64))
+}
+
+if (-not $PythonArgsJson) {
+    throw 'PythonArgsJson/PythonArgsBase64 must provide a JSON string array payload'
+}
 
 function Write-Utf8NoBomFile {
     param(
@@ -38,7 +46,7 @@ $launcherPath = Join-Path $RuntimeRoot 'interactive_launcher.ps1'
 $startedPath = Join-Path $RuntimeRoot 'started.json'
 $donePath = Join-Path $RuntimeRoot 'done.json'
 $taskName = 'MahjongAI-WinnerRefine-' + $TaskId
-$userId = if ($env:USERDOMAIN) { $env:USERDOMAIN + '\' + $env:USERNAME } else { $env:USERNAME }
+$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 foreach ($path in @($startedPath, $donePath)) {
     if (Test-Path $path) {
@@ -101,7 +109,7 @@ $launcherCmdPath = $launcherPath.Replace('"', '""')
 $windowCmdTitle = $WindowTitle.Replace('"', '""')
 $actionArgs = '/c start "' + $windowCmdTitle + '" /max powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File "' + $launcherCmdPath + '"'
 $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument $actionArgs
-$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType InteractiveToken -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
