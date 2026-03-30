@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 # Post-leakage Stage 0.5 mainline frozen for downstream Stage 1 seeding.
-CURRENT_PRIMARY_PROTOCOL_ARM = 'C_A2y_cosine_broad_to_recent_strong_12m_6m'
-CURRENT_STAGE1_TOP_PROTOCOL_ARMS = (
-    CURRENT_PRIMARY_PROTOCOL_ARM,
+# Keep the verified P0 top3 in historical factual order; do not reorder it to
+# match later downstream protocol winners.
+CURRENT_P0_TOP3_PROTOCOL_ARMS = (
+    'C_A2y_cosine_broad_to_recent_strong_12m_6m',
     'C_A2x_cosine_broad_to_recent_strong_24m_12m',
     'C_A1x_cosine_broad_to_recent_mild_24m_12m',
 )
+
+# Current verified protocol_decide winner: A2x.
+CURRENT_PROTOCOL_DECIDE_WINNER_ARM = 'C_A2x_cosine_broad_to_recent_strong_24m_12m'
+CURRENT_PRIMARY_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
+CURRENT_STAGE1_TOP_PROTOCOL_ARMS = CURRENT_P0_TOP3_PROTOCOL_ARMS
 
 # Current validated Stage 0.5 validation loader defaults on this machine.
 DEFAULT_VAL_FILE_BATCH_SIZE = 8
@@ -18,8 +24,10 @@ DEFAULT_VAL_PREFETCH_FACTOR = 5
 #   instead of rerunning pure single-head probes in the current run
 # - only rerun pairwise/triple probes to refresh combo factors for the current
 #   P1 line
+# Important: this representative arm is not the downstream protocol winner.
+CURRENT_P1_CALIBRATION_REPRESENTATIVE_PROTOCOL_ARM = 'C_A2y_cosine_broad_to_recent_strong_12m_6m'
 CURRENT_P1_CALIBRATION_PROTOCOL_ARMS = (
-    CURRENT_PRIMARY_PROTOCOL_ARM,
+    CURRENT_P1_CALIBRATION_REPRESENTATIVE_PROTOCOL_ARM,
 )
 CURRENT_P1_CALIBRATION_MODE = 'combo_only'
 CURRENT_P1_SINGLE_HEAD_CALIBRATION_SOURCE = (
@@ -46,3 +54,21 @@ CURRENT_P1_SINGLE_HEAD_CALIBRATION_BASELINE = {
     'grad_probe_batches': 8,
     'fallback_used': False,
 }
+
+# Current protocol_decide seed2 expansion defaults. Keep the current mainline
+# on the explicit flip-or-gap rule; only preserve the old ambiguity mode for
+# historical run compatibility when reading archived state.
+CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = 'flip_or_gap'
+CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD = 0.001
+CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_NOISE_MARGIN_MULT = 2.0
+
+# Current winner_refine defaults frozen after the verified A2x protocol_decide
+# closeout on 2026-03-30. These are explicit center arms, not an auto top-k
+# rule, so future changes must update both code and docs intentionally.
+CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
+CURRENT_P1_WINNER_REFINE_CENTER_MODE = 'explicit_arm_names'
+CURRENT_P1_WINNER_REFINE_CENTER_ARMS = (
+    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037',
+    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041',
+    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043',
+)

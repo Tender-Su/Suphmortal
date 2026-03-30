@@ -35,6 +35,7 @@ BASE_INDEX_PATH = MORTAL_DIR / 'checkpoints' / 'file_index_supervised_json.pth'
 AB_ROOT = REPO_ROOT / 'logs' / 'stage05_ab'
 AB_ROOT.mkdir(parents=True, exist_ok=True)
 AB_SCRATCH_ROOT = Path(tempfile.gettempdir()) / 'mahjongai_stage05_ab'
+ENTRYPOINT_ROOT = AB_SCRATCH_ROOT / '_entrypoints'
 
 
 BASE_SCREENING = {
@@ -511,12 +512,37 @@ def transient_training_failure_marker(log_path: Path, *, start_offset: int = 0) 
     return None
 
 
+def ensure_train_supervised_entrypoint() -> Path:
+    ENTRYPOINT_ROOT.mkdir(parents=True, exist_ok=True)
+    entrypoint_path = ENTRYPOINT_ROOT / 'train_supervised_entry.py'
+    expected = (
+        'from pathlib import Path\n'
+        'import sys\n'
+        '\n'
+        f"MORTAL_DIR = Path({str(MORTAL_DIR)!r})\n"
+        'if str(MORTAL_DIR) not in sys.path:\n'
+        '    sys.path.insert(0, str(MORTAL_DIR))\n'
+        '\n'
+        'import train_supervised\n'
+        '\n'
+        "if __name__ == '__main__':\n"
+        '    try:\n'
+        '        train_supervised.main()\n'
+        '    except KeyboardInterrupt:\n'
+        '        pass\n'
+    )
+    if not entrypoint_path.exists() or entrypoint_path.read_text(encoding='utf-8') != expected:
+        entrypoint_path.write_text(expected, encoding='utf-8', newline='\n')
+    return entrypoint_path
+
+
 def run_training(cfg_path: Path, log_path: Path) -> None:
     env = os.environ.copy()
     env['MORTAL_CFG'] = str(cfg_path)
     affinity = os.environ.get(AFFINITY_ENV_VAR)
     if affinity is not None:
         env[AFFINITY_ENV_VAR] = affinity
+    entrypoint = ensure_train_supervised_entrypoint()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     attempt = 0
     while True:
@@ -527,7 +553,7 @@ def run_training(cfg_path: Path, log_path: Path) -> None:
             f.write(f'\n=== train_supervised attempt {attempt} @ {time.strftime("%Y-%m-%d %H:%M:%S")} ===\n')
             f.flush()
             proc = subprocess.run(
-                [sys.executable, 'train_supervised.py'],
+                [sys.executable, str(entrypoint)],
                 cwd=MORTAL_DIR,
                 env=env,
                 stdout=f,
@@ -538,7 +564,7 @@ def run_training(cfg_path: Path, log_path: Path) -> None:
             return
         marker = transient_training_failure_marker(log_path, start_offset=attempt_log_start)
         if marker is None:
-            raise RuntimeError(f'train_supervised.py failed, see {log_path}')
+            raise RuntimeError(f'train_supervised entrypoint failed, see {log_path}')
         sleep_seconds = min(30, 5 + attempt)
         with log_path.open('a', encoding='utf-8', newline='\n') as f:
             f.write(

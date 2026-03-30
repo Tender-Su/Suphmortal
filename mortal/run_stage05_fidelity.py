@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from torch.utils.data import DataLoader
@@ -103,14 +103,29 @@ P1_PROTOCOL_DECIDE_MIXES = [
 ]
 P1_WINNER_REFINE_STEP_SCALE = 1.5
 P1_WINNER_REFINE_SEED_OFFSETS = [0, 1009]
-P1_WINNER_REFINE_CENTERS = 2
+P1_WINNER_REFINE_CENTER_MODE = stage05_defaults.CURRENT_P1_WINNER_REFINE_CENTER_MODE
+P1_WINNER_REFINE_PROTOCOL_ARM = stage05_defaults.CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM
+P1_WINNER_REFINE_CENTER_ARM_NAMES = tuple(
+    stage05_defaults.CURRENT_P1_WINNER_REFINE_CENTER_ARMS
+)
 P1_WINNER_REFINE_TOTAL_SCALE_FACTORS = [0.85, 1.0, 1.15]
 P1_WINNER_REFINE_TRANSFER_DELTA = 0.01
 P1_ABLATION_STEP_SCALE = 1.5
 P1_ABLATION_SEED_OFFSETS = [0, 1009]
 P1_SOLO_PROBE_KEEP_PER_FAMILY = 2
 P1_PAIRWISE_PROBE_KEEP_PER_PROTOCOL = 4
-P1_PROGRESSIVE_NOISE_MARGIN_MULT = 2.0
+# Historical compatibility only when reading archived state snapshots.
+P1_PROGRESSIVE_NOISE_MARGIN_MULT = (
+    stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_NOISE_MARGIN_MULT
+)
+P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY = 'legacy_max003_or_2noise'
+P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP = 'flip_or_gap'
+P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = (
+    stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+)
+P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD = (
+    stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+)
 P1_PAIRWISE_KEEP_PER_PROTOCOL = 4
 P1_JOINT_REFINE_CENTERS_PER_PROTOCOL = 2
 P1_JOINT_REFINE_BUDGET_DELTA = 0.25
@@ -1205,8 +1220,28 @@ def select_p1_protocol_centers(
     ranked: list[dict[str, Any]],
     *,
     protocol_arm: str,
-    keep: int,
+    keep: int | None = None,
+    explicit_arm_names: Sequence[str] | None = None,
 ) -> list[CandidateSpec]:
+    candidates = [
+        candidate_from_entry(entry)
+        for entry in ranked
+        if (
+            str(entry.get('candidate_meta', {}).get('protocol_arm', '')) == protocol_arm
+            and entry.get('valid')
+            and is_p1_winner_refine_center_meta(entry.get('candidate_meta', {}))
+        )
+    ]
+    if explicit_arm_names:
+        candidate_index = {candidate.arm_name: candidate for candidate in candidates}
+        missing = [arm_name for arm_name in explicit_arm_names if arm_name not in candidate_index]
+        if missing:
+            raise RuntimeError(
+                f'missing explicit winner_refine centers for protocol {protocol_arm}: {missing}'
+            )
+        return [candidate_index[arm_name] for arm_name in explicit_arm_names]
+    if keep is None:
+        raise ValueError('select_p1_protocol_centers requires keep or explicit_arm_names')
     centers: list[CandidateSpec] = []
     for entry in ranked:
         entry_protocol = str(entry.get('candidate_meta', {}).get('protocol_arm', ''))
@@ -2052,6 +2087,56 @@ def select_group_probe_candidates(
     return [candidate for candidate in candidates if candidate.arm_name in selected_names]
 
 
+def normalize_progressive_ambiguity_mode(mode: object) -> str:
+    value = str(mode or '').strip()
+    if not value:
+        return P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+    if value in (
+        P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY,
+        P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP,
+    ):
+        return value
+    raise ValueError(f'unknown progressive ambiguity mode: {value}')
+
+
+def protocol_decide_progressive_settings_from_search_space(
+    search_space: dict[str, Any] | None,
+) -> dict[str, Any]:
+    search_space = search_space if isinstance(search_space, dict) else {}
+    ambiguity_mode = normalize_progressive_ambiguity_mode(
+        search_space.get('protocol_decide_progressive_ambiguity_mode'),
+    )
+    gap_threshold = search_space.get('protocol_decide_progressive_gap_threshold')
+    if ambiguity_mode == P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP:
+        if gap_threshold is None:
+            gap_threshold = P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+        gap_threshold = float(gap_threshold)
+    else:
+        gap_threshold = None
+    noise_margin_mult = float(
+        search_space.get(
+            'protocol_decide_progressive_noise_margin_mult',
+            P1_PROGRESSIVE_NOISE_MARGIN_MULT,
+        )
+    )
+    return {
+        'ambiguity_mode': ambiguity_mode,
+        'gap_threshold': gap_threshold,
+        'noise_margin_mult': noise_margin_mult,
+    }
+
+
+def apply_protocol_decide_progressive_settings(
+    search_space: dict[str, Any] | None,
+) -> dict[str, Any]:
+    updated = dict(search_space or {})
+    settings = protocol_decide_progressive_settings_from_search_space(updated)
+    updated['protocol_decide_progressive_ambiguity_mode'] = settings['ambiguity_mode']
+    updated['protocol_decide_progressive_gap_threshold'] = settings['gap_threshold']
+    updated['protocol_decide_progressive_noise_margin_mult'] = settings['noise_margin_mult']
+    return updated
+
+
 def entry_seed_loss_range(entry: dict[str, Any]) -> float | None:
     losses = [
         float(seed_summary.get('recent_policy_loss', seed_summary['full_recent_loss']))
@@ -2070,7 +2155,11 @@ def detect_progressive_ambiguous_groups(
     probe_ranking: list[dict[str, Any]],
     group_key: str,
     ranking_mode: str = 'full_recent',
+    ambiguity_mode: str = P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY,
+    gap_threshold: float | None = None,
+    noise_margin_mult: float = P1_PROGRESSIVE_NOISE_MARGIN_MULT,
 ) -> tuple[set[str], dict[str, dict[str, Any]]]:
+    ambiguity_mode = normalize_progressive_ambiguity_mode(ambiguity_mode)
     seed1_groups = group_ranked_entries(seed1_ranking, group_key)
     probe_groups = group_ranked_entries(probe_ranking, group_key)
     ambiguous_groups: set[str] = set()
@@ -2106,7 +2195,10 @@ def detect_progressive_ambiguous_groups(
         ]
         noise = statistics.median(noise_values) if noise_values else 0.0
         epsilon = P1_POLICY_LOSS_EPSILON if ranking_mode == 'policy_quality' else LOSS_EPSILON
-        ambiguity_margin = max(epsilon, P1_PROGRESSIVE_NOISE_MARGIN_MULT * noise)
+        if ambiguity_mode == P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP:
+            ambiguity_margin = float(gap_threshold if gap_threshold is not None else epsilon)
+        else:
+            ambiguity_margin = max(epsilon, noise_margin_mult * noise)
         ambiguous = winner_flipped or gap <= ambiguity_margin
         if ambiguous:
             ambiguous_groups.add(group)
@@ -2118,6 +2210,9 @@ def detect_progressive_ambiguous_groups(
             'top12_gap': None if not math.isfinite(gap) else gap,
             'seed_noise_median': noise,
             'ambiguity_margin': ambiguity_margin,
+            'ambiguity_mode': ambiguity_mode,
+            'configured_gap_threshold': gap_threshold,
+            'configured_noise_margin_mult': noise_margin_mult,
             'ambiguous': ambiguous,
         }
     return ambiguous_groups, details
@@ -2160,7 +2255,11 @@ def execute_round_progressive_multiseed(
     eligibility_group_key: str | None = None,
     screening_diagnostic_name: str | None = None,
     screening_diagnostic_selector: Any | None = None,
+    ambiguity_mode: str = P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY,
+    gap_threshold: float | None = None,
+    noise_margin_mult: float = P1_PROGRESSIVE_NOISE_MARGIN_MULT,
 ) -> dict[str, Any]:
+    ambiguity_mode = normalize_progressive_ambiguity_mode(ambiguity_mode)
     if len(seed_offsets) <= 1:
         return execute_round_multiseed(
             run_dir=run_dir,
@@ -2198,7 +2297,9 @@ def execute_round_progressive_multiseed(
                 'probe_selector_name': probe_selector_name,
                 'probe_signature_data': probe_signature_data,
                 'group_key': group_key,
-                'noise_margin_mult': P1_PROGRESSIVE_NOISE_MARGIN_MULT,
+                'ambiguity_mode': ambiguity_mode,
+                'gap_threshold': gap_threshold,
+                'noise_margin_mult': noise_margin_mult,
                 'seed1_probe_compare_scope': 'probe_candidates_only',
                 'screening_diagnostic_name': screening_diagnostic_name,
             },
@@ -2304,6 +2405,9 @@ def execute_round_progressive_multiseed(
         probe_ranking=probe_ranking,
         group_key=group_key,
         ranking_mode=ranking_mode,
+        ambiguity_mode=ambiguity_mode,
+        gap_threshold=gap_threshold,
+        noise_margin_mult=noise_margin_mult,
     )
     decision_candidates = build_progressive_active_candidates(
         all_candidates=candidates,
@@ -2364,6 +2468,9 @@ def execute_round_progressive_multiseed(
             'group_key': group_key,
             'ranking_mode': ranking_mode,
             'eligibility_group_key': eligibility_group_key,
+            'ambiguity_mode': ambiguity_mode,
+            'gap_threshold': gap_threshold,
+            'noise_margin_mult': noise_margin_mult,
             'seed1_probe_compare_scope': 'probe_candidates_only',
             'probe_candidate_count': len(probe_candidates),
             'decision_candidate_count': len(decision_candidates),
@@ -3957,6 +4064,33 @@ def current_protocol_decide_mix_payload() -> list[dict[str, float | str]]:
     ]
 
 
+def current_p1_winner_refine_center_arm_payload() -> list[str]:
+    return list(P1_WINNER_REFINE_CENTER_ARM_NAMES)
+
+
+def current_p1_winner_refine_search_space_payload() -> dict[str, Any]:
+    return {
+        'winner_refine_center_mode': P1_WINNER_REFINE_CENTER_MODE,
+        'winner_refine_center_protocol_arm': P1_WINNER_REFINE_PROTOCOL_ARM,
+        'winner_refine_center_arm_names': current_p1_winner_refine_center_arm_payload(),
+        'winner_refine_seed_offsets': list(P1_WINNER_REFINE_SEED_OFFSETS),
+        'winner_refine_total_scale_factors': list(P1_WINNER_REFINE_TOTAL_SCALE_FACTORS),
+        'winner_refine_transfer_delta': P1_WINNER_REFINE_TRANSFER_DELTA,
+    }
+
+
+def current_p1_winner_refine_explicit_center_arm_names(protocol_arm: str) -> tuple[str, ...]:
+    if P1_WINNER_REFINE_CENTER_MODE != 'explicit_arm_names':
+        return ()
+    if protocol_arm != P1_WINNER_REFINE_PROTOCOL_ARM:
+        raise RuntimeError(
+            'current winner_refine defaults are frozen for '
+            f'{P1_WINNER_REFINE_PROTOCOL_ARM}, but protocol_decide selected {protocol_arm}; '
+            'update stage05_current_defaults.py and docs before continuing'
+        )
+    return P1_WINNER_REFINE_CENTER_ARM_NAMES
+
+
 def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
     search_space = p1.get('search_space') or {}
     if not search_space:
@@ -3976,6 +4110,37 @@ def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
     if str(
         search_space.get('inherited_single_head_source', P1_SINGLE_HEAD_CALIBRATION_SOURCE)
     ) != str(P1_SINGLE_HEAD_CALIBRATION_SOURCE):
+        return False
+    if str(
+        search_space.get(
+            'protocol_decide_progressive_ambiguity_mode',
+            P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE,
+        )
+    ) != str(P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE):
+        return False
+    if float(
+        search_space.get(
+            'protocol_decide_progressive_gap_threshold',
+            P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD,
+        )
+    ) != float(P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD):
+        return False
+    if float(
+        search_space.get(
+            'protocol_decide_progressive_noise_margin_mult',
+            P1_PROGRESSIVE_NOISE_MARGIN_MULT,
+        )
+    ) != float(P1_PROGRESSIVE_NOISE_MARGIN_MULT):
+        return False
+    if 'winner_refine_centers' in search_space:
+        return False
+    if str(search_space.get('winner_refine_center_mode', '')) != str(P1_WINNER_REFINE_CENTER_MODE):
+        return False
+    if str(search_space.get('winner_refine_center_protocol_arm', '')) != str(
+        P1_WINNER_REFINE_PROTOCOL_ARM
+    ):
+        return False
+    if list(search_space.get('winner_refine_center_arm_names', [])) != current_p1_winner_refine_center_arm_payload():
         return False
     selection_policy = search_space.get('selection_policy') or {}
     if float(selection_policy.get('policy_loss_epsilon', P1_POLICY_LOSS_EPSILON)) != float(
@@ -4013,6 +4178,7 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
     if historical_snapshot:
         lines.extend([
             '> historical snapshot: this file records one run output and may not match the current default search space.',
+            '> The search_space section below may contain retired keys or retired ambiguity settings from that run.',
             '> For current defaults, prefer `docs/agent/current-plan.md`, `docs/agent/mainline.md`, `docs/status/stage05-verified-status.md`, and `docs/status/p1-selection-canonical.md`.',
             '',
         ])
@@ -4024,12 +4190,15 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
 
     final = state.get('final_conclusion') or {}
     if final:
+        p0_top4 = final.get('p0_stage1_top4') or []
+        p0_top4_display = ', '.join(p0_top4) if p0_top4 else 'TBD'
         lines.extend([
             '## 当前结论',
             '',
-            f'- P0 下游种子 top4：`{", ".join(final.get("p0_stage1_top4", []))}`',
+            f'- P0 下游种子 top4：`{p0_top4_display}`',
             f'- P0 round3 winner：`{final.get("p0_winner", "TBD")}`',
-            f'- P1 总胜者：`{final.get("p1_winner", "TBD")}`',
+            f'- P1 协议 winner：`{final.get("p1_protocol_winner", "TBD")}`',
+            f'- P1 最终总胜者：`{final.get("p1_winner", "TBD")}`',
             f'- P2 默认 checkpoint：`{final.get("p2_default_checkpoint", "TBD")}`',
             f'- 正式训练：`{final.get("formal_status", "pending")}`',
             '',
@@ -4165,16 +4334,29 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
                 'inherited_single_head_source',
                 'protocol_decide_total_budget_ratios',
                 'protocol_decide_mixes',
+                'protocol_decide_progressive_ambiguity_mode',
+                'protocol_decide_progressive_gap_threshold',
+                'protocol_decide_progressive_noise_margin_mult',
                 'rank_opp_combo_factor',
                 'rank_danger_combo_factor',
                 'opp_danger_combo_factor',
                 'triple_combo_factor',
                 'protocol_decide_probe_keep_per_protocol',
+                'winner_refine_center_mode',
+                'winner_refine_center_protocol_arm',
+                'winner_refine_center_arm_names',
                 'winner_refine_total_scale_factors',
                 'winner_refine_transfer_delta',
             ):
                 if key in search_space:
-                    lines.append(f"- `{key} = {search_space[key]}`")
+                    value = search_space[key]
+                    if (
+                        historical_snapshot
+                        and key == 'protocol_decide_progressive_ambiguity_mode'
+                        and str(value) == P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY
+                    ):
+                        value = 'historical_retired_mode'
+                    lines.append(f"- `{key} = {value}`")
             lines.append('')
         for subkey in (
             'calibration_round',
@@ -4698,7 +4880,7 @@ def run_p1(
     calibration['shared_rank_template_mean'] = rank_template_mean
     calibration['calibration_protocol_arms'] = list(calibration_protocol_arms)
     p1_state['calibration'] = calibration
-    p1_state['search_space'] = {
+    p1_state['search_space'] = apply_protocol_decide_progressive_settings({
         'budget_ratios': calibration['budget_ratios'],
         'calibration_mode': calibration.get('calibration_mode', P1_CALIBRATION_DEFAULT_MODE),
         'calibration_mode_note': calibration.get(
@@ -4710,15 +4892,7 @@ def run_p1(
         'calibration_protocol_arms': list(calibration.get('calibration_protocol_arms', [])),
         'inherited_single_head_source': calibration.get('inherited_single_head_source'),
         'protocol_decide_total_budget_ratios': list(P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
-        'protocol_decide_mixes': [
-            {
-                'name': name,
-                'rank_share': rank_share,
-                'opp_share': opp_share,
-                'danger_share': danger_share,
-            }
-            for name, rank_share, opp_share, danger_share in P1_PROTOCOL_DECIDE_MIXES
-        ],
+        'protocol_decide_mixes': current_protocol_decide_mix_payload(),
         'ranking_mode': P1_RANKING_MODE,
         'eligibility_group_key': P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
         'policy_loss_epsilon': P1_POLICY_LOSS_EPSILON,
@@ -4732,10 +4906,7 @@ def run_p1(
         'protocol_decide_seed_offsets': list(P1_PROTOCOL_DECIDE_SEED_OFFSETS),
         'protocol_decide_seed_strategy': 'progressive_probe_then_expand',
         'protocol_decide_probe_keep_per_protocol': P1_PROTOCOL_DECIDE_PROBE_KEEP_PER_PROTOCOL,
-        'winner_refine_seed_offsets': list(P1_WINNER_REFINE_SEED_OFFSETS),
-        'winner_refine_centers': P1_WINNER_REFINE_CENTERS,
-        'winner_refine_total_scale_factors': list(P1_WINNER_REFINE_TOTAL_SCALE_FACTORS),
-        'winner_refine_transfer_delta': P1_WINNER_REFINE_TRANSFER_DELTA,
+        **current_p1_winner_refine_search_space_payload(),
         'ablation_seed_offsets': list(P1_ABLATION_SEED_OFFSETS),
         'rank_opp_combo_factor': calibration.get('rank_opp_combo_factor', 1.0),
         'rank_danger_combo_factor': calibration.get('rank_danger_combo_factor', 1.0),
@@ -4755,7 +4926,7 @@ def run_p1(
         'protocol_joint_combo_factors': calibration.get('protocol_joint_combo_factors', {}),
         'probe_weight': P1_CALIBRATION_PROBE_WEIGHT,
         'selection_policy': p1_selection_policy_metadata(),
-    }
+    })
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
     if stop_after_calibration:
@@ -4785,6 +4956,9 @@ def run_p1(
         },
         ranking_mode=P1_RANKING_MODE,
         eligibility_group_key=P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+        ambiguity_mode=p1_state['search_space']['protocol_decide_progressive_ambiguity_mode'],
+        gap_threshold=p1_state['search_space']['protocol_decide_progressive_gap_threshold'],
+        noise_margin_mult=p1_state['search_space']['protocol_decide_progressive_noise_margin_mult'],
         screening_diagnostic_name='ce_only_anchor',
         screening_diagnostic_selector=lambda entry: is_p1_protocol_decide_diagnostic_meta(
             entry.get('candidate_meta', {})
@@ -4807,7 +4981,9 @@ def run_p1(
     winner_centers = select_p1_protocol_centers(
         protocol_decide_round['ranking'],
         protocol_arm=selected_protocol_arm,
-        keep=P1_WINNER_REFINE_CENTERS,
+        explicit_arm_names=current_p1_winner_refine_explicit_center_arm_names(
+            selected_protocol_arm
+        ),
     )
     p1_state['winner_refine_centers'] = [candidate.arm_name for candidate in winner_centers]
     winner_refine_round = execute_round_multiseed(

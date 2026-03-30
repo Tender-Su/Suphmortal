@@ -4,6 +4,8 @@
 
 ## 当前条目
 
+- `2026-03-30-p1-protocol-decide-closeout.md`
+  - `protocol_decide` 为什么可以正式收口、失败 arm 补跑为什么必要、以及这轮的人机分工
 - `2026-03-14-reflection.md`
   - 个人研究判断、能力定位、对 `Stage 0.5 / Stage 1` 的早期结构性怀疑
 - `2026-03-26-human-ai-selector-reflection.md`

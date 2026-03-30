@@ -77,7 +77,7 @@ def build_protocol_candidates(protocol_arms: list[str]) -> list[fidelity.Candida
 
 
 def build_p1_search_space(calibration: dict[str, object]) -> dict[str, object]:
-    return {
+    return fidelity.apply_protocol_decide_progressive_settings({
         'budget_ratios': calibration['budget_ratios'],
         'calibration_mode': calibration.get('calibration_mode', fidelity.P1_CALIBRATION_DEFAULT_MODE),
         'calibration_mode_note': calibration.get(
@@ -89,15 +89,7 @@ def build_p1_search_space(calibration: dict[str, object]) -> dict[str, object]:
         'calibration_protocol_arms': list(calibration.get('calibration_protocol_arms', [])),
         'inherited_single_head_source': calibration.get('inherited_single_head_source'),
         'protocol_decide_total_budget_ratios': list(fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
-        'protocol_decide_mixes': [
-            {
-                'name': name,
-                'rank_share': rank_share,
-                'opp_share': opp_share,
-                'danger_share': danger_share,
-            }
-            for name, rank_share, opp_share, danger_share in fidelity.P1_PROTOCOL_DECIDE_MIXES
-        ],
+        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
         'ranking_mode': fidelity.P1_RANKING_MODE,
         'eligibility_group_key': fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
         'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
@@ -111,10 +103,7 @@ def build_p1_search_space(calibration: dict[str, object]) -> dict[str, object]:
         'protocol_decide_seed_offsets': list(fidelity.P1_PROTOCOL_DECIDE_SEED_OFFSETS),
         'protocol_decide_seed_strategy': 'progressive_probe_then_expand',
         'protocol_decide_probe_keep_per_protocol': fidelity.P1_PROTOCOL_DECIDE_PROBE_KEEP_PER_PROTOCOL,
-        'winner_refine_seed_offsets': list(fidelity.P1_WINNER_REFINE_SEED_OFFSETS),
-        'winner_refine_centers': fidelity.P1_WINNER_REFINE_CENTERS,
-        'winner_refine_total_scale_factors': list(fidelity.P1_WINNER_REFINE_TOTAL_SCALE_FACTORS),
-        'winner_refine_transfer_delta': fidelity.P1_WINNER_REFINE_TRANSFER_DELTA,
+        **fidelity.current_p1_winner_refine_search_space_payload(),
         'ablation_seed_offsets': list(fidelity.P1_ABLATION_SEED_OFFSETS),
         'rank_opp_combo_factor': calibration.get('rank_opp_combo_factor', 1.0),
         'rank_danger_combo_factor': calibration.get('rank_danger_combo_factor', 1.0),
@@ -134,7 +123,7 @@ def build_p1_search_space(calibration: dict[str, object]) -> dict[str, object]:
         'protocol_joint_combo_factors': calibration.get('protocol_joint_combo_factors', {}),
         'probe_weight': fidelity.P1_CALIBRATION_PROBE_WEIGHT,
         'selection_policy': fidelity.p1_selection_policy_metadata(),
-    }
+    })
 
 
 def normalize_protocol_arm_list(value: object) -> list[str] | None:
@@ -359,23 +348,19 @@ def build_protocol_compare(ranked: list[dict]) -> list[dict]:
     )
 
 
-def select_protocol_centers(ranked: list[dict], *, protocol_arm: str, keep: int) -> list[fidelity.CandidateSpec]:
-    winners: list[fidelity.CandidateSpec] = []
-    for entry in ranked:
-        entry_protocol = str(entry.get('candidate_meta', {}).get('protocol_arm', ''))
-        entry_meta = entry.get('candidate_meta', {})
-        if (
-            entry_protocol != protocol_arm
-            or not entry.get('valid')
-            or not fidelity.is_p1_winner_refine_center_meta(entry_meta)
-        ):
-            continue
-        winners.append(fidelity.candidate_from_entry(entry))
-        if len(winners) >= keep:
-            break
-    if not winners:
-        raise RuntimeError(f'no valid all_three winner_refine centers for protocol {protocol_arm}')
-    return winners
+def select_protocol_centers(
+    ranked: list[dict],
+    *,
+    protocol_arm: str,
+    keep: int | None = None,
+    explicit_arm_names: list[str] | tuple[str, ...] | None = None,
+) -> list[fidelity.CandidateSpec]:
+    return fidelity.select_p1_protocol_centers(
+        ranked,
+        protocol_arm=protocol_arm,
+        keep=keep,
+        explicit_arm_names=explicit_arm_names,
+    )
 
 
 def run_p1_only(
@@ -513,6 +498,10 @@ def run_p1_only(
             p1_state['calibration'] = calibration
             if not isinstance(p1_state.get('search_space'), dict):
                 p1_state['search_space'] = build_p1_search_space(calibration)
+            else:
+                p1_state['search_space'] = fidelity.apply_protocol_decide_progressive_settings(
+                    p1_state.get('search_space'),
+                )
 
         if stop_after_calibration:
             state['status'] = 'stopped_after_p1_calibration'
@@ -534,6 +523,10 @@ def run_p1_only(
                 or ''
             ).strip()
             if not isinstance(protocol_decide_round, dict):
+                search_space = fidelity.apply_protocol_decide_progressive_settings(
+                    p1_state.get('search_space'),
+                )
+                p1_state['search_space'] = search_space
                 state['status'] = 'running_p1_protocol_decide'
                 fidelity.atomic_write_json(state_path, state)
                 fidelity.update_results_doc(run_dir, state)
@@ -562,6 +555,9 @@ def run_p1_only(
                     },
                     ranking_mode=fidelity.P1_RANKING_MODE,
                     eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+                    ambiguity_mode=search_space['protocol_decide_progressive_ambiguity_mode'],
+                    gap_threshold=search_space['protocol_decide_progressive_gap_threshold'],
+                    noise_margin_mult=search_space['protocol_decide_progressive_noise_margin_mult'],
                 )
                 p1_state['protocol_decide_round'] = protocol_decide_round
                 fidelity.update_results_doc(run_dir, state)
@@ -596,7 +592,9 @@ def run_p1_only(
                     winner_centers = select_protocol_centers(
                         protocol_decide_round['ranking'],
                         protocol_arm=selected_protocol_arm,
-                        keep=fidelity.P1_WINNER_REFINE_CENTERS,
+                        explicit_arm_names=fidelity.current_p1_winner_refine_explicit_center_arm_names(
+                            selected_protocol_arm
+                        ),
                     )
                     p1_state['winner_refine_centers'] = [candidate.arm_name for candidate in winner_centers]
                     winner_refine_round = fidelity.execute_round_multiseed(

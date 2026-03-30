@@ -18,6 +18,36 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertTrue(all(candidate.meta['protocol_arm'] == candidate.arm_name for candidate in candidates))
         self.assertTrue(all(candidate.meta['selection_source'] == 'frozen_top3' for candidate in candidates))
 
+    def test_build_p1_search_space_uses_explicit_winner_refine_defaults(self):
+        search_space = p1_only.build_p1_search_space(
+            {
+                'budget_ratios': [0.0, 0.25],
+                'opp_weight_per_budget_unit': 0.052,
+                'danger_weight_per_budget_unit': 0.18,
+            }
+        )
+
+        self.assertEqual(
+            p1_only.fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE,
+            search_space['protocol_decide_progressive_ambiguity_mode'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD,
+            search_space['protocol_decide_progressive_gap_threshold'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.P1_WINNER_REFINE_CENTER_MODE,
+            search_space['winner_refine_center_mode'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+            search_space['winner_refine_center_protocol_arm'],
+        )
+        self.assertEqual(
+            list(p1_only.fidelity.P1_WINNER_REFINE_CENTER_ARM_NAMES),
+            search_space['winner_refine_center_arm_names'],
+        )
+
     def test_select_protocol_centers_excludes_ce_only_anchor(self):
         protocol_arm = p1_only.FROZEN_TOP3[0]
         ce_only = p1_only.fidelity.CandidateSpec(
@@ -422,6 +452,11 @@ class Stage05P1OnlyTests(unittest.TestCase):
                         ],
                     },
                 ),
+                patch.object(
+                    p1_only.fidelity,
+                    'current_p1_winner_refine_explicit_center_arm_names',
+                    return_value=(refine_winner.arm_name,),
+                ),
                 patch.object(p1_only, 'build_protocol_compare', return_value=protocol_compare),
             ):
                 state = p1_only.run_p1_only(
@@ -580,6 +615,11 @@ class Stage05P1OnlyTests(unittest.TestCase):
                             }
                         ],
                     },
+                ),
+                patch.object(
+                    p1_only.fidelity,
+                    'current_p1_winner_refine_explicit_center_arm_names',
+                    return_value=(refine_winner.arm_name,),
                 ),
                 patch.object(p1_only, 'build_protocol_compare', return_value=protocol_compare),
             ):
@@ -751,6 +791,11 @@ class Stage05P1OnlyTests(unittest.TestCase):
                         }
                     ],
                 ) as build_protocol_compare,
+                patch.object(
+                    p1_only.fidelity,
+                    'current_p1_winner_refine_explicit_center_arm_names',
+                    return_value=(refine_winner.arm_name,),
+                ),
                 patch.object(p1_only, 'select_protocol_centers', return_value=[refine_winner]) as select_protocol_centers,
             ):
                 state = p1_only.run_p1_only(

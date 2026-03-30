@@ -13,6 +13,7 @@
 - **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; only current mainline, current live status, and immediate next step.
 - **`docs/agent/mainline.md`** — stable defaults, stage map, frozen conclusions, and current active run.
 - **`docs/agent/experiment-workflow.md`** — current stage workflow, manual stop points, and operating discipline.
+- **`docs/agent/laptop-remote-ops.md`** — laptop-node remote-operation notes: SSH / PowerShell behavior, dataset status, current loader defaults, and proven remote execution patterns.
 - **`docs/status/stage05-verified-status.md`** — manually maintained verified Stage 0.5 status; use this when the auto-generated summary lags behind raw artifacts.
 - **`docs/status/p1-selection-canonical.md`** — the only valid P1 winner-selection rubric.
 - **`docs/status/stage05-fidelity-results.md`** — auto-generated Stage 0.5 fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `stage05-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.

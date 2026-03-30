@@ -63,6 +63,20 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                         'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
                         'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
                         'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
+                        'protocol_decide_progressive_ambiguity_mode': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+                        ),
+                        'protocol_decide_progressive_gap_threshold': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+                        ),
+                        'protocol_decide_progressive_noise_margin_mult': (
+                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
+                        ),
+                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
+                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+                        'winner_refine_center_arm_names': (
+                            fidelity.current_p1_winner_refine_center_arm_payload()
+                        ),
                         'selection_policy': {
                             'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
                             'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
@@ -85,6 +99,20 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                         ],
                         'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
                         'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
+                        'protocol_decide_progressive_ambiguity_mode': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+                        ),
+                        'protocol_decide_progressive_gap_threshold': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+                        ),
+                        'protocol_decide_progressive_noise_margin_mult': (
+                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
+                        ),
+                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
+                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+                        'winner_refine_center_arm_names': (
+                            fidelity.current_p1_winner_refine_center_arm_payload()
+                        ),
                         'selection_policy': {
                             'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
                             'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
@@ -106,6 +134,20 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                         'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
                         'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
                         'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
+                        'protocol_decide_progressive_ambiguity_mode': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+                        ),
+                        'protocol_decide_progressive_gap_threshold': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+                        ),
+                        'protocol_decide_progressive_noise_margin_mult': (
+                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
+                        ),
+                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
+                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+                        'winner_refine_center_arm_names': (
+                            fidelity.current_p1_winner_refine_center_arm_payload()
+                        ),
                         'selection_policy': {
                             'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
                             'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
@@ -114,6 +156,66 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_p1_snapshot_uses_current_defaults_rejects_legacy_winner_refine_count_key(self):
+        self.assertFalse(
+            fidelity.p1_snapshot_uses_current_defaults(
+                {
+                    'search_space': {
+                        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
+                        'protocol_decide_total_budget_ratios': list(
+                            fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
+                        ),
+                        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
+                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
+                        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
+                        'protocol_decide_progressive_ambiguity_mode': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
+                        ),
+                        'protocol_decide_progressive_gap_threshold': (
+                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
+                        ),
+                        'protocol_decide_progressive_noise_margin_mult': (
+                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
+                        ),
+                        'winner_refine_centers': 2,
+                        'selection_policy': {
+                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
+                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
+                        },
+                    }
+                }
+            )
+        )
+
+    def test_apply_protocol_decide_progressive_settings_defaults_to_flip_or_gap(self):
+        search_space = fidelity.apply_protocol_decide_progressive_settings({})
+
+        self.assertEqual(
+            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE,
+            search_space['protocol_decide_progressive_ambiguity_mode'],
+        )
+        self.assertEqual(
+            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD,
+            search_space['protocol_decide_progressive_gap_threshold'],
+        )
+        self.assertEqual(
+            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT,
+            search_space['protocol_decide_progressive_noise_margin_mult'],
+        )
+
+    def test_apply_protocol_decide_progressive_settings_preserves_explicit_legacy_mode(self):
+        search_space = fidelity.apply_protocol_decide_progressive_settings(
+            {
+                'protocol_decide_progressive_ambiguity_mode': fidelity.P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY,
+            }
+        )
+
+        self.assertEqual(
+            fidelity.P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY,
+            search_space['protocol_decide_progressive_ambiguity_mode'],
+        )
+        self.assertIsNone(search_space['protocol_decide_progressive_gap_threshold'])
 
     def test_p1_snapshot_uses_current_defaults_rejects_nondefault_single_head_source(self):
         self.assertFalse(
@@ -135,6 +237,30 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_update_results_doc_shows_protocol_winner_before_final_p1_winner(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / 'fidelity_run'
+            run_dir.mkdir()
+            results_path = Path(tmp_dir) / 'stage05-fidelity-results.md'
+            state = {
+                'status': 'stopped_after_p1_protocol_decide',
+                'p1': {},
+                'final_conclusion': {
+                    'p1_protocol_winner': 'C_A2x_cosine_broad_to_recent_strong_24m_12m',
+                },
+            }
+
+            with patch.object(fidelity, 'RESULTS_DOC_PATH', results_path):
+                fidelity.update_results_doc(run_dir, state)
+
+            text = results_path.read_text(encoding='utf-8')
+            self.assertIn(
+                '- P1 协议 winner：`C_A2x_cosine_broad_to_recent_strong_24m_12m`',
+                text,
+            )
+            self.assertIn('- P1 最终总胜者：`TBD`', text)
+            self.assertIn('- P0 下游种子 top4：`TBD`', text)
 
     def test_p1_calibration_defaults_to_single_seed(self):
         self.assertEqual([0], fidelity.P1_CALIBRATION_SEED_OFFSETS)
@@ -460,6 +586,51 @@ class Stage05FidelityCacheTests(unittest.TestCase):
 
         self.assertEqual(['all_three_anchor'], [candidate.arm_name for candidate in centers])
 
+    def test_select_p1_protocol_centers_supports_explicit_arm_names(self):
+        protocol_arm = fidelity.P1_WINNER_REFINE_PROTOCOL_ARM
+        first = make_candidate(
+            'center_a',
+            meta={
+                'protocol_arm': protocol_arm,
+                'aux_family': 'all_three',
+                'rank_budget_ratio': 0.04,
+                'opp_budget_ratio': 0.03,
+                'danger_budget_ratio': 0.03,
+            },
+        )
+        second = make_candidate(
+            'center_b',
+            meta={
+                'protocol_arm': protocol_arm,
+                'aux_family': 'all_three',
+                'rank_budget_ratio': 0.03,
+                'opp_budget_ratio': 0.01,
+                'danger_budget_ratio': 0.04,
+            },
+        )
+        third = make_candidate(
+            'center_c',
+            meta={
+                'protocol_arm': protocol_arm,
+                'aux_family': 'all_three',
+                'rank_budget_ratio': 0.05,
+                'opp_budget_ratio': 0.02,
+                'danger_budget_ratio': 0.04,
+            },
+        )
+
+        centers = fidelity.select_p1_protocol_centers(
+            [
+                make_ranking_entry(first, valid=True, full_recent_loss=0.90),
+                make_ranking_entry(second, valid=True, full_recent_loss=0.91),
+                make_ranking_entry(third, valid=True, full_recent_loss=0.92),
+            ],
+            protocol_arm=protocol_arm,
+            explicit_arm_names=[third.arm_name, first.arm_name],
+        )
+
+        self.assertEqual([third.arm_name, first.arm_name], [candidate.arm_name for candidate in centers])
+
     def test_build_p1_winner_refine_candidates_ignores_non_all_three_centers(self):
         protocol = fidelity.CandidateSpec(
             arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
@@ -636,6 +807,11 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                             ],
                         },
                     ],
+                ),
+                patch.object(
+                    fidelity,
+                    'current_p1_winner_refine_explicit_center_arm_names',
+                    return_value=(refine_winner.arm_name,),
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, 'p1_ablation_round produced no valid candidates'):
@@ -1962,6 +2138,11 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             patch.object(fidelity, 'derive_p1_budget_calibration', return_value=calibration),
             patch.object(fidelity, 'execute_round_progressive_multiseed', side_effect=fake_execute_round_progressive_multiseed),
             patch.object(fidelity, 'execute_round_multiseed', side_effect=fake_execute_round_multiseed),
+            patch.object(
+                fidelity,
+                'current_p1_winner_refine_explicit_center_arm_names',
+                return_value=(protocol_entry['arm_name'],),
+            ),
             patch.object(fidelity, 'atomic_write_json'),
             patch.object(fidelity, 'update_results_doc'),
             patch.object(fidelity, 'rank_round_entries', side_effect=tracking_rank_round_entries),

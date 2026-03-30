@@ -5,6 +5,7 @@ sys.path.insert(0, r"C:\Users\numbe\Desktop\MahjongAI\mortal")
 import run_stage05_ab as ab
 import run_stage05_loader_ab as loader_ab
 import run_stage05_fidelity as fidelity
+import stage05_current_defaults as stage05_defaults
 
 # Historical explicit p-core benchmark helper. This is not a default runtime path.
 
@@ -14,7 +15,7 @@ grouped = ab.group_files_by_month(ab.load_all_files())
 eval_splits = ab.build_eval_splits(grouped, 20260326 + 77, {'full_recent': 64, 'old_regression': 32})
 candidate = loader_ab.load_reference_candidate(
     run_name='s05_fidelity_p1_top3_20260325_022900',
-    protocol_arm='C_A2y_cosine_broad_to_recent_strong_12m_6m',
+    protocol_arm=stage05_defaults.CURRENT_PRIMARY_PROTOCOL_ARM,
     rank_budget_ratio=0.15,
     opp_budget_ratio=0.03,
     danger_budget_ratio=0.10,

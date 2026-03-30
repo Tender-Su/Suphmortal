@@ -44,11 +44,32 @@
 - `p1_ablation_round`
   - 负责比较 `all_three / drop_* / ce_only` 的边际贡献
 
-## 当前默认的 `protocol_decide` 网格
+## 当前默认的 protocol_decide 搜索规则
 
-- `total_budget_ratios = [0.09, 0.12]`
-- `mixes = anchor / rank_lean / opp_lean / danger_lean`
-- `opp_lean` 使用对称版 `0.38 / 0.31 / 0.31`
+- 网格固定为：
+  - `total_budget_ratios = [0.09, 0.12]`
+  - `mixes = anchor / rank_lean / opp_lean / danger_lean`
+- 当前 seed2 扩展规则固定为：
+  - `ambiguity_mode = flip_or_gap`
+  - `gap_threshold = 0.001`
+- 含义：
+  - 如果 probe 后 winner 发生翻转，展开该协议的完整 seed2
+  - 如果 probe 后 winner 未翻转，但 `top1-top2 recent_policy_loss gap <= 0.001`，也展开完整 seed2
+  - 否则不展开
+- 历史旧 `ambig` 规则只作为旧 run 兼容字段存在，不再是当前默认
+
+## 当前默认的 winner_refine 搜索规则
+
+- 当前只在 `A2x` 协议内部继续
+- 当前默认不是自动取协议内前 `k` 名 center
+- 当前冻结三中心：
+  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037`
+  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041`
+  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043`
+- 当前局部扰动规则：
+  - `total_scale_factors = [0.85, 1.0, 1.15]`
+  - `transfer_delta = 0.01`
+  - `step_scale = 1.5`
 
 ## `ce_only` 现在是什么意思
 
@@ -56,7 +77,7 @@
 - 如果 `all_three` 稳定输给 `ce_only`，应解释为当前三头配比失败
 - 只有 `all_three` 稳定赢过 `drop_*` 和 `ce_only`，才能说明当前三头全开真的成立
 
-## `calibration` 可以产出什么
+## calibration 可以产出什么
 
 - `opp_weight_per_budget_unit`
 - `danger_weight_per_budget_unit`
@@ -78,9 +99,11 @@
 - 不要用 `calibration` 单独宣布“哪一个头赢了”
 - 不要把各类 `acc` 重新塞回排序键
 - 不要把旧 `solo / pairwise / joint refine` 结构重新当当前主线
+- 不要把 `winner_refine` 理解成自动 `top-k center`
 
 ## 代码锚点
 
+- `mortal/stage05_current_defaults.py`
 - `mortal/run_stage05_fidelity.py`
 - `mortal/run_stage05_p1_only.py`
 - `mortal/stage05_selection.py`
