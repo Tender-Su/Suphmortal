@@ -170,7 +170,12 @@ def load_refine_context(run_dir: Path) -> dict[str, Any]:
         raise RuntimeError(
             'p1 protocol_decide_round is missing; distributed winner_refine requires a completed protocol_decide'
         )
-    seed = int(state.get('seed') or p1_only.DEFAULT_P1_SEED)
+    seed = p1_only.infer_resume_seed(state)
+    if seed is None:
+        raise RuntimeError(
+            'could not recover the original p1 base seed from state.json; '
+            'distributed winner_refine requires a run state with recoverable round seeds'
+        )
     protocol_arms = p1_only.dedupe_protocol_arms(
         p1_state.get('protocol_arms') or state.get('selected_protocol_arms') or list(p1_only.FROZEN_TOP3)
     )

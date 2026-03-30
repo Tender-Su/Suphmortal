@@ -115,10 +115,15 @@ def build_remote_python_command(
     remote_result_path: Path,
     command_args: list[str],
 ) -> list[str]:
-    remote_script = Path(worker.repo or str(script_path.parent.parent)) / script_path.name
+    repo_root = script_path.parent.parent
+    try:
+        relative_script = script_path.relative_to(repo_root)
+    except ValueError:
+        relative_script = Path(script_path.name)
+    remote_script = Path(worker.repo or str(repo_root)) / relative_script
     quoted_args = ' '.join(quote_ps(str(arg)) for arg in command_args)
     ps_command = (
-        f"Set-Location {quote_ps(worker.repo or str(script_path.parent.parent))}; "
+        f"Set-Location {quote_ps(worker.repo or str(repo_root))}; "
         f"& {quote_ps(worker.python or sys.executable)} "
         f"{quote_ps(str(remote_script))} "
         f"{quoted_args} "
@@ -239,19 +244,33 @@ def handle_finished_json_task(
         )
         return
     local_result_path = active.local_result_path
-    if active.worker.kind == 'remote':
-        if active.remote_result_path is None:
-            raise ValueError('remote active task requires remote_result_path')
-        fetch_remote_result(active.worker, active.remote_result_path, local_result_path)
-    if not local_result_path.exists():
+    try:
+        if active.worker.kind == 'remote':
+            if active.remote_result_path is None:
+                raise ValueError('remote active task requires remote_result_path')
+            fetch_remote_result(active.worker, active.remote_result_path, local_result_path)
+        if not local_result_path.exists():
+            mark_task_failed(
+                task_state,
+                f'missing task result json at {local_result_path}',
+                max_attempts=max_attempts,
+                finished_at=finished_at,
+            )
+            return
+        validate_result(local_result_path)
+    except Exception as exc:
+        if local_result_path.exists():
+            try:
+                local_result_path.unlink()
+            except OSError:
+                pass
         mark_task_failed(
             task_state,
-            f'missing task result json at {local_result_path}',
+            f'worker `{active.worker.label}` result handling failed: {exc}',
             max_attempts=max_attempts,
             finished_at=finished_at,
         )
         return
-    validate_result(local_result_path)
     task_state['status'] = 'completed'
     task_state['finished_at'] = finished_at
     task_state.pop('error', None)

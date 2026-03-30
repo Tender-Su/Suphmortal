@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import distributed_dispatch as dispatch_module
 import run_stage05_fidelity as fidelity
 import run_stage05_winner_refine_distributed as distributed
 
@@ -51,6 +52,101 @@ def make_ranking_entry(
 
 
 class WinnerRefineDistributedTests(unittest.TestCase):
+    def test_build_remote_python_command_preserves_mortal_relative_path(self):
+        worker = dispatch_module.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python=r'C:\Python\python.exe',
+            host='mahjong-laptop',
+            repo=r'C:\Users\numbe\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+        )
+
+        command = dispatch_module.build_remote_python_command(
+            worker=worker,
+            script_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\mortal\run_stage05_winner_refine_distributed.py'),
+            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
+            command_args=['run-task', '--run-name', 'demo'],
+        )
+
+        self.assertEqual('ssh', command[0])
+        self.assertIn(
+            r"C:\Users\numbe\Desktop\MahjongAI\mortal\run_stage05_winner_refine_distributed.py",
+            command[-1],
+        )
+
+    def test_handle_finished_json_task_retries_remote_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_result_path = Path(tmp_dir) / 'result.json'
+            task_state = {
+                'status': 'running',
+                'attempts': 1,
+            }
+            active = dispatch_module.ActiveTask(
+                worker=dispatch_module.WorkerSpec(
+                    kind='remote',
+                    label='laptop',
+                    python='python',
+                    host='mahjong-laptop',
+                ),
+                stage_name='seed1',
+                task_id='task_a',
+                task_state=task_state,
+                process=type('Proc', (), {'returncode': 0})(),
+                log_path=Path(tmp_dir) / 'task.log',
+                local_result_path=local_result_path,
+                remote_result_path=Path(r'C:\remote\result.json'),
+            )
+
+            with patch.object(
+                dispatch_module,
+                'fetch_remote_result',
+                side_effect=RuntimeError('scp failed'),
+            ):
+                dispatch_module.handle_finished_json_task(
+                    active=active,
+                    max_attempts=2,
+                    finished_at='2026-03-31 10:00:00',
+                    validate_result=lambda path: None,
+                )
+
+            self.assertEqual('pending', task_state['status'])
+            self.assertIn('result handling failed', task_state['error'])
+
+    def test_handle_finished_json_task_retries_validate_failure_and_cleans_partial_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_result_path = Path(tmp_dir) / 'result.json'
+            local_result_path.write_text('partial', encoding='utf-8')
+            task_state = {
+                'status': 'running',
+                'attempts': 1,
+            }
+            active = dispatch_module.ActiveTask(
+                worker=dispatch_module.WorkerSpec(
+                    kind='local',
+                    label='desktop',
+                    python='python',
+                ),
+                stage_name='seed1',
+                task_id='task_b',
+                task_state=task_state,
+                process=type('Proc', (), {'returncode': 0})(),
+                log_path=Path(tmp_dir) / 'task.log',
+                local_result_path=local_result_path,
+                remote_result_path=None,
+            )
+
+            dispatch_module.handle_finished_json_task(
+                active=active,
+                max_attempts=2,
+                finished_at='2026-03-31 10:00:00',
+                validate_result=lambda path: (_ for _ in ()).throw(ValueError('bad json')),
+            )
+
+            self.assertEqual('pending', task_state['status'])
+            self.assertIn('bad json', task_state['error'])
+            self.assertFalse(local_result_path.exists())
+
     def test_select_winner_refine_seed2_candidates_keeps_floor_and_gap_band(self):
         candidates = [make_candidate(name) for name in ('a', 'b', 'c', 'd')]
         ranking = [
@@ -208,6 +304,68 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             self.assertEqual(27, dispatch_summary['seed1_candidate_count'])
             self.assertIsNone(dispatch_summary['seed2_candidate_count'])
             self.assertEqual([], dispatch_summary['seed2_selected_arm_names'])
+
+    def test_load_refine_context_recovers_seed_from_round_payload_when_top_level_seed_missing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / 'winner_refine_run'
+            run_dir.mkdir(parents=True, exist_ok=True)
+            custom_seed = 987654
+            state = {
+                'status': 'stopped_after_p1_protocol_decide',
+                'selected_protocol_arms': [fidelity.P1_WINNER_REFINE_PROTOCOL_ARM],
+                'p1': {
+                    'protocol_arms': [fidelity.P1_WINNER_REFINE_PROTOCOL_ARM],
+                    'calibration': {'dummy': True},
+                    'protocol_decide_round': {
+                        'seed': custom_seed + 505,
+                        'ranking': [],
+                    },
+                    'selected_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+                },
+                'final_conclusion': {
+                    'p1_protocol_winner': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
+                },
+            }
+            (run_dir / 'state.json').write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+
+            with (
+                patch.object(distributed.ab, 'build_base_config', return_value={'control': {'version': 4}}),
+                patch.object(distributed.ab, 'load_all_files', return_value=['dummy.json.gz']),
+                patch.object(distributed.ab, 'group_files_by_month', return_value={'202501': ['dummy.json.gz']}),
+                patch.object(
+                    distributed.ab,
+                    'build_eval_splits',
+                    return_value={
+                        'monitor_recent_files': ['monitor.json.gz'],
+                        'full_recent_files': ['recent.json.gz'],
+                        'old_regression_files': ['old.json.gz'],
+                    },
+                ),
+                patch.object(
+                    distributed.p1_only,
+                    'build_protocol_candidates',
+                    return_value=[make_candidate(fidelity.P1_WINNER_REFINE_PROTOCOL_ARM)],
+                ),
+                patch.object(
+                    distributed.fidelity,
+                    'current_p1_winner_refine_explicit_center_arm_names',
+                    return_value=['center_a'],
+                ),
+                patch.object(
+                    distributed.p1_only,
+                    'select_protocol_centers',
+                    return_value=[make_candidate('center_a')],
+                ),
+                patch.object(
+                    distributed.fidelity,
+                    'build_p1_winner_refine_candidates',
+                    return_value=[make_candidate('cand_a')],
+                ),
+            ):
+                ctx = distributed.load_refine_context(run_dir)
+
+            self.assertEqual(custom_seed, ctx['seed'])
+            self.assertEqual(custom_seed + 606, ctx['seed_base'])
 
 
 if __name__ == '__main__':
