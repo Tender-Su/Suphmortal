@@ -52,6 +52,64 @@ def make_ranking_entry(
 
 
 class WinnerRefineDistributedTests(unittest.TestCase):
+    def test_initialize_dispatch_control_state_sets_remote_launch_mode(self):
+        state = distributed.initialize_dispatch_control_state(
+            local_label='desktop',
+            remote_label='laptop',
+            remote_launch_mode='interactive_window',
+        )
+
+        self.assertFalse(state['workers']['desktop']['paused'])
+        self.assertEqual('interactive_window', state['workers']['laptop']['launch_mode'])
+
+    def test_set_worker_pause_can_request_interrupt(self):
+        state = distributed.initialize_dispatch_control_state(
+            local_label='desktop',
+            remote_label='laptop',
+            remote_launch_mode='interactive_window',
+        )
+
+        entry = distributed.set_worker_pause(
+            state,
+            worker_label='laptop',
+            paused=True,
+            stop_active=True,
+        )
+
+        self.assertTrue(entry['paused'])
+        self.assertTrue(entry['interrupt_requested'])
+
+        entry = distributed.set_worker_pause(
+            state,
+            worker_label='laptop',
+            paused=False,
+        )
+
+        self.assertFalse(entry['paused'])
+        self.assertFalse(entry['interrupt_requested'])
+
+    def test_reset_task_after_operator_interrupt_requeues_without_consuming_retry_budget(self):
+        task_state = {
+            'status': 'running',
+            'attempts': 2,
+            'started_at': '2026-03-31 10:00:00',
+            'worker_label': 'laptop',
+            'local_result_path': 'result.json',
+            'remote_result_path': 'remote.json',
+            'log_path': 'task.log',
+        }
+
+        distributed.reset_task_after_operator_interrupt(
+            task_state,
+            note='worker `laptop` paused by operator',
+        )
+
+        self.assertEqual('pending', task_state['status'])
+        self.assertEqual(1, task_state['attempts'])
+        self.assertIn('paused by operator', task_state['error'])
+        self.assertNotIn('started_at', task_state)
+        self.assertNotIn('worker_label', task_state)
+
     def test_build_remote_python_command_preserves_mortal_relative_path(self):
         worker = dispatch_module.WorkerSpec(
             kind='remote',
@@ -74,6 +132,36 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\mortal\run_stage05_winner_refine_distributed.py",
             command[-1],
         )
+
+    def test_build_remote_interactive_window_command_uses_helper_script(self):
+        worker = dispatch_module.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python=r'C:\Python\python.exe',
+            host='mahjong-laptop',
+            repo=r'C:\Users\numbe\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+        )
+        task_state = {
+            'task_id': 'seed1__s1__demo_arm',
+            'candidate_arm': 'demo_arm',
+            'seed': 1,
+        }
+
+        command = distributed.build_remote_interactive_window_command(
+            worker=worker,
+            run_name='demo_run',
+            task_state=task_state,
+            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
+            remote_runtime_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\runtime\seed1__s1__demo_arm'),
+        )
+
+        self.assertEqual('ssh', command[0])
+        self.assertIn(
+            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
+            command[-1],
+        )
+        self.assertIn('-PythonArgsJson', command[-1])
 
     def test_handle_finished_json_task_retries_remote_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

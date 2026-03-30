@@ -75,6 +75,12 @@
 - `logs/laptop_stage05_loader_bench/confirm_summary.json`
 - `logs/laptop_pure_train_compare_manual_20260330/repro_best_nw6_fb7_pf3_20260330/summary.json`
 
+注意：
+
+- 上面这批结论现在只能视为历史参考
+- 后续确认到：通过 SSH `Session 0` 拉起的训练进程，在笔记本上可能被 Windows / 厂商调度偏向小核心
+- 所以后续如果还要把笔记本 benchmark 结果当作当前默认，必须在笔记本交互会话的可见窗口里重跑确认
+
 ### 双机 winner_refine 入口
 
 如果 `P1 winner_refine` 要让桌面机和笔记本同时参与，当前不要让两台机器共同写一个共享 `run_dir`。当前仓库已经提供桌面机调度入口：
@@ -97,6 +103,13 @@ python mortal/run_stage05_winner_refine_distributed.py dispatch `
 - `seed1` 先把 `winner_refine` 的全部候选跑完
 - `seed2` 不再固定全量双 seed，而是只补 `seed1` 后仍处在竞争带里的候选
 - 最终 round 只在补过 `seed2` 的 decision 候选里比较 winner，避免单 seed 尾部候选混回最终榜单
+- 当前远端正式口径应是：
+  - 在笔记本交互用户会话里弹出可见窗口
+  - 不再接受 SSH `Session 0` 里直接后台拉起训练进程作为正式 benchmark / 训练口径
+- 当前调度器支持对任一 worker 单独暂停 / 恢复：
+  - `python mortal/run_stage05_winner_refine_distributed.py pause-worker --run-name <run_name> --worker-label laptop`
+  - `python mortal/run_stage05_winner_refine_distributed.py pause-worker --run-name <run_name> --worker-label laptop --stop-active`
+  - `python mortal/run_stage05_winner_refine_distributed.py resume-worker --run-name <run_name> --worker-label laptop`
 
 ### 真实启动前检查结果
 
@@ -116,6 +129,12 @@ python mortal/run_stage05_winner_refine_distributed.py dispatch `
   - `step_scale = 1.5`
 
 这说明：远端代码、配置、`state.json` 和文件索引已经能支撑这轮 `winner_refine` 正常展开候选。
+
+补充：
+
+- 上面的预检查只说明代码 / 配置 / 路径链路可达
+- 不说明笔记本在远端训练时一定会被调到合适的大核心 / 前台口径
+- 真正要确认笔记本训练默认，仍然要看交互前台窗口里重跑出的 benchmark
 
 ### 当前双机调度器的远端必备资产
 

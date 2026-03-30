@@ -32,6 +32,11 @@
    - 当前冻结 center 集和局部搜索规则见 `docs/agent/mainline.md`
    - 如果笔记本参与，当前推荐执行入口是：
      - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
+   - 当前远端默认启动方式不是 SSH `Session 0` 里的直拉进程，而是笔记本交互会话中的可见窗口
+   - 如果需要临时把某一侧摘掉而不影响另一侧继续跑，使用：
+     - `python mortal/run_stage05_winner_refine_distributed.py pause-worker --run-name <run_name> --worker-label <label>`
+     - `python mortal/run_stage05_winner_refine_distributed.py pause-worker --run-name <run_name> --worker-label <label> --stop-active`
+     - `python mortal/run_stage05_winner_refine_distributed.py resume-worker --run-name <run_name> --worker-label <label>`
    - 这个入口的执行语义是：`seed1` 全量，`seed2` 只补 `seed1` 后仍在竞争带里的候选
    - 它只改变任务调度方式，不改变 `winner_refine` 的候选空间和最终 winner 解释口径
 5. `P1 ablation`
@@ -57,6 +62,7 @@
 - 笔记本独立 benchmark 默认：
   - train：`6 / 7 / 3`
   - val：`7 / 6`
+  - 但只有在笔记本交互前台窗口里重跑并确认后，才能继续当作当前有效默认
 
 ## P1 结果怎么解释
 

@@ -4,6 +4,7 @@ import argparse
 import atexit
 import json
 import math
+import subprocess
 import sys
 import time
 import traceback
@@ -18,6 +19,7 @@ import run_stage05_p1_only as p1_only
 
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parent.parent
+INTERACTIVE_REMOTE_PYTHON_HELPER = REPO_ROOT / 'scripts' / 'start_interactive_remote_python.ps1'
 DEFAULT_REMOTE_HOST = 'mahjong-laptop'
 DEFAULT_REMOTE_REPO = str(REPO_ROOT)
 DEFAULT_REMOTE_PYTHON = r'C:\Users\numbe\miniconda3\envs\mortal\python.exe'
@@ -29,8 +31,11 @@ DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_SEED2_MIN_KEEP = 3
 DEFAULT_SEED2_SELECTION_GAP = 0.001
 DEFAULT_SEED2_MAX_KEEP = 9
+DEFAULT_REMOTE_LAUNCH_MODE = 'interactive_window'
 DISPATCH_SCHEMA_VERSION = 1
+CONTROL_SCHEMA_VERSION = 1
 TASK_RESULT_SCHEMA_VERSION = 1
+REMOTE_LAUNCH_MODES = frozenset({'ssh_inline', 'interactive_window'})
 
 
 WorkerSpec = dispatch.WorkerSpec
@@ -52,6 +57,10 @@ def dispatch_root_for_run(run_dir: Path) -> Path:
 
 def dispatch_state_path_for_run(run_dir: Path) -> Path:
     return dispatch_root_for_run(run_dir) / 'dispatch_state.json'
+
+
+def dispatch_control_path_for_run(run_dir: Path) -> Path:
+    return dispatch_root_for_run(run_dir) / 'dispatch_control.json'
 
 
 def ensure_dir(path: Path) -> Path:
@@ -97,6 +106,112 @@ def load_dispatch_state(path: Path) -> dict[str, Any]:
 def write_dispatch_state(path: Path, payload: dict[str, Any]) -> None:
     payload['updated_at'] = fidelity.ts_now()
     fidelity.atomic_write_json(path, payload)
+
+
+def initialize_dispatch_control_state(
+    *,
+    local_label: str,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> dict[str, Any]:
+    workers = {
+        local_label: {
+            'kind': 'local',
+            'paused': False,
+            'interrupt_requested': False,
+        }
+    }
+    if remote_label:
+        workers[remote_label] = {
+            'kind': 'remote',
+            'paused': False,
+            'interrupt_requested': False,
+            'launch_mode': remote_launch_mode,
+        }
+    return {
+        'schema_version': CONTROL_SCHEMA_VERSION,
+        'created_at': fidelity.ts_now(),
+        'updated_at': fidelity.ts_now(),
+        'workers': workers,
+    }
+
+
+def load_dispatch_control(path: Path) -> dict[str, Any]:
+    return fidelity.load_json(path)
+
+
+def write_dispatch_control(path: Path, payload: dict[str, Any]) -> None:
+    payload['updated_at'] = fidelity.ts_now()
+    fidelity.atomic_write_json(path, payload)
+
+
+def ensure_control_state_workers(
+    *,
+    control_state: dict[str, Any],
+    local_label: str,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> bool:
+    workers = control_state.setdefault('workers', {})
+    changed = False
+    local = workers.get(local_label)
+    if not isinstance(local, dict):
+        workers[local_label] = {
+            'kind': 'local',
+            'paused': False,
+            'interrupt_requested': False,
+        }
+        changed = True
+    else:
+        local.setdefault('kind', 'local')
+        local.setdefault('paused', False)
+        local.setdefault('interrupt_requested', False)
+    if remote_label:
+        remote = workers.get(remote_label)
+        if not isinstance(remote, dict):
+            workers[remote_label] = {
+                'kind': 'remote',
+                'paused': False,
+                'interrupt_requested': False,
+                'launch_mode': remote_launch_mode,
+            }
+            changed = True
+        else:
+            remote.setdefault('kind', 'remote')
+            remote.setdefault('paused', False)
+            remote.setdefault('interrupt_requested', False)
+            remote.setdefault('launch_mode', remote_launch_mode)
+    return changed
+
+
+def worker_control_entry(control_state: dict[str, Any], worker_label: str) -> dict[str, Any]:
+    workers = control_state.setdefault('workers', {})
+    entry = workers.get(worker_label)
+    if not isinstance(entry, dict):
+        entry = {
+            'paused': False,
+            'interrupt_requested': False,
+        }
+        workers[worker_label] = entry
+    entry.setdefault('paused', False)
+    entry.setdefault('interrupt_requested', False)
+    return entry
+
+
+def set_worker_pause(
+    control_state: dict[str, Any],
+    *,
+    worker_label: str,
+    paused: bool,
+    stop_active: bool = False,
+) -> dict[str, Any]:
+    entry = worker_control_entry(control_state, worker_label)
+    entry['paused'] = bool(paused)
+    if paused and stop_active:
+        entry['interrupt_requested'] = True
+    elif not paused:
+        entry['interrupt_requested'] = False
+    return entry
 
 
 def update_run_state_for_dispatch(
@@ -454,6 +569,21 @@ def stage_any_task_failed(stage_state: dict[str, Any]) -> bool:
     return any(str(task.get('status')) == 'failed' for task in stage_state.get('tasks', {}).values())
 
 
+def reset_task_after_operator_interrupt(task_state: dict[str, Any], *, note: str) -> None:
+    attempts = int(task_state.get('attempts', 0))
+    task_state['status'] = 'pending'
+    task_state['attempts'] = max(0, attempts - 1)
+    task_state['error'] = note
+    task_state['interrupted_at'] = fidelity.ts_now()
+    task_state.pop('finished_at', None)
+    task_state.pop('started_at', None)
+    task_state.pop('worker_label', None)
+    task_state.pop('local_result_path', None)
+    task_state.pop('remote_result_path', None)
+    task_state.pop('log_path', None)
+    task_state.pop('pid', None)
+
+
 def launch_local_task(
     worker: WorkerSpec,
     *,
@@ -518,46 +648,107 @@ def build_remote_command(
     )
 
 
+def build_remote_interactive_window_command(
+    *,
+    worker: WorkerSpec,
+    run_name: str,
+    task_state: dict[str, Any],
+    remote_result_path: Path,
+    remote_runtime_root: Path,
+) -> list[str]:
+    python_args = [
+        'run-task',
+        '--run-name',
+        run_name,
+        '--candidate-arm',
+        str(task_state['candidate_arm']),
+        '--seed',
+        str(task_state['seed']),
+        '--machine-label',
+        worker.label,
+        '--result-json',
+        str(remote_result_path),
+    ]
+    repo_root = Path(worker.repo or str(REPO_ROOT))
+    window_title = f"MahjongAI winner_refine {task_state['task_id']}"
+    ps_command = (
+        f"& {quote_ps(str(repo_root / 'scripts' / 'start_interactive_remote_python.ps1'))} "
+        f"-RepoRoot {quote_ps(str(repo_root))} "
+        f"-PythonExe {quote_ps(worker.python or sys.executable)} "
+        f"-PythonScript {quote_ps(str(repo_root / 'mortal' / SCRIPT_PATH.name))} "
+        f"-PythonArgsJson {quote_ps(json.dumps(python_args, ensure_ascii=True))} "
+        f"-TaskId {quote_ps(str(task_state['task_id']))} "
+        f"-RuntimeRoot {quote_ps(str(remote_runtime_root))} "
+        f"-WindowTitle {quote_ps(window_title)}"
+    )
+    command = ['ssh']
+    if worker.ssh_key:
+        command.extend(['-i', worker.ssh_key])
+    command.append(worker.host or DEFAULT_REMOTE_HOST)
+    command.append(ps_command)
+    return command
+
+
 def launch_remote_task(
     worker: WorkerSpec,
     *,
     run_name: str,
     task_state: dict[str, Any],
     dispatch_root: Path,
+    launch_mode: str,
 ) -> ActiveTask:
     remote_results_dir = dispatch_root / 'remote_results'
+    remote_runtime_dir = dispatch_root / 'remote_runtime' / str(task_state['task_id'])
     local_results_dir = ensure_dir(dispatch_root / 'results')
     logs_dir = ensure_dir(dispatch_root / 'logs')
     remote_result_path = remote_results_dir / f'{task_state["task_id"]}.json'
     local_result_path = local_results_dir / f'{task_state["task_id"]}.json'
     log_path = logs_dir / f'{task_state["task_id"]}__{worker.label}.log'
-    spec = JsonTaskLaunchSpec(
-        task_id=str(task_state['task_id']),
-        stage_name='',
-        local_result_path=local_result_path,
-        log_path=log_path,
-        remote_result_path=remote_result_path,
-        command_args=[
-            'run-task',
-            '--run-name',
-            run_name,
-            '--candidate-arm',
-            str(task_state['candidate_arm']),
-            '--seed',
-            str(task_state['seed']),
-            '--machine-label',
-            worker.label,
-        ],
-        cwd=REPO_ROOT,
+    if launch_mode == 'ssh_inline':
+        command = build_remote_command(
+            worker=worker,
+            run_name=run_name,
+            task_state=task_state,
+            remote_result_path=remote_result_path,
+        )
+    elif launch_mode == 'interactive_window':
+        command = build_remote_interactive_window_command(
+            worker=worker,
+            run_name=run_name,
+            task_state=task_state,
+            remote_result_path=remote_result_path,
+            remote_runtime_root=remote_runtime_dir,
+        )
+    else:
+        raise ValueError(f'unsupported remote launch mode `{launch_mode}`')
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open('w', encoding='utf-8', newline='\n')
+    process = subprocess.Popen(
+        command,
+        cwd=str(REPO_ROOT),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
-    active = dispatch.launch_json_task(
-        worker,
-        task_state=task_state,
-        script_path=SCRIPT_PATH,
-        spec=spec,
-    )
+    log_handle.close()
+    task_state['status'] = 'running'
+    task_state['attempts'] = int(task_state.get('attempts', 0)) + 1
+    task_state['worker_label'] = worker.label
+    task_state['local_result_path'] = str(local_result_path)
+    task_state['log_path'] = str(log_path)
+    task_state['remote_result_path'] = str(remote_result_path)
+    task_state['remote_launch_mode'] = launch_mode
     task_state['started_at'] = fidelity.ts_now()
-    return active
+    return ActiveTask(
+        worker=worker,
+        stage_name='',
+        task_id=str(task_state['task_id']),
+        task_state=task_state,
+        process=process,
+        log_path=log_path,
+        local_result_path=local_result_path,
+        remote_result_path=remote_result_path,
+    )
 
 
 def fetch_remote_result(worker: WorkerSpec, remote_result_path: str, local_result_path: Path) -> None:
@@ -576,6 +767,61 @@ def load_task_result(path: Path) -> dict[str, Any]:
     if not bool(summary.get('valid')):
         raise RuntimeError(f'task result at {path} is not valid for ranking')
     return payload
+
+
+def interrupt_local_active_task(active: ActiveTask) -> None:
+    if active.process.poll() is not None:
+        return
+    subprocess.run(
+        ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def interrupt_remote_active_task(active: ActiveTask) -> None:
+    remote_result_path = active.remote_result_path
+    if remote_result_path is None:
+        return
+    match = str(remote_result_path)
+    kill_command = (
+        "$match = "
+        + quote_ps(match)
+        + "; "
+        + "$targets = Get-CimInstance Win32_Process "
+        + "| Where-Object Name -eq 'python.exe' "
+        + "| Where-Object CommandLine -like ('*' + $match + '*'); "
+        + "foreach ($target in $targets) { taskkill /PID $target.ProcessId /T /F | Out-Null }"
+    )
+    command = ['ssh']
+    if active.worker.ssh_key:
+        command.extend(['-i', active.worker.ssh_key])
+    command.append(active.worker.host or DEFAULT_REMOTE_HOST)
+    command.append(kill_command)
+    subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if active.process.poll() is None:
+        subprocess.run(
+            ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def interrupt_active_task(active: ActiveTask) -> None:
+    if active.worker.kind == 'local':
+        interrupt_local_active_task(active)
+        return
+    if active.worker.kind == 'remote':
+        interrupt_remote_active_task(active)
+        return
+    raise ValueError(f'unsupported worker kind `{active.worker.kind}`')
 
 
 def build_seed_round_payload(
@@ -860,6 +1106,7 @@ def launch_task_for_worker(
     task_state: dict[str, Any],
     dispatch_root: Path,
     stage_name: str,
+    control_state: dict[str, Any],
 ) -> ActiveTask:
     if worker.kind == 'local':
         active = launch_local_task(
@@ -869,11 +1116,13 @@ def launch_task_for_worker(
             dispatch_root=dispatch_root,
         )
     elif worker.kind == 'remote':
+        worker_control = worker_control_entry(control_state, worker.label)
         active = launch_remote_task(
             worker,
             run_name=run_name,
             task_state=task_state,
             dispatch_root=dispatch_root,
+            launch_mode=str(worker_control.get('launch_mode') or DEFAULT_REMOTE_LAUNCH_MODE),
         )
     else:
         raise ValueError(f'unknown worker kind `{worker.kind}`')
@@ -938,6 +1187,27 @@ def active_stage_state(dispatch_state: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError(f'unsupported active stage `{stage}`')
 
 
+def apply_worker_control_requests(
+    *,
+    control_state: dict[str, Any],
+    active: dict[str, ActiveTask],
+) -> bool:
+    changed = False
+    for worker_label, active_task in list(active.items()):
+        control = worker_control_entry(control_state, worker_label)
+        if not bool(control.get('interrupt_requested')):
+            continue
+        interrupt_active_task(active_task)
+        reset_task_after_operator_interrupt(
+            active_task.task_state,
+            note=f'worker `{worker_label}` paused by operator',
+        )
+        active.pop(worker_label, None)
+        control['interrupt_requested'] = False
+        changed = True
+    return changed
+
+
 def run_dispatch(args: argparse.Namespace) -> int:
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -945,6 +1215,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
     atexit.register(fidelity.release_run_lock, lock_path)
     dispatch_root = ensure_dir(dispatch_root_for_run(run_dir))
     dispatch_state_path = dispatch_state_path_for_run(run_dir)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir)
     context = load_refine_context(run_dir)
     try:
         if dispatch_state_path.exists():
@@ -959,6 +1230,22 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 seed2_selection_gap=args.seed2_selection_gap,
                 seed2_max_keep=args.seed2_max_keep,
             )
+        if dispatch_control_path.exists():
+            control_state = load_dispatch_control(dispatch_control_path)
+        else:
+            control_state = initialize_dispatch_control_state(
+                local_label=args.local_label,
+                remote_label=args.remote_label if not args.local_only else None,
+                remote_launch_mode=args.remote_launch_mode,
+            )
+            write_dispatch_control(dispatch_control_path, control_state)
+        if ensure_control_state_workers(
+            control_state=control_state,
+            local_label=args.local_label,
+            remote_label=args.remote_label if not args.local_only else None,
+            remote_launch_mode=args.remote_launch_mode,
+        ):
+            write_dispatch_control(dispatch_control_path, control_state)
         write_dispatch_state(dispatch_state_path, dispatch_state)
         update_run_state_for_dispatch(
             run_dir=run_dir,
@@ -977,7 +1264,19 @@ def run_dispatch(args: argparse.Namespace) -> int:
         )
         active: dict[str, ActiveTask] = {}
         while True:
+            control_state = load_dispatch_control(dispatch_control_path)
+            if ensure_control_state_workers(
+                control_state=control_state,
+                local_label=args.local_label,
+                remote_label=args.remote_label if not args.local_only else None,
+                remote_launch_mode=args.remote_launch_mode,
+            ):
+                write_dispatch_control(dispatch_control_path, control_state)
             finished_labels: list[str] = []
+            state_changed = False
+            if apply_worker_control_requests(control_state=control_state, active=active):
+                state_changed = True
+                write_dispatch_control(dispatch_control_path, control_state)
             for worker_label, active_task in list(active.items()):
                 if active_task.process.poll() is None:
                     continue
@@ -986,6 +1285,8 @@ def run_dispatch(args: argparse.Namespace) -> int:
             for worker_label in finished_labels:
                 active.pop(worker_label, None)
             if finished_labels:
+                state_changed = True
+            if state_changed:
                 write_dispatch_state(dispatch_state_path, dispatch_state)
             if dispatch_state.get('stage') == 'seed1' and not active:
                 stage_state = dispatch_state['seed1']
@@ -1012,6 +1313,9 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 break
             stage_state = active_stage_state(dispatch_state)
             for worker in workers:
+                worker_control = worker_control_entry(control_state, worker.label)
+                if bool(worker_control.get('paused')):
+                    continue
                 if worker.label in active:
                     continue
                 next_task = find_next_pending_task(stage_state)
@@ -1024,6 +1328,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
                     task_state=task_state,
                     dispatch_root=dispatch_root,
                     stage_name=str(dispatch_state['stage']),
+                    control_state=control_state,
                 )
                 write_dispatch_state(dispatch_state_path, dispatch_state)
             if not active and find_next_pending_task(active_stage_state(dispatch_state)) is None:
@@ -1052,9 +1357,11 @@ def run_dispatch(args: argparse.Namespace) -> int:
 def print_status(args: argparse.Namespace) -> int:
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
     dispatch_state_path = dispatch_state_path_for_run(run_dir)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir)
     if not dispatch_state_path.exists():
         raise FileNotFoundError(f'missing dispatch state at {dispatch_state_path}')
     dispatch_state = load_dispatch_state(dispatch_state_path)
+    control_state = load_dispatch_control(dispatch_control_path) if dispatch_control_path.exists() else {'workers': {}}
     payload = {
         'run_name': args.run_name,
         'stage': dispatch_state.get('stage'),
@@ -1067,8 +1374,50 @@ def print_status(args: argparse.Namespace) -> int:
         ),
         'seed2_selector': dispatch_state.get('seed2_selector'),
         'final_front_runner': dispatch_state.get('final_front_runner'),
+        'workers': control_state.get('workers', {}),
     }
     print(json.dumps(fidelity.normalize_payload(payload), ensure_ascii=False, indent=2))
+    return 0
+
+
+def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
+    run_dir = fidelity.FIDELITY_ROOT / args.run_name
+    dispatch_state_path = dispatch_state_path_for_run(run_dir)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir)
+    if not dispatch_state_path.exists():
+        raise FileNotFoundError(f'missing dispatch state at {dispatch_state_path}')
+    dispatch_state = load_dispatch_state(dispatch_state_path)
+    local_label = str(dispatch_state.get('local_label') or DEFAULT_LOCAL_LABEL)
+    remote_label = dispatch_state.get('remote_label')
+    if dispatch_control_path.exists():
+        control_state = load_dispatch_control(dispatch_control_path)
+    else:
+        control_state = initialize_dispatch_control_state(
+            local_label=local_label,
+            remote_label=remote_label,
+            remote_launch_mode=DEFAULT_REMOTE_LAUNCH_MODE,
+        )
+    ensure_control_state_workers(
+        control_state=control_state,
+        local_label=local_label,
+        remote_label=remote_label,
+        remote_launch_mode=DEFAULT_REMOTE_LAUNCH_MODE,
+    )
+    entry = set_worker_pause(
+        control_state,
+        worker_label=args.worker_label,
+        paused=paused,
+        stop_active=bool(getattr(args, 'stop_active', False)),
+    )
+    write_dispatch_control(dispatch_control_path, control_state)
+    payload = {
+        'run_name': args.run_name,
+        'worker_label': args.worker_label,
+        'paused': bool(entry.get('paused')),
+        'interrupt_requested': bool(entry.get('interrupt_requested')),
+        'control_path': str(dispatch_control_path),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1094,6 +1443,7 @@ def parse_args() -> argparse.Namespace:
     dispatch.add_argument('--seed2-min-keep', type=int, default=DEFAULT_SEED2_MIN_KEEP)
     dispatch.add_argument('--seed2-selection-gap', type=float, default=DEFAULT_SEED2_SELECTION_GAP)
     dispatch.add_argument('--seed2-max-keep', type=int, default=DEFAULT_SEED2_MAX_KEEP)
+    dispatch.add_argument('--remote-launch-mode', choices=sorted(REMOTE_LAUNCH_MODES), default=DEFAULT_REMOTE_LAUNCH_MODE)
 
     run_task = subparsers.add_parser(
         'run-task',
@@ -1110,6 +1460,21 @@ def parse_args() -> argparse.Namespace:
         help='Print distributed winner_refine dispatch status.',
     )
     status.add_argument('--run-name', required=True)
+
+    pause_worker = subparsers.add_parser(
+        'pause-worker',
+        help='Pause a worker; optionally interrupt its active task and requeue it.',
+    )
+    pause_worker.add_argument('--run-name', required=True)
+    pause_worker.add_argument('--worker-label', required=True)
+    pause_worker.add_argument('--stop-active', action='store_true')
+
+    resume_worker = subparsers.add_parser(
+        'resume-worker',
+        help='Resume scheduling on a paused worker.',
+    )
+    resume_worker.add_argument('--run-name', required=True)
+    resume_worker.add_argument('--worker-label', required=True)
     return parser.parse_args()
 
 
@@ -1129,6 +1494,10 @@ def main() -> None:
         raise SystemExit(run_dispatch(args))
     if args.command == 'status':
         raise SystemExit(print_status(args))
+    if args.command == 'pause-worker':
+        raise SystemExit(update_worker_pause(args, paused=True))
+    if args.command == 'resume-worker':
+        raise SystemExit(update_worker_pause(args, paused=False))
     raise ValueError(f'unknown command `{args.command}`')
 
 
