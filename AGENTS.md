@@ -10,11 +10,11 @@
 
 ## Documentation Layout
 
-- **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; only current mainline, current live status, and immediate next step.
-- **`docs/agent/mainline.md`** — stable defaults, stage map, frozen conclusions, and current active run.
-- **`docs/agent/experiment-workflow.md`** — current stage workflow, manual stop points, and operating discipline.
-- **`docs/agent/laptop-remote-ops.md`** — laptop-node remote-operation notes: SSH / PowerShell behavior, dataset status, current loader defaults, and proven remote execution patterns.
-- **`docs/agent/code-sync.md`** — default desktop↔laptop code-sync scheme: current canonical branch (`main`), desktop as source of truth, laptop bare mirror layout, and the one-command sync path.
+- **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; read this first for the current mainline, current live stop point, and the immediate next move.
+- **`docs/agent/mainline.md`** — stable defaults only: canonical branch, frozen Stage `0.5` / `P1` conclusions, and machine-specific operating defaults.
+- **`docs/agent/experiment-workflow.md`** — how to operate the current mainline: stage order, manual stop points, and run discipline; not the place for frozen constants.
+- **`docs/agent/laptop-remote-ops.md`** — laptop-node shell / data / remote-execution notes: SSH / PowerShell behavior, dataset status, and proven remote operation patterns.
+- **`docs/agent/code-sync.md`** — desktop↔laptop Git sync only: canonical branch (`main`), bare mirror layout, and the one-command sync path.
 - **`docs/status/stage05-verified-status.md`** — manually maintained verified Stage 0.5 status; use this when the auto-generated summary lags behind raw artifacts.
 - **`docs/status/p1-selection-canonical.md`** — the only valid P1 winner-selection rubric.
 - **`docs/status/stage05-fidelity-results.md`** — auto-generated Stage 0.5 fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `stage05-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
@@ -142,20 +142,15 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 - **Secondary laptop node**: Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU (`8 GB` VRAM) + `32 GB` DDR5. Treat it as an additional independent experiment runner, not as an already-wired distributed training worker.
 - Use the laptop for parallel GRP runs, Stage `0.5` loader / validation benchmarking, supervised A/Bs, and shorter Stage `1` probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
 - Canonical development branch is now local `main`, which tracks `origin/main`.
-- Source-of-truth code lives in the desktop `main` worktree first; sync to the laptop through the documented bare-mirror workflow in `docs/agent/code-sync.md`, then push to GitHub `origin/main` as needed.
+- Source-of-truth code lives in the desktop `main` worktree first.
+- Git sync details belong in `docs/agent/code-sync.md`.
+- Shell / dataset / remote-execution details belong in `docs/agent/laptop-remote-ops.md`.
 - Do not trust an older copied workspace on the laptop without an explicit resync.
 - Laptop repo default path: `C:\Users\numbe\Desktop\MahjongAI`
 - Laptop Conda env: `C:\Users\numbe\miniconda3\envs\mortal`
 - Desktop-to-laptop shell access is available over LAN SSH via the desktop key `C:\Users\numbe\.ssh\mahjong_laptop_ed25519`. The laptop LAN IP can change, so re-check it before hardcoding commands.
 - When running the same stage on both machines, always use distinct run names / output directories tagged by machine, and never let both machines write to the same checkpoint path or log directory.
-- Current laptop Stage `0.5` loader default from the `2026-03-30` local-subset benchmark:
-  - train: `num_workers = 6`, `file_batch_size = 7`, `prefetch_factor = 3`
-  - val: `val_file_batch_size = 7`, `val_prefetch_factor = 6`
-  - close validation fallback: `7 / 5`
-- Benchmark artifacts copied back to the desktop repo:
-  - `logs/laptop_stage05_loader_bench/summary.json`
-  - `logs/laptop_stage05_loader_bench/confirm_summary.json`
-- Important scope note: the laptop benchmark used a copied representative subset because the full dataset root is not yet mirrored onto the laptop. Treat these as the current operational defaults for the laptop, but still prefer a full-data recheck before locking them in as a permanent global default.
+- Current laptop Stage `0.5` operational defaults and benchmark scope notes live in `docs/agent/mainline.md` and `docs/agent/laptop-remote-ops.md`.
 
 ## User Objective
 

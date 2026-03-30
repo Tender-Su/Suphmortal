@@ -2,6 +2,9 @@
 
 这份文档只回答“现在应该怎么跑”，不重复展开所有历史原因。
 
+冻结默认看 `docs/agent/mainline.md`。  
+这份文档只负责“如何按当前主线操作”，不重复保存所有固定常量。
+
 ## 总体原则
 
 - 每个阶段结束后都停下来，让人确认方向。
@@ -20,22 +23,13 @@
    - 这一步只能定标，不能直接宣布 winner
 3. `P1 protocol_decide`
    - 目标：在统一三头脚手架下尽早选出协议 winner
-   - 当前这轮已经完成，winner 已验证为 `A2x`
-   - 当前 seed2 扩展规则固定为：
-     - `ambiguity_mode = flip_or_gap`
-     - `gap_threshold = 0.001`
+   - 当前这轮已经完成
+   - 当前默认 winner 与 seed2 扩展规则见 `docs/agent/mainline.md`
 4. `P1 winner_refine`
    - 目标：只在 winner 协议内部细调三头全开配比
-   - 当前只允许在 `A2x` 内部启动
+   - 当前只允许在主线 winner 协议内部启动
    - 当前默认不是自动 `top-k center`
-   - 当前默认冻结三中心：
-     - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037`
-     - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041`
-     - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043`
-   - 当前局部搜索规则：
-     - `total_scale_factors = [0.85, 1.0, 1.15]`
-     - `transfer_delta = 0.01`
-     - `step_scale = 1.5`
+   - 当前冻结 center 集和局部搜索规则见 `docs/agent/mainline.md`
 5. `P1 ablation`
    - 目标：验证 `all_three / drop_* / ce_only` 的边际贡献
    - 也需要人工确认后再启动
@@ -50,6 +44,8 @@
 ## 当前运行纪律
 
 - 默认不设置 `MORTAL_CPU_AFFINITY`
+- 新 run 必须使用新输出目录
+- run snapshot 只当 run 产物，不当当前默认
 - 多 seed round 收口前，如果仍有 invalid arm 且补跑成本可接受，先补跑再宣布结果
 - 台式机训练快路径默认：
   - train：`4 / 10 / 3`

@@ -7,6 +7,8 @@
 - 笔记本当前默认该怎么跑 Stage 0.5 loader / 训练 benchmark
 - Windows + PowerShell + SSH 这套链路里哪些坑已经踩过，哪些做法最稳
 
+这份文档不负责 Git 同步方案；代码同步细节看 `docs/agent/code-sync.md`。
+
 ## 当前机器状态
 
 - 笔记本主机名：`abandon`

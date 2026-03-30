@@ -2,6 +2,8 @@
 
 这份文档只回答一个问题：台式机和笔记本现在应该如何同步代码。
 
+这份文档只负责 Git 同步；远程 shell / 数据集 / PowerShell 操作细节看 `docs/agent/laptop-remote-ops.md`。
+
 ## 当前默认
 
 - 台式机是源码真源：
