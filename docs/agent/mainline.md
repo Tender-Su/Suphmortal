@@ -87,6 +87,13 @@
   - `total_scale_factors = [0.85, 1.0, 1.15]`
   - `transfer_delta = 0.01`
   - `step_scale = 1.5`
+- 如果让笔记本参与当前这轮 `winner_refine`，不要让两台机器共同写同一个 run
+- 当前推荐入口是：
+  - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
+- 这条入口只改变执行方式：
+  - `seed1` 全量
+  - `seed2` 只补 `seed1` 后仍处在竞争带里的候选
+- 它不改变当前 `winner_refine` 的 center、局部搜索点或最终 winner 解释口径
 
 ## 下游原则
 

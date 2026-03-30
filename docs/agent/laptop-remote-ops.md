@@ -75,6 +75,77 @@
 - `logs/laptop_stage05_loader_bench/confirm_summary.json`
 - `logs/laptop_pure_train_compare_manual_20260330/repro_best_nw6_fb7_pf3_20260330/summary.json`
 
+### 双机 winner_refine 入口
+
+如果 `P1 winner_refine` 要让桌面机和笔记本同时参与，当前不要让两台机器共同写一个共享 `run_dir`。当前仓库已经提供桌面机调度入口：
+
+```powershell
+python mortal/run_stage05_winner_refine_distributed.py dispatch `
+  --run-name s05_fidelity_p1_top3_cali_slim_20260329_001413
+```
+
+默认假设：
+
+- 桌面机是调度器和本地 worker
+- 笔记本是通过 SSH 拉起的 remote worker
+- 远端仓库路径默认：`C:\Users\numbe\Desktop\MahjongAI`
+- 远端 Python 默认：`C:\Users\numbe\miniconda3\envs\mortal\python.exe`
+- SSH key 默认：`$HOME\.ssh\mahjong_laptop_ed25519`
+
+当前这条链路的语义是：
+
+- `seed1` 先把 `winner_refine` 的全部候选跑完
+- `seed2` 不再固定全量双 seed，而是只补 `seed1` 后仍处在竞争带里的候选
+- 最终 round 只在补过 `seed2` 的 decision 候选里比较 winner，避免单 seed 尾部候选混回最终榜单
+
+### 真实启动前检查结果
+
+这轮真实跨机启动前检查已经确认：
+
+- 笔记本可以通过 SSH 正常执行远端命令
+- 笔记本当前数据根可用：
+  - `C:\Users\numbe\mahjong_data_root\dataset_json_rebuilt`
+- 笔记本当前运行配置应使用：
+  - train：`6 / 7 / 3`
+  - val：`7 / 6`
+- 当前 `winner_refine` 远端上下文探针已经通过：
+  - `protocol = C_A2x_cosine_broad_to_recent_strong_24m_12m`
+  - `candidate_count = 27`
+  - `center_count = 3`
+  - `seed_offsets = [0, 1009]`
+  - `step_scale = 1.5`
+
+这说明：远端代码、配置、`state.json` 和文件索引已经能支撑这轮 `winner_refine` 正常展开候选。
+
+### 当前双机调度器的远端必备资产
+
+当前 `winner_refine` 远端 worker 不只需要代码，还需要下面三类本地资产：
+
+- `C:\Users\numbe\Desktop\MahjongAI\mortal\config.toml`
+- `C:\Users\numbe\Desktop\MahjongAI\logs\stage05_fidelity\<run_name>\state.json`
+- `C:\Users\numbe\Desktop\MahjongAI\mortal\checkpoints\file_index_supervised_json.pth`
+
+缺任何一个，真实启动都可能失败：
+
+- 缺 `config.toml`：读不到笔记本本地数据根和 loader 配置
+- 缺 `state.json`：`load_refine_context()` 无法恢复当前 `winner_refine` 上下文
+- 缺 `file_index_supervised_json.pth`：远端 `load_all_files()` 会直接报错
+
+### 当前笔记本专用运行配置
+
+这轮为双机 `winner_refine` 已验证可用的笔记本本地配置是：
+
+- `mortal/config.toml`
+  - `[dataset].globs = C:/Users/numbe/mahjong_data_root/dataset_json_rebuilt/**/*.json`
+  - `[dataset] = 6 / 7 / 3`
+  - `[supervised] = train 6 / 7 / 3, val 7 / 6`
+
+注意：
+
+- 这是笔记本本地运行配置，不应该进 Git
+- 它属于运行资产，同步方式应该是 `scp` 或远端脚本生成
+- 如果后面重新做了 loader 搜索，这里的默认要跟着改
+
 ## 最稳的远程操作方式
 
 ### 1. 直接发 PowerShell 命令
@@ -124,6 +195,22 @@ scp -i "$HOME\.ssh\mahjong_laptop_ed25519" local.ps1 "numbe@<laptop-ip>:C:/Users
 - 用 here-string 走 stdin
 - 或显式写成 `` `$p ``、`` `$_ `` 这类转义
 
+### 1.5. `stdin -> powershell -Command -` 首行可能吃到 BOM
+
+这轮真实预检查里，出现过首个 cmdlet 名被 BOM 污染的情况，例如：
+
+- `Set-Location` 变成异常命令名
+- `Get-Content` 变成异常命令名
+- `Test-Path` 变成异常命令名
+
+实践上更稳的顺序是：
+
+- 短命令：直接一行 SSH
+- 稍复杂命令：本地先拼成单行再发
+- 真正复杂的探针或修复脚本：先 `scp` 到远端，再执行
+
+不要默认假设 here-string 通过 stdin 喂给远端 PowerShell 一定稳定。
+
 ### 2. 命令太长会撞 Windows 上限
 
 把大段脚本 base64 编进一条远端命令时，容易触发“命令行太长”。
@@ -149,11 +236,24 @@ scp -i "$HOME\.ssh\mahjong_laptop_ed25519" local.ps1 "numbe@<laptop-ip>:C:/Users
 - `decompress_dataset_json.py`
 - 指定 runner 脚本名
 
+### 5. `winner_refine` 的远端上下文恢复依赖文件索引
+
+这轮真实探针里，远端首次失败不是代码问题，而是：
+
+- 缺 `mortal/checkpoints/file_index_supervised_json.pth`
+
+错误位置在：
+
+- `run_stage05_ab.load_all_files()`
+- 它会先读 `BASE_INDEX_PATH`
+
+所以后续 agent 在启动双机 `winner_refine` 前，不要只查代码和 `state.json`，一定要查这个索引文件是否在远端。
+
 ## 建议的操作纪律
 
 - 桌面机和笔记本同时跑实验时，不要共用同一个 checkpoint 路径
 - 两台机器的 run name / 输出目录必须带机器标签
-- 需要同步脚本时，优先同步代码和配置，不要同步大 checkpoint
+- 需要同步脚本时，优先同步代码和配置；需要同步运行资产时，优先同步 `state.json` 和文件索引，不要默认同步大 checkpoint
 - 需要复现实验时，先确认口径：
   - 是 `bench_data` 子集
   - 还是 `dataset_json_rebuilt` 全量根

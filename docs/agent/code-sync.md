@@ -60,6 +60,53 @@ git push origin HEAD:main
 .\scripts\sync_laptop_repo.ps1 -SkipWorktreeUpdate
 ```
 
+## 当前推荐 Git 边界
+
+- 要长期保留、要让新 agent 自动知道的东西，放进 Git：
+  - Python / Rust 代码
+  - 测试
+  - agent 文档
+  - 调度器入口与通用调度模块
+- 机器相关、run 相关、会随环境漂移的东西，不放进 Git：
+  - `mortal/config.toml`
+  - `logs/**`
+  - `checkpoints/**`
+  - `mortal/checkpoints/file_index_supervised_json.pth`
+  - 某一轮 run 的 `state.json`
+
+## 当前对双机调度器的建议
+
+- 当前建议把下面这些文件正式纳入 Git，并通过 `main -> laptop-sync` 同步：
+  - `mortal/distributed_dispatch.py`
+  - `mortal/run_stage05_winner_refine_distributed.py`
+  - 对应测试与文档
+- 不要继续长期依赖“代码只在桌面机本地、再手工 `scp` 到笔记本”这种方式
+- 手工 `scp` 只适合：
+  - 当前还没来得及提交、但需要立刻做一次临时远端验证
+  - run 相关运行资产同步，例如 `state.json` / `file_index_supervised_json.pth`
+
+## 当前推荐顺序
+
+- 如果改动是代码逻辑：
+  - 先在桌面机工作树完成修改和测试
+  - 再提交到 `main`
+  - 再运行 `.\scripts\sync_laptop_repo.ps1`
+- 如果改动是笔记本专用运行资产：
+  - 不要提交 Git
+  - 用 `scp` / 远端脚本单独同步
+
+## 双机调度器的运行资产纪律
+
+- 当前 `winner_refine` 双机调度器代码应该走 Git
+- 但下面这些东西仍然应该视为“运行资产”，不能要求 Git 负责：
+  - 笔记本本地 `mortal/config.toml`
+  - 目标 run 的 `logs/stage05_fidelity/<run_name>/state.json`
+  - 笔记本本地 `mortal/checkpoints/file_index_supervised_json.pth`
+- 原因很简单：
+  - 它们不是通用代码
+  - 它们依赖机器路径、数据根和当前 run 状态
+  - 把它们放进 Git 只会让同步边界变脏
+
 ## 笔记本端当前状态
 
 - 当前笔记本工作树已经是 Git 仓库

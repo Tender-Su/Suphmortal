@@ -30,6 +30,10 @@
    - 当前只允许在主线 winner 协议内部启动
    - 当前默认不是自动 `top-k center`
    - 当前冻结 center 集和局部搜索规则见 `docs/agent/mainline.md`
+   - 如果笔记本参与，当前推荐执行入口是：
+     - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
+   - 这个入口的执行语义是：`seed1` 全量，`seed2` 只补 `seed1` 后仍在竞争带里的候选
+   - 它只改变任务调度方式，不改变 `winner_refine` 的候选空间和最终 winner 解释口径
 5. `P1 ablation`
    - 目标：验证 `all_three / drop_* / ce_only` 的边际贡献
    - 也需要人工确认后再启动

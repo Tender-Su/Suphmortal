@@ -45,7 +45,10 @@
 
 1. 只允许在 `A2x` 协议内部启动 `winner_refine`
 2. 直接使用 `mainline.md` 里已经冻结的 winner_refine 默认，不重新自动取 `top-k center`
-3. `winner_refine` 跑完后再次停下，再决定是否进入 `ablation`
+3. 如果让笔记本参与，不要让两台机器共同写同一个 `run_dir`；改用桌面机调度入口：
+   - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name s05_fidelity_p1_top3_cali_slim_20260329_001413`
+4. 这个双机入口只改变执行方式，不改变当前 `winner_refine` 的 center、局部搜索点或最终选模口径
+5. `winner_refine` 跑完后再次停下，再决定是否进入 `ablation`
 
 ## 不要这样做
 
