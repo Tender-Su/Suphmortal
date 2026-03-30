@@ -1,5 +1,9 @@
 # 笔记本 Stage 0.5 Loader Benchmark（2026-03-30）
 
+更新说明：
+
+- 这份文档已被 `docs/status/laptop-stage05-loader-benchmark-2026-03-31.md` 的交互前台口径复核部分覆盖
+
 ## 机器
 
 - CPU：`Intel Core i9-13900HX`

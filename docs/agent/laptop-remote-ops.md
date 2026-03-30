@@ -53,33 +53,40 @@
 
 当前决定保留为：
 
-- train：`num_workers = 6`
-- train：`file_batch_size = 7`
-- train：`prefetch_factor = 3`
+- train：`num_workers = 4`
+- train：`file_batch_size = 10`
+- train：`prefetch_factor = 4`
 
 验证默认仍保留：
 
 - val：`val_file_batch_size = 7`
-- val：`val_prefetch_factor = 6`
+- val：`val_prefetch_factor = 5`
 
 说明：
 
-- 之前的 loader 搜索是在笔记本本地 `bench_data` 代表子集上做的，不是全量数据根
-- 但 `6/7/3` 已经在同一口径下复现成功
-- `4/10/4` 很接近，可以作为近似备选
-- `6/8/3` 跑过，但不是那轮最终最优
+- `2026-03-31` 已经在笔记本交互前台窗口里重新确认过训练默认
+- 这次最小确认组里：
+  - `4/10/4` = `1.9564 steps/s`
+  - `6/7/3` = `1.8891 steps/s`
+  - `6/8/3` = `1.8872 steps/s`
+- 同一轮最小验证确认里：
+  - `7/5` = `0.8093 steps/s`
+  - `7/6` = `0.7562 steps/s`
+- 所以当前默认应更新为 `4 / 10 / 4` + `7 / 5`
 
 相关产物：
 
 - `logs/laptop_stage05_loader_bench/summary.json`
 - `logs/laptop_stage05_loader_bench/confirm_summary.json`
 - `logs/laptop_pure_train_compare_manual_20260330/repro_best_nw6_fb7_pf3_20260330/summary.json`
+- `logs/stage05_loader_ab/laptop_stage05_loader_bench_interactive_20260331/`
+- `docs/status/laptop-stage05-loader-benchmark-2026-03-31.md`
 
 注意：
 
-- 上面这批结论现在只能视为历史参考
+- `2026-03-30` 那批 `6/7/3` 结论现在只能视为历史参考
 - 后续确认到：通过 SSH `Session 0` 拉起的训练进程，在笔记本上可能被 Windows / 厂商调度偏向小核心
-- 所以后续如果还要把笔记本 benchmark 结果当作当前默认，必须在笔记本交互会话的可见窗口里重跑确认
+- 当前新的 `4/10/4 + 7/5` 默认，是在笔记本交互会话的可见窗口里重跑确认后的结果
 
 ### 双机 winner_refine 入口
 

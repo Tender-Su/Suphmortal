@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,11 @@ DEFAULT_SEED2_MIN_KEEP = 3
 DEFAULT_SEED2_SELECTION_GAP = 0.001
 DEFAULT_SEED2_MAX_KEEP = 9
 DEFAULT_REMOTE_LAUNCH_MODE = 'interactive_window'
+DEFAULT_REMOTE_SCREENING_NUM_WORKERS = 4
+DEFAULT_REMOTE_SCREENING_FILE_BATCH_SIZE = 10
+DEFAULT_REMOTE_SCREENING_PREFETCH_FACTOR = 4
+DEFAULT_REMOTE_SCREENING_VAL_FILE_BATCH_SIZE = 7
+DEFAULT_REMOTE_SCREENING_VAL_PREFETCH_FACTOR = 5
 DISPATCH_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 TASK_RESULT_SCHEMA_VERSION = 1
@@ -335,6 +341,20 @@ def load_refine_context(run_dir: Path) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def patched_base_screening(overrides: dict[str, int | None]):
+    original = dict(ab.BASE_SCREENING)
+    for key, value in overrides.items():
+        if value is None:
+            continue
+        ab.BASE_SCREENING[key] = int(value)
+    try:
+        yield
+    finally:
+        ab.BASE_SCREENING.clear()
+        ab.BASE_SCREENING.update(original)
+
+
 def execute_single_task(
     *,
     run_name: str,
@@ -342,21 +362,35 @@ def execute_single_task(
     seed: int,
     result_json: Path,
     machine_label: str,
+    screening_num_workers: int | None = None,
+    screening_file_batch_size: int | None = None,
+    screening_prefetch_factor: int | None = None,
+    screening_val_file_batch_size: int | None = None,
+    screening_val_prefetch_factor: int | None = None,
 ) -> dict[str, Any]:
     run_dir = fidelity.FIDELITY_ROOT / run_name
     context = load_refine_context(run_dir)
     candidate = context['candidate_index'].get(candidate_arm)
     if candidate is None:
         raise KeyError(f'unknown winner_refine candidate `{candidate_arm}`')
-    raw_payload = fidelity.run_arm_cached(
-        base_cfg=context['base_cfg'],
-        grouped=context['grouped'],
-        eval_splits=context['eval_splits'],
-        candidate=candidate,
-        seed=seed,
-        step_scale=context['step_scale'],
-        ab_name=build_seed_ab_name(run_name, seed),
-    )
+    with patched_base_screening(
+        {
+            'num_workers': screening_num_workers,
+            'file_batch_size': screening_file_batch_size,
+            'prefetch_factor': screening_prefetch_factor,
+            'val_file_batch_size': screening_val_file_batch_size,
+            'val_prefetch_factor': screening_val_prefetch_factor,
+        }
+    ):
+        raw_payload = fidelity.run_arm_cached(
+            base_cfg=context['base_cfg'],
+            grouped=context['grouped'],
+            eval_splits=context['eval_splits'],
+            candidate=candidate,
+            seed=seed,
+            step_scale=context['step_scale'],
+            ab_name=build_seed_ab_name(run_name, seed),
+        )
     raw_payload['machine_label'] = machine_label
     summary = fidelity.summarize_entry(
         candidate.arm_name,
@@ -630,22 +664,39 @@ def build_remote_command(
     run_name: str,
     task_state: dict[str, Any],
     remote_result_path: Path,
+    screening_overrides: dict[str, int],
 ) -> list[str]:
+    command_args = [
+        'run-task',
+        '--run-name',
+        run_name,
+        '--candidate-arm',
+        str(task_state['candidate_arm']),
+        '--seed',
+        str(task_state['seed']),
+        '--machine-label',
+        worker.label,
+    ]
+    if screening_overrides:
+        command_args.extend(
+            [
+                '--screening-num-workers',
+                str(screening_overrides['num_workers']),
+                '--screening-file-batch-size',
+                str(screening_overrides['file_batch_size']),
+                '--screening-prefetch-factor',
+                str(screening_overrides['prefetch_factor']),
+                '--screening-val-file-batch-size',
+                str(screening_overrides['val_file_batch_size']),
+                '--screening-val-prefetch-factor',
+                str(screening_overrides['val_prefetch_factor']),
+            ]
+        )
     return dispatch.build_remote_python_command(
         worker=worker,
         script_path=SCRIPT_PATH,
         remote_result_path=remote_result_path,
-        command_args=[
-            'run-task',
-            '--run-name',
-            run_name,
-            '--candidate-arm',
-            str(task_state['candidate_arm']),
-            '--seed',
-            str(task_state['seed']),
-            '--machine-label',
-            worker.label,
-        ],
+        command_args=command_args,
     )
 
 
@@ -656,6 +707,7 @@ def build_remote_interactive_window_command(
     task_state: dict[str, Any],
     remote_result_path: Path,
     remote_runtime_root: Path,
+    screening_overrides: dict[str, int],
 ) -> list[str]:
     python_args = [
         'run-task',
@@ -670,6 +722,21 @@ def build_remote_interactive_window_command(
         '--result-json',
         str(remote_result_path),
     ]
+    if screening_overrides:
+        python_args.extend(
+            [
+                '--screening-num-workers',
+                str(screening_overrides['num_workers']),
+                '--screening-file-batch-size',
+                str(screening_overrides['file_batch_size']),
+                '--screening-prefetch-factor',
+                str(screening_overrides['prefetch_factor']),
+                '--screening-val-file-batch-size',
+                str(screening_overrides['val_file_batch_size']),
+                '--screening-val-prefetch-factor',
+                str(screening_overrides['val_prefetch_factor']),
+            ]
+        )
     repo_root = Path(worker.repo or str(REPO_ROOT))
     window_title = f"MahjongAI winner_refine {task_state['task_id']}"
     python_args_base64 = base64.b64encode(json.dumps(python_args, ensure_ascii=True).encode('utf-8')).decode('ascii')
@@ -698,6 +765,7 @@ def launch_remote_task(
     task_state: dict[str, Any],
     dispatch_root: Path,
     launch_mode: str,
+    screening_overrides: dict[str, int],
 ) -> ActiveTask:
     remote_results_dir = dispatch_root / 'remote_results'
     remote_runtime_dir = dispatch_root / 'remote_runtime' / str(task_state['task_id'])
@@ -712,6 +780,7 @@ def launch_remote_task(
             run_name=run_name,
             task_state=task_state,
             remote_result_path=remote_result_path,
+            screening_overrides=screening_overrides,
         )
     elif launch_mode == 'interactive_window':
         command = build_remote_interactive_window_command(
@@ -720,6 +789,7 @@ def launch_remote_task(
             task_state=task_state,
             remote_result_path=remote_result_path,
             remote_runtime_root=remote_runtime_dir,
+            screening_overrides=screening_overrides,
         )
     else:
         raise ValueError(f'unsupported remote launch mode `{launch_mode}`')
@@ -1109,6 +1179,7 @@ def launch_task_for_worker(
     dispatch_root: Path,
     stage_name: str,
     control_state: dict[str, Any],
+    remote_screening_overrides: dict[str, int],
 ) -> ActiveTask:
     if worker.kind == 'local':
         active = launch_local_task(
@@ -1125,6 +1196,7 @@ def launch_task_for_worker(
             task_state=task_state,
             dispatch_root=dispatch_root,
             launch_mode=str(worker_control.get('launch_mode') or DEFAULT_REMOTE_LAUNCH_MODE),
+            screening_overrides=remote_screening_overrides,
         )
     else:
         raise ValueError(f'unknown worker kind `{worker.kind}`')
@@ -1264,6 +1336,13 @@ def run_dispatch(args: argparse.Namespace) -> int:
             remote_label=args.remote_label,
             ssh_key=args.ssh_key,
         )
+        remote_screening_overrides = {
+            'num_workers': int(args.remote_screening_num_workers),
+            'file_batch_size': int(args.remote_screening_file_batch_size),
+            'prefetch_factor': int(args.remote_screening_prefetch_factor),
+            'val_file_batch_size': int(args.remote_screening_val_file_batch_size),
+            'val_prefetch_factor': int(args.remote_screening_val_prefetch_factor),
+        }
         active: dict[str, ActiveTask] = {}
         while True:
             control_state = load_dispatch_control(dispatch_control_path)
@@ -1331,6 +1410,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
                     dispatch_root=dispatch_root,
                     stage_name=str(dispatch_state['stage']),
                     control_state=control_state,
+                    remote_screening_overrides=remote_screening_overrides,
                 )
                 write_dispatch_state(dispatch_state_path, dispatch_state)
             if not active and find_next_pending_task(active_stage_state(dispatch_state)) is None:
@@ -1446,6 +1526,11 @@ def parse_args() -> argparse.Namespace:
     dispatch.add_argument('--seed2-selection-gap', type=float, default=DEFAULT_SEED2_SELECTION_GAP)
     dispatch.add_argument('--seed2-max-keep', type=int, default=DEFAULT_SEED2_MAX_KEEP)
     dispatch.add_argument('--remote-launch-mode', choices=sorted(REMOTE_LAUNCH_MODES), default=DEFAULT_REMOTE_LAUNCH_MODE)
+    dispatch.add_argument('--remote-screening-num-workers', type=int, default=DEFAULT_REMOTE_SCREENING_NUM_WORKERS)
+    dispatch.add_argument('--remote-screening-file-batch-size', type=int, default=DEFAULT_REMOTE_SCREENING_FILE_BATCH_SIZE)
+    dispatch.add_argument('--remote-screening-prefetch-factor', type=int, default=DEFAULT_REMOTE_SCREENING_PREFETCH_FACTOR)
+    dispatch.add_argument('--remote-screening-val-file-batch-size', type=int, default=DEFAULT_REMOTE_SCREENING_VAL_FILE_BATCH_SIZE)
+    dispatch.add_argument('--remote-screening-val-prefetch-factor', type=int, default=DEFAULT_REMOTE_SCREENING_VAL_PREFETCH_FACTOR)
 
     run_task = subparsers.add_parser(
         'run-task',
@@ -1456,6 +1541,11 @@ def parse_args() -> argparse.Namespace:
     run_task.add_argument('--seed', type=int, required=True)
     run_task.add_argument('--machine-label', required=True)
     run_task.add_argument('--result-json', required=True)
+    run_task.add_argument('--screening-num-workers', type=int)
+    run_task.add_argument('--screening-file-batch-size', type=int)
+    run_task.add_argument('--screening-prefetch-factor', type=int)
+    run_task.add_argument('--screening-val-file-batch-size', type=int)
+    run_task.add_argument('--screening-val-prefetch-factor', type=int)
 
     status = subparsers.add_parser(
         'status',
@@ -1489,6 +1579,11 @@ def main() -> None:
             seed=args.seed,
             result_json=Path(args.result_json),
             machine_label=args.machine_label,
+            screening_num_workers=args.screening_num_workers,
+            screening_file_batch_size=args.screening_file_batch_size,
+            screening_prefetch_factor=args.screening_prefetch_factor,
+            screening_val_file_batch_size=args.screening_val_file_batch_size,
+            screening_val_prefetch_factor=args.screening_val_prefetch_factor,
         )
         print(json.dumps(fidelity.normalize_payload(payload), ensure_ascii=False, indent=2))
         return

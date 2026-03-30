@@ -110,6 +110,17 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         self.assertNotIn('started_at', task_state)
         self.assertNotIn('worker_label', task_state)
 
+    def test_patched_base_screening_restores_defaults(self):
+        original_num_workers = distributed.ab.BASE_SCREENING['num_workers']
+        original_file_batch_size = distributed.ab.BASE_SCREENING['file_batch_size']
+
+        with distributed.patched_base_screening({'num_workers': 9, 'file_batch_size': 13}):
+            self.assertEqual(9, distributed.ab.BASE_SCREENING['num_workers'])
+            self.assertEqual(13, distributed.ab.BASE_SCREENING['file_batch_size'])
+
+        self.assertEqual(original_num_workers, distributed.ab.BASE_SCREENING['num_workers'])
+        self.assertEqual(original_file_batch_size, distributed.ab.BASE_SCREENING['file_batch_size'])
+
     def test_build_remote_python_command_preserves_mortal_relative_path(self):
         worker = dispatch_module.WorkerSpec(
             kind='remote',
@@ -154,6 +165,13 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             task_state=task_state,
             remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
             remote_runtime_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\runtime\seed1__s1__demo_arm'),
+            screening_overrides={
+                'num_workers': 4,
+                'file_batch_size': 10,
+                'prefetch_factor': 4,
+                'val_file_batch_size': 7,
+                'val_prefetch_factor': 5,
+            },
         )
 
         self.assertEqual('ssh', command[0])
