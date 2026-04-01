@@ -196,6 +196,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             command[-1],
         )
         self.assertIn('-PythonArgsBase64', command[-1])
+        self.assertIn('Remove-Item -LiteralPath', command[-1])
 
     def test_handle_finished_json_task_retries_remote_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -268,6 +269,119 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             self.assertEqual('pending', task_state['status'])
             self.assertIn('bad json', task_state['error'])
             self.assertFalse(local_result_path.exists())
+
+    def test_try_collect_running_remote_result_completes_from_result_json(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_result_path = Path(tmp_dir) / 'result.json'
+            task_state = {
+                'status': 'running',
+                'remote_launch_mode': 'interactive_window',
+                'remote_task_name': 'MahjongAI-WinnerRefine-task_c',
+                'remote_runtime_root': str(Path(tmp_dir) / 'runtime' / 'task_c'),
+            }
+            active = dispatch_module.ActiveTask(
+                worker=dispatch_module.WorkerSpec(
+                    kind='remote',
+                    label='laptop',
+                    python='python',
+                    host='mahjong-laptop',
+                ),
+                stage_name='seed2',
+                task_id='task_c',
+                task_state=task_state,
+                process=type('Proc', (), {'poll': lambda self: None})(),
+                log_path=Path(tmp_dir) / 'task.log',
+                local_result_path=local_result_path,
+                remote_result_path=Path(r'C:\remote\result.json'),
+            )
+
+            with (
+                patch.object(distributed, 'fetch_remote_result'),
+                patch.object(
+                    distributed,
+                    'load_task_result',
+                    return_value={'completed_at': '2026-04-01 13:34:36', 'summary': {'ok': True, 'valid': True}},
+                ),
+                patch.object(distributed, 'interrupt_remote_active_task') as interrupt_remote_active_task,
+            ):
+                payload = distributed.try_collect_running_remote_result(active)
+
+            self.assertIsNotNone(payload)
+            self.assertEqual('completed', task_state['status'])
+            self.assertEqual('2026-04-01 13:34:36', task_state['finished_at'])
+            self.assertEqual('remote_result_json', task_state['completion_source'])
+            interrupt_remote_active_task.assert_called_once_with(active)
+
+    def test_try_collect_running_remote_result_ignores_missing_or_invalid_result(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_result_path = Path(tmp_dir) / 'result.json'
+            local_result_path.write_text('partial', encoding='utf-8')
+            task_state = {
+                'status': 'running',
+                'remote_launch_mode': 'interactive_window',
+            }
+            active = dispatch_module.ActiveTask(
+                worker=dispatch_module.WorkerSpec(
+                    kind='remote',
+                    label='laptop',
+                    python='python',
+                    host='mahjong-laptop',
+                ),
+                stage_name='seed2',
+                task_id='task_d',
+                task_state=task_state,
+                process=type('Proc', (), {'poll': lambda self: None})(),
+                log_path=Path(tmp_dir) / 'task.log',
+                local_result_path=local_result_path,
+                remote_result_path=Path(r'C:\remote\result.json'),
+            )
+
+            with (
+                patch.object(distributed, 'fetch_remote_result', side_effect=RuntimeError('missing remote result')),
+                patch.object(distributed, 'interrupt_remote_active_task') as interrupt_remote_active_task,
+            ):
+                payload = distributed.try_collect_running_remote_result(active)
+
+            self.assertIsNone(payload)
+            self.assertEqual('running', task_state['status'])
+            self.assertFalse(local_result_path.exists())
+            interrupt_remote_active_task.assert_not_called()
+
+    def test_interrupt_remote_active_task_filters_by_unique_runtime_and_result_not_bare_task_id(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_state = {
+                'status': 'running',
+                'remote_task_name': 'MahjongAI-WinnerRefine-seed1__s1__demo_arm',
+                'remote_runtime_root': r'C:\Users\numbe\Desktop\MahjongAI\logs\demo_run\distributed\remote_runtime\seed1__s1__demo_arm',
+            }
+            active = dispatch_module.ActiveTask(
+                worker=dispatch_module.WorkerSpec(
+                    kind='remote',
+                    label='laptop',
+                    python='python',
+                    host='mahjong-laptop',
+                    ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+                ),
+                stage_name='seed1',
+                task_id='seed1__s1__demo_arm',
+                task_state=task_state,
+                process=type('Proc', (), {'poll': lambda self: 0, 'pid': 4321})(),
+                log_path=Path(tmp_dir) / 'task.log',
+                local_result_path=Path(tmp_dir) / 'result.json',
+                remote_result_path=Path(
+                    r'C:\Users\numbe\Desktop\MahjongAI\logs\demo_run\distributed\remote_results\seed1__s1__demo_arm.json'
+                ),
+            )
+
+            with patch.object(distributed.subprocess, 'run') as run_mock:
+                distributed.interrupt_remote_active_task(active)
+
+            remote_command = run_mock.call_args_list[0].args[0][-1]
+            self.assertIn(r"remote_results\seed1__s1__demo_arm.json", remote_command)
+            self.assertIn(r"remote_runtime\seed1__s1__demo_arm", remote_command)
+            self.assertIn('Stop-ScheduledTask -TaskName', remote_command)
+            self.assertNotIn("$taskId", remote_command)
+            self.assertNotIn("CommandLine -like ('*' + $taskId + '*')", remote_command)
 
     def test_load_task_result_rejects_unsuccessful_training_payload(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

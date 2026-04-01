@@ -65,6 +65,37 @@ $windowEscaped = $WindowTitle.Replace("'", "''")
 $launcher = @"
 `$ErrorActionPreference = 'Stop'
 Set-Location '$repoEscaped'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleModeNative {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+}
+'@ -ErrorAction SilentlyContinue | Out-Null
+function Disable-ConsoleQuickEdit {
+    try {
+        `$STD_INPUT_HANDLE = -10
+        `$ENABLE_QUICK_EDIT_MODE = 0x40
+        `$ENABLE_EXTENDED_FLAGS = 0x80
+        `$handle = [ConsoleModeNative]::GetStdHandle(`$STD_INPUT_HANDLE)
+        if (`$handle -eq [IntPtr]::Zero -or `$handle.ToInt64() -eq -1) {
+            return
+        }
+        [uint32]`$mode = 0
+        if (-not [ConsoleModeNative]::GetConsoleMode(`$handle, [ref]`$mode)) {
+            return
+        }
+        `$mode = (`$mode -bor `$ENABLE_EXTENDED_FLAGS) -band (-bnot `$ENABLE_QUICK_EDIT_MODE)
+        [ConsoleModeNative]::SetConsoleMode(`$handle, `$mode) | Out-Null
+    }
+    catch {
+    }
+}
 try {
     `$startedPayload = @{
         task_id = '$TaskId'
@@ -72,6 +103,7 @@ try {
     }
     (`$startedPayload | ConvertTo-Json -Compress) | Set-Content -LiteralPath '$startedEscaped' -Encoding UTF8
     `$Host.UI.RawUI.WindowTitle = '$windowEscaped'
+    Disable-ConsoleQuickEdit
     `$pythonArgs = @()
     foreach (`$item in (ConvertFrom-Json -InputObject '$argsEscaped')) {
         `$pythonArgs += [string]`$item

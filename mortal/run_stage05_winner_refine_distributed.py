@@ -58,6 +58,9 @@ ActiveTask = dispatch.ActiveTask
 JsonTaskLaunchSpec = dispatch.JsonTaskLaunchSpec
 
 
+REMOTE_INTERACTIVE_TASK_NAME_PREFIX = 'MahjongAI-WinnerRefine-'
+
+
 def quote_ps(value: str) -> str:
     return dispatch.quote_ps(value)
 
@@ -1029,6 +1032,8 @@ def launch_local_task(
     logs_dir = ensure_dir(dispatch_root / 'logs')
     result_path = results_dir / f'{task_state["task_id"]}.json'
     log_path = logs_dir / f'{task_state["task_id"]}__{worker.label}.log'
+    if result_path.exists():
+        result_path.unlink()
     spec = JsonTaskLaunchSpec(
         task_id=str(task_state['task_id']),
         stage_name='',
@@ -1148,6 +1153,7 @@ def build_remote_interactive_window_command(
     window_title = f"MahjongAI {normalize_round_kind(round_kind)} {task_state['task_id']}"
     python_args_base64 = base64.b64encode(json.dumps(python_args, ensure_ascii=True).encode('utf-8')).decode('ascii')
     ps_command = (
+        f"if (Test-Path {quote_ps(str(remote_result_path))}) {{ Remove-Item -LiteralPath {quote_ps(str(remote_result_path))} -Force }}; "
         f"& {quote_ps(str(repo_root / 'scripts' / 'start_interactive_remote_python.ps1'))} "
         f"-RepoRoot {quote_ps(str(repo_root))} "
         f"-PythonExe {quote_ps(worker.python or sys.executable)} "
@@ -1182,6 +1188,8 @@ def launch_remote_task(
     remote_result_path = remote_results_dir / f'{task_state["task_id"]}.json'
     local_result_path = local_results_dir / f'{task_state["task_id"]}.json'
     log_path = logs_dir / f'{task_state["task_id"]}__{worker.label}.log'
+    if local_result_path.exists():
+        local_result_path.unlink()
     if launch_mode == 'ssh_inline':
         command = build_remote_command(
             worker=worker,
@@ -1220,6 +1228,8 @@ def launch_remote_task(
     task_state['log_path'] = str(log_path)
     task_state['remote_result_path'] = str(remote_result_path)
     task_state['remote_launch_mode'] = launch_mode
+    task_state['remote_runtime_root'] = str(remote_runtime_dir)
+    task_state['remote_task_name'] = f'{REMOTE_INTERACTIVE_TASK_NAME_PREFIX}{task_state["task_id"]}'
     task_state['started_at'] = fidelity.ts_now()
     return ActiveTask(
         worker=worker,
@@ -1267,14 +1277,30 @@ def interrupt_remote_active_task(active: ActiveTask) -> None:
     if remote_result_path is None:
         return
     match = str(remote_result_path)
+    task_name = str(active.task_state.get('remote_task_name') or f'{REMOTE_INTERACTIVE_TASK_NAME_PREFIX}{active.task_id}')
+    runtime_root = str(
+        active.task_state.get('remote_runtime_root')
+        or (Path(remote_result_path).parent.parent / 'remote_runtime' / str(active.task_id))
+    )
     kill_command = (
         "$match = "
         + quote_ps(match)
+        + "; $taskName = "
+        + quote_ps(task_name)
+        + "; $runtimeRoot = "
+        + quote_ps(runtime_root)
         + "; "
+        + "try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null } catch {} "
         + "$targets = Get-CimInstance Win32_Process "
-        + "| Where-Object Name -eq 'python.exe' "
-        + "| Where-Object CommandLine -like ('*' + $match + '*'); "
-        + "foreach ($target in $targets) { taskkill /PID $target.ProcessId /T /F | Out-Null }"
+        + "| Where-Object { $_.Name -in @('python.exe','powershell.exe','cmd.exe') } "
+        + "| Where-Object { "
+        + "($_.ProcessId -ne $PID) -and ("
+        + "($_.CommandLine -like ('*' + $match + '*')) "
+        + "-or ($_.CommandLine -like ('*' + $runtimeRoot + '*'))"
+        + ") "
+        + "}; "
+        + "foreach ($target in $targets) { taskkill /PID $target.ProcessId /T /F | Out-Null } "
+        + "try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}"
     )
     command = ['ssh']
     if active.worker.ssh_key:
@@ -1304,6 +1330,34 @@ def interrupt_active_task(active: ActiveTask) -> None:
         interrupt_remote_active_task(active)
         return
     raise ValueError(f'unsupported worker kind `{active.worker.kind}`')
+
+
+def try_collect_running_remote_result(active: ActiveTask) -> dict[str, Any] | None:
+    if active.worker.kind != 'remote':
+        return None
+    if str(active.task_state.get('status')) != 'running':
+        return None
+    if str(active.task_state.get('remote_launch_mode') or '') != 'interactive_window':
+        return None
+    if active.remote_result_path is None:
+        return None
+    local_result_path = active.local_result_path
+    try:
+        fetch_remote_result(active.worker, str(active.remote_result_path), local_result_path)
+        payload = load_task_result(local_result_path)
+    except Exception:
+        if local_result_path.exists():
+            try:
+                local_result_path.unlink()
+            except OSError:
+                pass
+        return None
+    interrupt_remote_active_task(active)
+    active.task_state['status'] = 'completed'
+    active.task_state['finished_at'] = str(payload.get('completed_at') or fidelity.ts_now())
+    active.task_state['completion_source'] = 'remote_result_json'
+    active.task_state.pop('error', None)
+    return payload
 
 
 def build_seed_round_payload(
@@ -2307,6 +2361,12 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 state_changed = True
                 write_dispatch_control(dispatch_control_path, control_state)
             for worker_label, active_task in list(active.items()):
+                if active_task.process.poll() is None:
+                    early_payload = try_collect_running_remote_result(active_task)
+                    if early_payload is not None:
+                        finished_labels.append(worker_label)
+                        state_changed = True
+                        continue
                 if active_task.process.poll() is None:
                     continue
                 handle_finished_task(active=active_task, max_attempts=args.max_attempts)
