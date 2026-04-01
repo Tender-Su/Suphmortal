@@ -392,7 +392,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
                         'summary': {
                             'ok': False,
                             'valid': False,
-                            'error': 'train_supervised entrypoint failed',
+                            'error': 'train_supervised.py failed',
                         }
                     },
                     ensure_ascii=False,

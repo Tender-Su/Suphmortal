@@ -126,6 +126,28 @@ class Stage05ABTests(unittest.TestCase):
 
             self.assertEqual(2, attempts['count'])
 
+    def test_run_training_invokes_train_supervised_script_directly(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = Path(tmp_dir) / 'config.toml'
+            cfg_path.write_text('', encoding='utf-8', newline='\n')
+            log_path = Path(tmp_dir) / 'train.log'
+
+            with patch.object(
+                stage05_ab.subprocess,
+                'run',
+                return_value=SimpleNamespace(returncode=0),
+            ) as run_mock:
+                stage05_ab.run_training(cfg_path, log_path)
+
+            run_args = run_mock.call_args
+            self.assertEqual(
+                [stage05_ab.sys.executable, 'train_supervised.py'],
+                run_args.args[0],
+            )
+            self.assertEqual(stage05_ab.MORTAL_DIR, run_args.kwargs['cwd'])
+            self.assertEqual(str(cfg_path), run_args.kwargs['env']['MORTAL_CFG'])
+            self.assertFalse(run_args.kwargs['check'])
+
     def test_load_state_summary_with_fallback_uses_latest_when_best_checkpoint_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
