@@ -88,12 +88,15 @@ def build_p1_search_space(calibration: dict[str, object]) -> dict[str, object]:
         ),
         'calibration_protocol_arms': list(calibration.get('calibration_protocol_arms', [])),
         'inherited_single_head_source': calibration.get('inherited_single_head_source'),
+        'protocol_decide_coordinate_mode': fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
         'protocol_decide_total_budget_ratios': list(fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
         'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
         'ranking_mode': fidelity.P1_RANKING_MODE,
         'eligibility_group_key': fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
         'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
         'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
+        'budget_ratio_digits': fidelity.P1_BUDGET_RATIO_DIGITS,
+        'aux_weight_digits': fidelity.P1_AUX_WEIGHT_DIGITS,
         'mapping_mode': calibration.get('mapping_mode', fidelity.P1_CALIBRATION_MAPPING_MODE),
         'combo_scheme': calibration.get('combo_scheme', fidelity.P1_CALIBRATION_SCHEME),
         'opp_weight_per_budget_unit': calibration['opp_weight_per_budget_unit'],
@@ -133,6 +136,109 @@ def normalize_protocol_arm_list(value: object) -> list[str] | None:
     if not normalized:
         return None
     return dedupe_protocol_arms(normalized)
+
+
+def normalize_candidate_name_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def infer_protocol_arm_from_candidate_name(candidate_arm: str) -> str:
+    return str(candidate_arm).split('__', 1)[0].strip()
+
+
+def hydrate_post_protocol_decide_search_space(
+    *,
+    p1_state: dict,
+    final_conclusion: dict,
+    require_winner_refine_selection: bool,
+    require_effective_precision: bool,
+) -> dict[str, object]:
+    raw_search_space = p1_state.get('search_space')
+    search_space: dict[str, object] = dict(raw_search_space) if isinstance(raw_search_space, dict) else {}
+    selected_protocol_arm = str(
+        p1_state.get('selected_protocol_arm')
+        or final_conclusion.get('p1_protocol_winner')
+        or ''
+    ).strip()
+    explicit_center_arm_names = normalize_candidate_name_list(search_space.get('winner_refine_center_arm_names'))
+    persisted_centers = explicit_center_arm_names or normalize_candidate_name_list(p1_state.get('winner_refine_centers'))
+    if persisted_centers:
+        search_space['winner_refine_center_mode'] = 'explicit_arm_names'
+        search_space['winner_refine_center_arm_names'] = list(persisted_centers)
+        if not str(search_space.get('winner_refine_center_protocol_arm', '') or '').strip():
+            inferred_protocol_arm = selected_protocol_arm or infer_protocol_arm_from_candidate_name(persisted_centers[0])
+            if inferred_protocol_arm:
+                search_space['winner_refine_center_protocol_arm'] = inferred_protocol_arm
+
+    mode = str(search_space.get('winner_refine_center_mode', '') or '').strip()
+    if require_winner_refine_selection:
+        if mode == 'explicit_arm_names':
+            explicit_center_arm_names = normalize_candidate_name_list(search_space.get('winner_refine_center_arm_names'))
+            if not explicit_center_arm_names:
+                raise RuntimeError(
+                    'existing p1-only run already completed protocol_decide, but persisted winner_refine centers are missing; '
+                    'cannot safely continue winner_refine with current defaults'
+                )
+        elif mode == 'top_ranked_keep':
+            if search_space.get('winner_refine_center_keep') is None:
+                raise RuntimeError(
+                    'existing p1-only run already completed protocol_decide, but winner_refine_center_keep is missing; '
+                    'cannot safely continue winner_refine with current defaults'
+                )
+        else:
+            raise RuntimeError(
+                'existing p1-only run already completed protocol_decide, but persisted search_space does not preserve '
+                'a recoverable winner_refine center selection; restore the original search_space or winner_refine_centers'
+            )
+
+    reference_arm_names = list(persisted_centers)
+    winner_refine_round = p1_state.get('winner_refine_round')
+    if isinstance(winner_refine_round, dict):
+        reference_arm_names.extend(
+            str(entry.get('arm_name')).strip()
+            for entry in winner_refine_round.get('ranking', [])
+            if isinstance(entry, dict) and str(entry.get('arm_name', '')).strip()
+        )
+    if (
+        search_space.get('budget_ratio_digits') is None
+        or search_space.get('aux_weight_digits') is None
+    ):
+        inferred_precision = fidelity.infer_effective_precision_from_arm_names(reference_arm_names)
+        if inferred_precision is not None:
+            budget_digits, aux_digits = inferred_precision
+            search_space.setdefault('budget_ratio_digits', budget_digits)
+            search_space.setdefault('aux_weight_digits', aux_digits)
+    if not str(search_space.get('protocol_decide_coordinate_mode', '') or '').strip():
+        if any('__B_' in arm_name for arm_name in reference_arm_names):
+            search_space['protocol_decide_coordinate_mode'] = fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
+    coordinate_mode = fidelity.protocol_decide_coordinate_mode_from_search_space(search_space)
+    if coordinate_mode == fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
+        search_space.setdefault('budget_ratio_digits', 3)
+        search_space.setdefault('aux_weight_digits', 3)
+    if (
+        require_effective_precision
+        and coordinate_mode == fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE
+        and (
+            search_space.get('budget_ratio_digits') is None
+            or search_space.get('aux_weight_digits') is None
+        )
+    ):
+        raise RuntimeError(
+            'existing p1-only run already completed protocol_decide under effective coordinates, '
+            'but persisted search_space precision is missing; cannot safely continue with current defaults'
+        )
+    if (
+        coordinate_mode == fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE
+        and not require_effective_precision
+        and (
+            search_space.get('budget_ratio_digits') is None
+            or search_space.get('aux_weight_digits') is None
+        )
+    ):
+        return fidelity.apply_protocol_decide_progressive_settings(search_space)
+    return fidelity.apply_protocol_decide_progressive_settings(search_space)
 
 
 def infer_resume_seed(state: dict) -> int | None:
@@ -496,7 +602,20 @@ def run_p1_only(
             calibration['shared_rank_template_mean'] = rank_template_mean
             calibration['calibration_protocol_arms'] = list(resolved_calibration_protocol_arms)
             p1_state['calibration'] = calibration
-            if not isinstance(p1_state.get('search_space'), dict):
+            protocol_decide_round = p1_state.get('protocol_decide_round')
+            winner_refine_round = p1_state.get('winner_refine_round')
+            if isinstance(protocol_decide_round, dict):
+                need_winner_refine_rebuild = continue_to_winner_refine and not isinstance(winner_refine_round, dict)
+                need_effective_precision = need_winner_refine_rebuild or (
+                    continue_to_ablation and isinstance(winner_refine_round, dict)
+                )
+                p1_state['search_space'] = hydrate_post_protocol_decide_search_space(
+                    p1_state=p1_state,
+                    final_conclusion=state['final_conclusion'],
+                    require_winner_refine_selection=need_winner_refine_rebuild,
+                    require_effective_precision=need_effective_precision,
+                )
+            elif not isinstance(p1_state.get('search_space'), dict):
                 p1_state['search_space'] = build_p1_search_space(calibration)
             else:
                 p1_state['search_space'] = fidelity.apply_protocol_decide_progressive_settings(
@@ -506,6 +625,10 @@ def run_p1_only(
         if stop_after_calibration:
             state['status'] = 'stopped_after_p1_calibration'
         else:
+            search_space = fidelity.apply_protocol_decide_progressive_settings(
+                p1_state.get('search_space'),
+            )
+            p1_state['search_space'] = search_space
             protocol_decide_round = (
                 p1_state.get('protocol_decide_round') if isinstance(p1_state.get('protocol_decide_round'), dict) else None
             )
@@ -523,10 +646,6 @@ def run_p1_only(
                 or ''
             ).strip()
             if not isinstance(protocol_decide_round, dict):
-                search_space = fidelity.apply_protocol_decide_progressive_settings(
-                    p1_state.get('search_space'),
-                )
-                p1_state['search_space'] = search_space
                 state['status'] = 'running_p1_protocol_decide'
                 fidelity.atomic_write_json(state_path, state)
                 fidelity.update_results_doc(run_dir, state)
@@ -538,7 +657,11 @@ def run_p1_only(
                     base_cfg=base_cfg,
                     grouped=grouped,
                     eval_splits=eval_splits,
-                    candidates=fidelity.build_p1_protocol_decide_candidates(protocols, calibration),
+                    candidates=fidelity.build_p1_protocol_decide_candidates(
+                        protocols,
+                        calibration,
+                        search_space=search_space,
+                    ),
                     seed=seed + 505,
                     seed_offsets=fidelity.P1_PROTOCOL_DECIDE_SEED_OFFSETS,
                     step_scale=fidelity.P1_PROTOCOL_DECIDE_STEP_SCALE,
@@ -589,12 +712,15 @@ def run_p1_only(
                     fidelity.atomic_write_json(state_path, state)
                     fidelity.update_results_doc(run_dir, state)
 
+                    winner_center_selection = fidelity.winner_refine_center_selection_from_search_space(
+                        search_space,
+                        selected_protocol_arm,
+                    )
                     winner_centers = select_protocol_centers(
                         protocol_decide_round['ranking'],
                         protocol_arm=selected_protocol_arm,
-                        explicit_arm_names=fidelity.current_p1_winner_refine_explicit_center_arm_names(
-                            selected_protocol_arm
-                        ),
+                        keep=winner_center_selection['keep'],
+                        explicit_arm_names=winner_center_selection['explicit_arm_names'],
                     )
                     p1_state['winner_refine_centers'] = [candidate.arm_name for candidate in winner_centers]
                     winner_refine_round = fidelity.execute_round_multiseed(
@@ -608,6 +734,7 @@ def run_p1_only(
                             protocols,
                             calibration,
                             winner_centers,
+                            search_space=search_space,
                         ),
                         seed=seed + 606,
                         seed_offsets=fidelity.P1_WINNER_REFINE_SEED_OFFSETS,
@@ -658,6 +785,7 @@ def run_p1_only(
                                 protocols,
                                 calibration,
                                 refine_winner,
+                                search_space=search_space,
                             ),
                             seed=seed + 707,
                             seed_offsets=fidelity.P1_ABLATION_SEED_OFFSETS,

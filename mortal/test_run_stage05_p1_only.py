@@ -18,7 +18,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertTrue(all(candidate.meta['protocol_arm'] == candidate.arm_name for candidate in candidates))
         self.assertTrue(all(candidate.meta['selection_source'] == 'frozen_top3' for candidate in candidates))
 
-    def test_build_p1_search_space_uses_explicit_winner_refine_defaults(self):
+    def test_build_p1_search_space_uses_current_winner_refine_defaults(self):
         search_space = p1_only.build_p1_search_space(
             {
                 'budget_ratios': [0.0, 0.25],
@@ -40,8 +40,20 @@ class Stage05P1OnlyTests(unittest.TestCase):
             search_space['winner_refine_center_mode'],
         )
         self.assertEqual(
-            p1_only.fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
-            search_space['winner_refine_center_protocol_arm'],
+            p1_only.fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
+            search_space['protocol_decide_coordinate_mode'],
+        )
+        self.assertEqual(
+            list(p1_only.fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
+            search_space['protocol_decide_total_budget_ratios'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.current_protocol_decide_mix_payload(),
+            search_space['protocol_decide_mixes'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.P1_WINNER_REFINE_CENTER_KEEP,
+            search_space['winner_refine_center_keep'],
         )
         self.assertEqual(
             list(p1_only.fidelity.P1_WINNER_REFINE_CENTER_ARM_NAMES),
@@ -454,8 +466,8 @@ class Stage05P1OnlyTests(unittest.TestCase):
                 ),
                 patch.object(
                     p1_only.fidelity,
-                    'current_p1_winner_refine_explicit_center_arm_names',
-                    return_value=(refine_winner.arm_name,),
+                    'winner_refine_center_selection_from_search_space',
+                    return_value={'keep': None, 'explicit_arm_names': (refine_winner.arm_name,)},
                 ),
                 patch.object(p1_only, 'build_protocol_compare', return_value=protocol_compare),
             ):
@@ -618,8 +630,8 @@ class Stage05P1OnlyTests(unittest.TestCase):
                 ),
                 patch.object(
                     p1_only.fidelity,
-                    'current_p1_winner_refine_explicit_center_arm_names',
-                    return_value=(refine_winner.arm_name,),
+                    'winner_refine_center_selection_from_search_space',
+                    return_value={'keep': None, 'explicit_arm_names': (refine_winner.arm_name,)},
                 ),
                 patch.object(p1_only, 'build_protocol_compare', return_value=protocol_compare),
             ):
@@ -719,6 +731,9 @@ class Stage05P1OnlyTests(unittest.TestCase):
                         ],
                     },
                     'selected_protocol_arm': resumed_protocol_arm,
+                    'winner_refine_centers': [
+                        f'{resumed_protocol_arm}__B_r0046_o0037_d0037',
+                    ],
                 },
                 'final_conclusion': {
                     'p1_entry_protocols': [resumed_protocol_arm],
@@ -793,8 +808,8 @@ class Stage05P1OnlyTests(unittest.TestCase):
                 ) as build_protocol_compare,
                 patch.object(
                     p1_only.fidelity,
-                    'current_p1_winner_refine_explicit_center_arm_names',
-                    return_value=(refine_winner.arm_name,),
+                    'winner_refine_center_selection_from_search_space',
+                    return_value={'keep': None, 'explicit_arm_names': (refine_winner.arm_name,)},
                 ),
                 patch.object(p1_only, 'select_protocol_centers', return_value=[refine_winner]) as select_protocol_centers,
             ):
@@ -824,6 +839,161 @@ class Stage05P1OnlyTests(unittest.TestCase):
         execute_round_progressive_multiseed.assert_not_called()
         build_protocol_compare.assert_not_called()
         select_protocol_centers.assert_called_once()
+        execute_round_multiseed.assert_called_once()
+
+    def test_run_p1_only_continue_to_winner_refine_recovers_sparse_legacy_search_space_from_persisted_centers(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / 'p1_only_run'
+            run_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = run_dir / 'run.lock.json'
+            resumed_seed = 4321
+            protocol_arm = p1_only.FROZEN_TOP3[0]
+            protocol_candidate = p1_only.build_protocol_candidate(protocol_arm)
+            calibration = {
+                'budget_ratios': [0.0, 0.25],
+                'calibration_mode': 'combo_only',
+                'mapping_mode': 'hybrid_loss_grad_geomean',
+                'combo_scheme': 'single_head_mapping_plus_pairwise_triple_combo',
+                'opp_weight_per_budget_unit': 0.064,
+                'danger_weight_per_budget_unit': 0.144,
+                'triple_combo_factor': 0.84,
+                'joint_combo_factor': 0.884,
+                'protocol_triple_combo_factors': {protocol_arm: 0.85},
+                'protocol_joint_combo_factors': {protocol_arm: 0.91},
+            }
+            persisted_centers = [
+                f'{protocol_arm}__B_r0046_o0037_d0037',
+                f'{protocol_arm}__B_r0034_o0014_d0041',
+            ]
+            refine_winner = p1_only.fidelity.CandidateSpec(
+                arm_name='resume_refine_winner',
+                scheduler_profile=protocol_candidate.scheduler_profile,
+                curriculum_profile=protocol_candidate.curriculum_profile,
+                weight_profile=protocol_candidate.weight_profile,
+                window_profile=protocol_candidate.window_profile,
+                cfg_overrides={},
+                meta={
+                    'protocol_arm': protocol_arm,
+                    'aux_family': 'all_three',
+                    'rank_budget_ratio': 0.05,
+                    'opp_budget_ratio': 0.04,
+                    'danger_budget_ratio': 0.03,
+                },
+            )
+            existing_state = {
+                'started_at': '2026-03-29 10:00:00',
+                'seed': resumed_seed,
+                'mode': 'p1_only',
+                'status': 'stopped_after_p1_protocol_decide',
+                'selected_protocol_arms': [protocol_arm],
+                'p1': {
+                    'protocol_arms': [protocol_arm],
+                    'calibration_mode': 'combo_only',
+                    'calibration_protocol_arms': [protocol_arm],
+                    'calibration': dict(calibration),
+                    'search_space': {
+                        'budget_ratios': calibration['budget_ratios'],
+                        'calibration_mode': 'combo_only',
+                        'calibration_protocol_arms': [protocol_arm],
+                    },
+                    'calibration_round': {'seed': resumed_seed + 404},
+                    'protocol_decide_round': {
+                        'round_name': 'p1_protocol_decide_round',
+                        'ranking': [],
+                        'seed': resumed_seed + 505,
+                    },
+                    'protocol_compare': {
+                        'round_name': 'p1_protocol_compare',
+                        'ranking': [
+                            {
+                                'arm_name': protocol_arm,
+                                'candidate_meta': {'protocol_arm': protocol_arm},
+                            }
+                        ],
+                    },
+                    'selected_protocol_arm': protocol_arm,
+                    'winner_refine_centers': list(persisted_centers),
+                },
+                'final_conclusion': {
+                    'p1_entry_protocols': [protocol_arm],
+                    'p1_protocol_winner': protocol_arm,
+                },
+            }
+            (run_dir / 'state.json').write_text(json.dumps(existing_state, ensure_ascii=False), encoding='utf-8')
+
+            with (
+                patch.object(p1_only.fidelity, 'acquire_run_lock', return_value=lock_path),
+                patch.object(p1_only.fidelity, 'release_run_lock'),
+                patch.object(p1_only.fidelity, 'update_results_doc'),
+                patch('builtins.print'),
+                patch.object(p1_only.ab, 'build_base_config', return_value={'control': {'version': 4}}),
+                patch.object(p1_only.ab, 'load_all_files', return_value=['dummy.json.gz']),
+                patch.object(p1_only.ab, 'group_files_by_month', return_value={'202501': ['dummy.json.gz']}),
+                patch.object(
+                    p1_only.ab,
+                    'build_eval_splits',
+                    return_value={
+                        'monitor_recent_files': ['monitor.json.gz'],
+                        'full_recent_files': ['recent.json.gz'],
+                        'old_regression_files': ['old.json.gz'],
+                    },
+                ),
+                patch.object(p1_only.fidelity, 'rank_weight_mean_for_files', return_value=0.05),
+                patch.object(p1_only.fidelity, 'build_p1_calibration_candidates') as build_p1_calibration_candidates,
+                patch.object(p1_only.fidelity, 'derive_p1_budget_calibration') as derive_calibration,
+                patch.object(p1_only.fidelity, 'build_p1_protocol_decide_candidates') as build_p1_protocol_decide_candidates,
+                patch.object(p1_only.fidelity, 'execute_round_progressive_multiseed') as execute_round_progressive_multiseed,
+                patch.object(
+                    p1_only.fidelity,
+                    'build_p1_winner_refine_candidates',
+                    return_value=['winner_refine_candidate'],
+                ) as build_p1_winner_refine_candidates,
+                patch.object(
+                    p1_only.fidelity,
+                    'execute_round_multiseed',
+                    return_value={
+                        'round_name': 'p1_winner_refine_round',
+                        'ranking': [
+                            {
+                                'arm_name': refine_winner.arm_name,
+                                'candidate_meta': refine_winner.meta,
+                                'scheduler_profile': refine_winner.scheduler_profile,
+                                'curriculum_profile': refine_winner.curriculum_profile,
+                                'weight_profile': refine_winner.weight_profile,
+                                'window_profile': refine_winner.window_profile,
+                                'cfg_overrides': refine_winner.cfg_overrides,
+                                'valid': True,
+                            }
+                        ],
+                        'seed': resumed_seed + 606,
+                    },
+                ) as execute_round_multiseed,
+                patch.object(p1_only, 'select_protocol_centers', return_value=[refine_winner]) as select_protocol_centers,
+            ):
+                state = p1_only.run_p1_only(
+                    run_dir=run_dir,
+                    continue_to_winner_refine=True,
+                )
+
+        self.assertEqual('stopped_after_p1_winner_refine', state['status'])
+        self.assertEqual('explicit_arm_names', state['p1']['search_space']['winner_refine_center_mode'])
+        self.assertEqual(persisted_centers, state['p1']['search_space']['winner_refine_center_arm_names'])
+        self.assertEqual(protocol_arm, state['p1']['search_space']['winner_refine_center_protocol_arm'])
+        self.assertEqual(3, state['p1']['search_space']['budget_ratio_digits'])
+        self.assertEqual(3, state['p1']['search_space']['aux_weight_digits'])
+        self.assertEqual(
+            tuple(persisted_centers),
+            select_protocol_centers.call_args.kwargs['explicit_arm_names'],
+        )
+        build_p1_calibration_candidates.assert_not_called()
+        derive_calibration.assert_not_called()
+        build_p1_protocol_decide_candidates.assert_not_called()
+        execute_round_progressive_multiseed.assert_not_called()
+        build_p1_winner_refine_candidates.assert_called_once()
+        self.assertEqual(
+            persisted_centers,
+            build_p1_winner_refine_candidates.call_args.kwargs['search_space']['winner_refine_center_arm_names'],
+        )
         execute_round_multiseed.assert_called_once()
 
     def test_run_p1_only_default_flow_resumes_from_stopped_calibration(self):

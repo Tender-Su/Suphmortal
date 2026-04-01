@@ -1,8 +1,8 @@
 # Stage 0.5 保真版 A/B 实时结果 (historical snapshot)
 
 - 运行目录：`C:\Users\numbe\Desktop\MahjongAI\logs\stage05_fidelity\s05_fidelity_p1_top3_cali_slim_20260329_001413`
-- 更新时间：`2026-03-30 20:00:49`
-- 当前状态：`stopped_after_p1_protocol_decide`
+- 更新时间：`2026-04-01 04:17:36`
+- 当前状态：`running_p1_protocol_decide`
 - 自动串联范围：`P0 + P1 + P2 + Stage 0.5 formal`
 - 说明：`P3(Stage 1 transfer)` 不作为本轮 `Stage 0.5 formal` 启动前置条件，避免把 Stage 1 下游转移实验混入 0.5 阶段主协议定型。
 

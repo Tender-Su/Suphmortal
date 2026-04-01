@@ -55,6 +55,24 @@ CURRENT_P1_SINGLE_HEAD_CALIBRATION_BASELINE = {
     'fallback_used': False,
 }
 
+# Current protocol_decide search keeps the original centered/fair budget grid,
+# but downstream candidate generation now projects it into landed effective
+# coordinates at higher precision instead of collapsing many points onto the
+# same 3-decimal aux weights.
+CURRENT_P1_PROTOCOL_DECIDE_COORDINATE_MODE = 'projected_effective_from_budget_grid_v2'
+CURRENT_P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS = (
+    0.09,
+    0.12,
+)
+CURRENT_P1_PROTOCOL_DECIDE_MIXES = (
+    ('anchor', 0.43, 0.21, 0.36),
+    ('rank_lean', 0.53, 0.16, 0.31),
+    ('opp_lean', 0.38, 0.31, 0.31),
+    ('danger_lean', 0.38, 0.16, 0.46),
+)
+CURRENT_P1_BUDGET_RATIO_DIGITS = 4
+CURRENT_P1_AUX_WEIGHT_DIGITS = 5
+
 # Current protocol_decide seed2 expansion defaults. Keep the current mainline
 # on the explicit flip-or-gap rule; only preserve the old ambiguity mode for
 # historical run compatibility when reading archived state.
@@ -62,13 +80,10 @@ CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = 'flip_or_gap'
 CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD = 0.001
 CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_NOISE_MARGIN_MULT = 2.0
 
-# Current winner_refine defaults frozen after the verified A2x protocol_decide
-# closeout on 2026-03-30. These are explicit center arms, not an auto top-k
-# rule, so future changes must update both code and docs intentionally.
+# Current winner_refine defaults now bootstrap from the rerun
+# protocol_decide ranking in the same realized-coordinate space instead of
+# relying on the retired explicit frozen centers from the old budget-ratio run.
 CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
-CURRENT_P1_WINNER_REFINE_CENTER_MODE = 'explicit_arm_names'
-CURRENT_P1_WINNER_REFINE_CENTER_ARMS = (
-    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037',
-    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041',
-    'C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043',
-)
+CURRENT_P1_WINNER_REFINE_CENTER_MODE = 'top_ranked_keep'
+CURRENT_P1_WINNER_REFINE_CENTER_KEEP = 3
+CURRENT_P1_WINNER_REFINE_CENTER_ARMS = ()

@@ -43,6 +43,14 @@ DISPATCH_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 TASK_RESULT_SCHEMA_VERSION = 1
 REMOTE_LAUNCH_MODES = frozenset({'ssh_inline', 'interactive_window'})
+ROUND_KIND_WINNER_REFINE = 'winner_refine'
+ROUND_KIND_PROTOCOL_DECIDE = 'protocol_decide'
+ROUND_KIND_ABLATION = 'ablation'
+ROUND_KIND_CHOICES = (
+    ROUND_KIND_WINNER_REFINE,
+    ROUND_KIND_PROTOCOL_DECIDE,
+    ROUND_KIND_ABLATION,
+)
 
 
 WorkerSpec = dispatch.WorkerSpec
@@ -58,16 +66,32 @@ def path_to_scp_remote(path: str | Path) -> str:
     return dispatch.path_to_scp_remote(path)
 
 
-def dispatch_root_for_run(run_dir: Path) -> Path:
-    return run_dir / 'distributed' / 'winner_refine_dispatch'
+def normalize_round_kind(round_kind: str) -> str:
+    value = str(round_kind or ROUND_KIND_WINNER_REFINE).strip().lower()
+    if value not in ROUND_KIND_CHOICES:
+        raise ValueError(f'unsupported round kind `{round_kind}`')
+    return value
 
 
-def dispatch_state_path_for_run(run_dir: Path) -> Path:
-    return dispatch_root_for_run(run_dir) / 'dispatch_state.json'
+def dispatch_dir_name(round_kind: str) -> str:
+    normalized = normalize_round_kind(round_kind)
+    if normalized == ROUND_KIND_PROTOCOL_DECIDE:
+        return 'protocol_decide_dispatch'
+    if normalized == ROUND_KIND_ABLATION:
+        return 'ablation_dispatch'
+    return 'winner_refine_dispatch'
 
 
-def dispatch_control_path_for_run(run_dir: Path) -> Path:
-    return dispatch_root_for_run(run_dir) / 'dispatch_control.json'
+def dispatch_root_for_run(run_dir: Path, round_kind: str = ROUND_KIND_WINNER_REFINE) -> Path:
+    return run_dir / 'distributed' / dispatch_dir_name(round_kind)
+
+
+def dispatch_state_path_for_run(run_dir: Path, round_kind: str = ROUND_KIND_WINNER_REFINE) -> Path:
+    return dispatch_root_for_run(run_dir, round_kind) / 'dispatch_state.json'
+
+
+def dispatch_control_path_for_run(run_dir: Path, round_kind: str = ROUND_KIND_WINNER_REFINE) -> Path:
+    return dispatch_root_for_run(run_dir, round_kind) / 'dispatch_control.json'
 
 
 def ensure_dir(path: Path) -> Path:
@@ -98,12 +122,31 @@ def summarize_dispatch_task_status(stage_state: dict[str, Any]) -> dict[str, int
     return dispatch.summarize_task_status(stage_state.get('tasks', {}))
 
 
-def build_seed_round_name(seed: int) -> str:
+def build_seed_round_name(seed: int, round_kind: str = ROUND_KIND_WINNER_REFINE) -> str:
+    normalized = normalize_round_kind(round_kind)
+    if normalized == ROUND_KIND_PROTOCOL_DECIDE:
+        return f'p1_protocol_decide_round__s{seed}'
+    if normalized == ROUND_KIND_ABLATION:
+        return f'p1_ablation_round__s{seed}'
     return f'p1_winner_refine_round__s{seed}'
 
 
-def build_seed_ab_name(run_name: str, seed: int) -> str:
+def build_seed_ab_name(run_name: str, seed: int, round_kind: str = ROUND_KIND_WINNER_REFINE) -> str:
+    normalized = normalize_round_kind(round_kind)
+    if normalized == ROUND_KIND_PROTOCOL_DECIDE:
+        return f'{run_name}_p1_protocol_decide_s{seed}'
+    if normalized == ROUND_KIND_ABLATION:
+        return f'{run_name}_p1_ablation_s{seed}'
     return f'{run_name}_p1_winner_refine_s{seed}'
+
+
+def final_round_name_for_round_kind(round_kind: str) -> str:
+    normalized = normalize_round_kind(round_kind)
+    if normalized == ROUND_KIND_PROTOCOL_DECIDE:
+        return 'p1_protocol_decide_round'
+    if normalized == ROUND_KIND_ABLATION:
+        return 'p1_ablation_round'
+    return 'p1_winner_refine_round'
 
 
 def load_dispatch_state(path: Path) -> dict[str, Any]:
@@ -226,10 +269,12 @@ def update_run_state_for_dispatch(
     run_dir: Path,
     dispatch_state_path: Path,
     dispatch_state: dict[str, Any],
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     front_runner: str | None = None,
     final_round: dict[str, Any] | None = None,
     status_override: str | None = None,
 ) -> None:
+    normalized_round_kind = normalize_round_kind(round_kind)
     state_path = run_dir / 'state.json'
     state = fidelity.load_json(state_path)
     p1_state = state.setdefault('p1', {})
@@ -246,32 +291,73 @@ def update_run_state_for_dispatch(
     dispatch_summary = {
         'mode': 'desktop_dispatch_plus_optional_ssh_remote',
         'schema_version': DISPATCH_SCHEMA_VERSION,
+        'round_kind': normalized_round_kind,
         'dispatch_state_path': str(dispatch_state_path),
         'stage': dispatch_state.get('stage'),
         'status': dispatch_state.get('status'),
         'seed1_candidate_count': seed1_state.get('candidate_count'),
         'seed2_candidate_count': seed2_state.get('candidate_count'),
-        'seed2_selected_arm_names': list(
-            seed2_selector.get('selected_arm_names', [])
-        ),
         'local_label': dispatch_state.get('local_label'),
         'remote_label': dispatch_state.get('remote_label'),
     }
-    p1_state['winner_refine_dispatch'] = dispatch_summary
-    if dispatch_state.get('winner_refine_centers'):
-        p1_state['winner_refine_centers'] = list(dispatch_state['winner_refine_centers'])
-    if final_round is not None:
-        p1_state['winner_refine_round'] = final_round
-    if front_runner:
-        p1_state['winner_refine_front_runner'] = front_runner
-        final_conclusion['p1_refine_front_runner'] = front_runner
-    if status_override:
-        state['status'] = status_override
-    elif final_round is not None:
-        if not state.get('final_conclusion', {}).get('p1_winner'):
-            state['status'] = 'stopped_after_p1_winner_refine'
+    if normalized_round_kind == ROUND_KIND_PROTOCOL_DECIDE:
+        seed2_plan = dispatch_state.get('seed2_plan')
+        if not isinstance(seed2_plan, dict):
+            seed2_plan = {}
+        dispatch_summary['seed2_probe_arm_names'] = list(seed2_plan.get('probe_candidate_names', []))
+        dispatch_summary['seed2_decision_arm_names'] = list(seed2_plan.get('decision_candidate_names', []))
+        dispatch_summary['expanded_groups'] = list(seed2_plan.get('expanded_groups', []))
+        p1_state['protocol_decide_dispatch'] = dispatch_summary
+        if final_round is not None:
+            p1_state['protocol_decide_round'] = final_round
+        protocol_compare = dispatch_state.get('final_protocol_compare')
+        if isinstance(protocol_compare, dict):
+            p1_state['protocol_compare'] = protocol_compare
+        selected_protocol_arm = str(dispatch_state.get('final_protocol_winner') or front_runner or '').strip()
+        if selected_protocol_arm:
+            p1_state['selected_protocol_arm'] = selected_protocol_arm
+            final_conclusion['p1_protocol_winner'] = selected_protocol_arm
+        if status_override:
+            state['status'] = status_override
+        elif final_round is not None:
+            if not p1_only.has_completed_p1_results(state):
+                state['status'] = 'stopped_after_p1_protocol_decide'
+        else:
+            state['status'] = 'running_p1_protocol_decide'
+    elif normalized_round_kind == ROUND_KIND_WINNER_REFINE:
+        dispatch_summary['seed2_selected_arm_names'] = list(seed2_selector.get('selected_arm_names', []))
+        p1_state['winner_refine_dispatch'] = dispatch_summary
+        if dispatch_state.get('winner_refine_centers'):
+            p1_state['winner_refine_centers'] = list(dispatch_state['winner_refine_centers'])
+        if final_round is not None:
+            p1_state['winner_refine_round'] = final_round
+        if front_runner:
+            p1_state['winner_refine_front_runner'] = front_runner
+            final_conclusion['p1_refine_front_runner'] = front_runner
+        if status_override:
+            state['status'] = status_override
+        elif final_round is not None:
+            if not state.get('final_conclusion', {}).get('p1_winner'):
+                state['status'] = 'stopped_after_p1_winner_refine'
+        else:
+            state['status'] = 'running_p1_winner_refine'
     else:
-        state['status'] = 'running_p1_winner_refine'
+        p1_state['ablation_dispatch'] = dispatch_summary
+        if final_round is not None:
+            p1_state['ablation_round'] = final_round
+            p1_state['final_compare'] = {
+                'round_name': 'p1_final_compare',
+                'ranking': list(final_round.get('ranking', [])),
+            }
+        if front_runner:
+            p1_state['winner'] = front_runner
+            final_conclusion['p1_winner'] = front_runner
+        if status_override:
+            state['status'] = status_override
+        elif final_round is not None:
+            state['status'] = 'completed'
+        else:
+            state['status'] = 'running_p1_ablation'
     fidelity.atomic_write_json(state_path, state)
     fidelity.update_results_doc(run_dir, state)
 
@@ -312,15 +398,36 @@ def load_refine_context(run_dir: Path) -> dict[str, Any]:
     grouped = ab.group_files_by_month(ab.load_all_files())
     eval_splits = ab.build_eval_splits(grouped, seed + 55, ab.BASE_SCREENING['eval_files'])
     protocols = p1_only.build_protocol_candidates(protocol_arms)
-    explicit_centers = fidelity.current_p1_winner_refine_explicit_center_arm_names(selected_protocol_arm)
+    search_space = p1_only.hydrate_post_protocol_decide_search_space(
+        p1_state=p1_state,
+        final_conclusion=state.get('final_conclusion') if isinstance(state.get('final_conclusion'), dict) else {},
+        require_winner_refine_selection=True,
+        require_effective_precision=True,
+    )
+    winner_center_selection = fidelity.winner_refine_center_selection_from_search_space(
+        search_space,
+        selected_protocol_arm,
+    )
     winner_centers = p1_only.select_protocol_centers(
         protocol_decide_round['ranking'],
         protocol_arm=selected_protocol_arm,
-        explicit_arm_names=explicit_centers,
+        keep=winner_center_selection['keep'],
+        explicit_arm_names=winner_center_selection['explicit_arm_names'],
     )
-    candidates = fidelity.build_p1_winner_refine_candidates(protocols, calibration, winner_centers)
+    persisted_candidates = load_persisted_dispatch_candidates(run_dir, ROUND_KIND_WINNER_REFINE)
+    candidates = (
+        persisted_candidates
+        if persisted_candidates is not None
+        else fidelity.build_p1_winner_refine_candidates(
+            protocols,
+            calibration,
+            winner_centers,
+            search_space=search_space,
+        )
+    )
     candidate_index = {candidate.arm_name: candidate for candidate in candidates}
     return {
+        'round_kind': ROUND_KIND_WINNER_REFINE,
         'run_dir': run_dir,
         'run_name': run_dir.name,
         'state': state,
@@ -341,6 +448,181 @@ def load_refine_context(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def load_persisted_dispatch_candidates(
+    run_dir: Path,
+    round_kind: str,
+) -> list[fidelity.CandidateSpec] | None:
+    dispatch_path = dispatch_state_path_for_run(run_dir, round_kind)
+    if not dispatch_path.exists():
+        return None
+    dispatch_state = load_dispatch_state(dispatch_path)
+    payloads = dispatch_state.get('candidate_payloads')
+    if not isinstance(payloads, list):
+        return None
+    candidates: list[fidelity.CandidateSpec] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        candidates.append(reconstruct_candidate(payload))
+    return candidates or None
+
+
+def load_protocol_decide_context(run_dir: Path) -> dict[str, Any]:
+    state_path = run_dir / 'state.json'
+    if not state_path.exists():
+        raise FileNotFoundError(f'missing state.json under {run_dir}')
+    state = fidelity.load_json(state_path)
+    p1_state = state.get('p1')
+    if not isinstance(p1_state, dict):
+        raise RuntimeError('run state has no p1 section')
+    calibration = p1_state.get('calibration')
+    if not isinstance(calibration, dict):
+        raise RuntimeError('p1 calibration is missing; distributed protocol_decide requires a completed calibration')
+    seed = p1_only.infer_resume_seed(state)
+    if seed is None:
+        raise RuntimeError(
+            'could not recover the original p1 base seed from state.json; '
+            'distributed protocol_decide requires a run state with recoverable round seeds'
+        )
+    protocol_arms = p1_only.dedupe_protocol_arms(
+        p1_state.get('protocol_arms') or state.get('selected_protocol_arms') or list(p1_only.FROZEN_TOP3)
+    )
+    base_cfg = ab.build_base_config()
+    grouped = ab.group_files_by_month(ab.load_all_files())
+    eval_splits = ab.build_eval_splits(grouped, seed + 55, ab.BASE_SCREENING['eval_files'])
+    protocols = p1_only.build_protocol_candidates(protocol_arms)
+    search_space = p1_state.get('search_space')
+    if not isinstance(search_space, dict):
+        search_space = p1_only.build_p1_search_space(calibration)
+    search_space = fidelity.apply_protocol_decide_progressive_settings(search_space)
+    persisted_candidates = load_persisted_dispatch_candidates(run_dir, ROUND_KIND_PROTOCOL_DECIDE)
+    candidates = (
+        persisted_candidates
+        if persisted_candidates is not None
+        else fidelity.build_p1_protocol_decide_candidates(protocols, calibration, search_space=search_space)
+    )
+    candidate_index = {candidate.arm_name: candidate for candidate in candidates}
+    return {
+        'round_kind': ROUND_KIND_PROTOCOL_DECIDE,
+        'run_dir': run_dir,
+        'run_name': run_dir.name,
+        'state': state,
+        'seed': seed,
+        'base_cfg': base_cfg,
+        'grouped': grouped,
+        'eval_splits': eval_splits,
+        'calibration': calibration,
+        'protocols': protocols,
+        'search_space': search_space,
+        'candidates': candidates,
+        'candidate_index': candidate_index,
+        'seed_base': seed + 505,
+        'seed_offsets': list(fidelity.P1_PROTOCOL_DECIDE_SEED_OFFSETS),
+        'step_scale': fidelity.P1_PROTOCOL_DECIDE_STEP_SCALE,
+        'ab_name': f'{run_dir.name}_p1_protocol_decide',
+    }
+
+
+def load_ablation_context(run_dir: Path) -> dict[str, Any]:
+    state_path = run_dir / 'state.json'
+    if not state_path.exists():
+        raise FileNotFoundError(f'missing state.json under {run_dir}')
+    state = fidelity.load_json(state_path)
+    p1_state = state.get('p1')
+    if not isinstance(p1_state, dict):
+        raise RuntimeError('run state has no p1 section')
+    calibration = p1_state.get('calibration')
+    if not isinstance(calibration, dict):
+        raise RuntimeError('p1 calibration is missing; distributed ablation requires a completed calibration')
+    winner_refine_round = p1_state.get('winner_refine_round')
+    if not isinstance(winner_refine_round, dict):
+        raise RuntimeError(
+            'p1 winner_refine_round is missing; distributed ablation requires a completed winner_refine'
+        )
+    seed = p1_only.infer_resume_seed(state)
+    if seed is None:
+        raise RuntimeError(
+            'could not recover the original p1 base seed from state.json; '
+            'distributed ablation requires a run state with recoverable round seeds'
+        )
+    protocol_arms = p1_only.dedupe_protocol_arms(
+        p1_state.get('protocol_arms') or state.get('selected_protocol_arms') or list(p1_only.FROZEN_TOP3)
+    )
+    base_cfg = ab.build_base_config()
+    grouped = ab.group_files_by_month(ab.load_all_files())
+    eval_splits = ab.build_eval_splits(grouped, seed + 55, ab.BASE_SCREENING['eval_files'])
+    protocols = p1_only.build_protocol_candidates(protocol_arms)
+    search_space = p1_only.hydrate_post_protocol_decide_search_space(
+        p1_state=p1_state,
+        final_conclusion=state.get('final_conclusion') if isinstance(state.get('final_conclusion'), dict) else {},
+        require_winner_refine_selection=False,
+        require_effective_precision=True,
+    )
+    valid_refine_entries = [entry for entry in winner_refine_round.get('ranking', []) if entry.get('valid')]
+    if not valid_refine_entries:
+        raise RuntimeError(
+            'p1_winner_refine_round produced no valid candidates; distributed ablation requires a completed winner_refine'
+        )
+    requested_front_runner = str(
+        p1_state.get('winner_refine_front_runner')
+        or state.get('final_conclusion', {}).get('p1_refine_front_runner')
+        or ''
+    ).strip()
+    if requested_front_runner:
+        refine_entry = next(
+            (entry for entry in valid_refine_entries if str(entry.get('arm_name')) == requested_front_runner),
+            None,
+        )
+        if refine_entry is None:
+            raise RuntimeError(
+                'winner_refine front runner from state.json does not exist in winner_refine_round ranking: '
+                f'{requested_front_runner}'
+            )
+    else:
+        refine_entry = valid_refine_entries[0]
+    refine_winner = fidelity.candidate_from_entry(refine_entry)
+    persisted_candidates = load_persisted_dispatch_candidates(run_dir, ROUND_KIND_ABLATION)
+    candidates = (
+        persisted_candidates
+        if persisted_candidates is not None
+        else fidelity.build_p1_ablation_candidates(
+            protocols,
+            calibration,
+            refine_winner,
+            search_space=search_space,
+        )
+    )
+    candidate_index = {candidate.arm_name: candidate for candidate in candidates}
+    return {
+        'round_kind': ROUND_KIND_ABLATION,
+        'run_dir': run_dir,
+        'run_name': run_dir.name,
+        'state': state,
+        'seed': seed,
+        'base_cfg': base_cfg,
+        'grouped': grouped,
+        'eval_splits': eval_splits,
+        'calibration': calibration,
+        'protocols': protocols,
+        'refine_winner': refine_winner,
+        'candidates': candidates,
+        'candidate_index': candidate_index,
+        'seed_base': seed + 707,
+        'seed_offsets': list(fidelity.P1_ABLATION_SEED_OFFSETS),
+        'step_scale': fidelity.P1_ABLATION_STEP_SCALE,
+        'ab_name': f'{run_dir.name}_p1_ablation',
+    }
+
+
+def load_round_context(run_dir: Path, round_kind: str) -> dict[str, Any]:
+    normalized = normalize_round_kind(round_kind)
+    if normalized == ROUND_KIND_PROTOCOL_DECIDE:
+        return load_protocol_decide_context(run_dir)
+    if normalized == ROUND_KIND_ABLATION:
+        return load_ablation_context(run_dir)
+    return load_refine_context(run_dir)
+
+
 @contextmanager
 def patched_base_screening(overrides: dict[str, int | None]):
     original = dict(ab.BASE_SCREENING)
@@ -357,6 +639,7 @@ def patched_base_screening(overrides: dict[str, int | None]):
 
 def execute_single_task(
     *,
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     run_name: str,
     candidate_arm: str,
     seed: int,
@@ -368,11 +651,12 @@ def execute_single_task(
     screening_val_file_batch_size: int | None = None,
     screening_val_prefetch_factor: int | None = None,
 ) -> dict[str, Any]:
+    normalized_round_kind = normalize_round_kind(round_kind)
     run_dir = fidelity.FIDELITY_ROOT / run_name
-    context = load_refine_context(run_dir)
+    context = load_round_context(run_dir, normalized_round_kind)
     candidate = context['candidate_index'].get(candidate_arm)
     if candidate is None:
-        raise KeyError(f'unknown winner_refine candidate `{candidate_arm}`')
+        raise KeyError(f'unknown {normalized_round_kind} candidate `{candidate_arm}`')
     with patched_base_screening(
         {
             'num_workers': screening_num_workers,
@@ -389,7 +673,7 @@ def execute_single_task(
             candidate=candidate,
             seed=seed,
             step_scale=context['step_scale'],
-            ab_name=build_seed_ab_name(run_name, seed),
+            ab_name=build_seed_ab_name(run_name, seed, normalized_round_kind),
         )
     raw_payload['machine_label'] = machine_label
     summary = fidelity.summarize_entry(
@@ -401,6 +685,7 @@ def execute_single_task(
     summary['machine_label'] = machine_label
     payload = {
         'schema_version': TASK_RESULT_SCHEMA_VERSION,
+        'round_kind': normalized_round_kind,
         'run_name': run_name,
         'candidate_arm': candidate.arm_name,
         'seed': seed,
@@ -413,6 +698,24 @@ def execute_single_task(
     result_json.parent.mkdir(parents=True, exist_ok=True)
     fidelity.atomic_write_json(result_json, payload)
     return payload
+
+
+def build_run_task_cli_summary(payload: dict[str, Any], *, result_json: Path) -> dict[str, Any]:
+    summary = payload.get('summary') or {}
+    return {
+        'status': 'ok',
+        'round_kind': payload.get('round_kind'),
+        'run_name': payload.get('run_name'),
+        'candidate_arm': payload.get('candidate_arm'),
+        'seed': payload.get('seed'),
+        'seed_label': payload.get('seed_label'),
+        'machine_label': payload.get('machine_label'),
+        'completed_at': payload.get('completed_at'),
+        'result_json': str(result_json),
+        'valid': summary.get('valid'),
+        'selection_quality_score': summary.get('selection_quality_score'),
+        'recent_policy_loss': summary.get('recent_policy_loss'),
+    }
 
 
 def seed2_selection_within_gap(
@@ -533,6 +836,7 @@ def initialize_dispatch_state(
     first_seed = context['seed_base'] + context['seed_offsets'][0]
     return {
         'schema_version': DISPATCH_SCHEMA_VERSION,
+        'round_kind': ROUND_KIND_WINNER_REFINE,
         'run_name': context['run_name'],
         'created_at': fidelity.ts_now(),
         'updated_at': fidelity.ts_now(),
@@ -565,6 +869,100 @@ def initialize_dispatch_state(
         'seed2_round_summary_path': None,
         'final_round_summary_path': None,
         'final_front_runner': None,
+    }
+
+
+def initialize_fixed_pool_multiseed_dispatch_state(
+    *,
+    context: dict[str, Any],
+    local_label: str,
+    remote_label: str | None,
+) -> dict[str, Any]:
+    first_seed = context['seed_base'] + context['seed_offsets'][0]
+    return {
+        'schema_version': DISPATCH_SCHEMA_VERSION,
+        'round_kind': normalize_round_kind(context['round_kind']),
+        'run_name': context['run_name'],
+        'created_at': fidelity.ts_now(),
+        'updated_at': fidelity.ts_now(),
+        'status': 'running',
+        'stage': 'seed1',
+        'local_label': local_label,
+        'remote_label': remote_label,
+        'seed_base': context['seed_base'],
+        'seed_offsets': list(context['seed_offsets']),
+        'step_scale': context['step_scale'],
+        'candidate_payloads': [
+            fidelity.candidate_cache_payload(candidate, include_meta=True)
+            for candidate in context['candidates']
+        ],
+        'seed1': build_seed_stage_state(
+            stage_name='seed1',
+            candidates=context['candidates'],
+            actual_seed=first_seed,
+        ),
+        'seed2': None,
+        'seed1_round_summary_path': None,
+        'seed2_round_summary_path': None,
+        'final_round_summary_path': None,
+        'final_front_runner': None,
+        'final_p1_winner': None,
+    }
+
+
+def initialize_protocol_decide_dispatch_state(
+    *,
+    context: dict[str, Any],
+    local_label: str,
+    remote_label: str | None,
+) -> dict[str, Any]:
+    first_seed = context['seed_base'] + context['seed_offsets'][0]
+    search_space = context['search_space']
+    return {
+        'schema_version': DISPATCH_SCHEMA_VERSION,
+        'round_kind': ROUND_KIND_PROTOCOL_DECIDE,
+        'run_name': context['run_name'],
+        'created_at': fidelity.ts_now(),
+        'updated_at': fidelity.ts_now(),
+        'status': 'running',
+        'stage': 'seed1',
+        'local_label': local_label,
+        'remote_label': remote_label,
+        'seed_base': context['seed_base'],
+        'seed_offsets': list(context['seed_offsets']),
+        'step_scale': context['step_scale'],
+        'candidate_payloads': [
+            fidelity.candidate_cache_payload(candidate, include_meta=True)
+            for candidate in context['candidates']
+        ],
+        'seed2_plan': {
+            'probe_selector_name': 'protocol_all_three_top4',
+            'group_key': 'protocol_arm',
+            'probe_keep_per_protocol': int(
+                search_space.get(
+                    'protocol_decide_probe_keep_per_protocol',
+                    fidelity.P1_PROTOCOL_DECIDE_PROBE_KEEP_PER_PROTOCOL,
+                )
+            ),
+            'ambiguity_mode': str(search_space['protocol_decide_progressive_ambiguity_mode']),
+            'gap_threshold': search_space['protocol_decide_progressive_gap_threshold'],
+            'noise_margin_mult': float(search_space['protocol_decide_progressive_noise_margin_mult']),
+            'probe_candidate_names': [],
+            'decision_candidate_names': [],
+            'expanded_groups': [],
+            'ambiguity_details': {},
+        },
+        'seed1': build_seed_stage_state(
+            stage_name='seed1',
+            candidates=context['candidates'],
+            actual_seed=first_seed,
+        ),
+        'seed2': None,
+        'seed1_round_summary_path': None,
+        'seed2_round_summary_path': None,
+        'final_round_summary_path': None,
+        'final_protocol_winner': None,
+        'final_protocol_compare': None,
     }
 
 
@@ -622,6 +1020,7 @@ def reset_task_after_operator_interrupt(task_state: dict[str, Any], *, note: str
 def launch_local_task(
     worker: WorkerSpec,
     *,
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     run_name: str,
     task_state: dict[str, Any],
     dispatch_root: Path,
@@ -637,6 +1036,8 @@ def launch_local_task(
         log_path=log_path,
         command_args=[
             'run-task',
+            '--round-kind',
+            normalize_round_kind(round_kind),
             '--run-name',
             run_name,
             '--candidate-arm',
@@ -661,6 +1062,7 @@ def launch_local_task(
 def build_remote_command(
     *,
     worker: WorkerSpec,
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     run_name: str,
     task_state: dict[str, Any],
     remote_result_path: Path,
@@ -668,6 +1070,8 @@ def build_remote_command(
 ) -> list[str]:
     command_args = [
         'run-task',
+        '--round-kind',
+        normalize_round_kind(round_kind),
         '--run-name',
         run_name,
         '--candidate-arm',
@@ -703,6 +1107,7 @@ def build_remote_command(
 def build_remote_interactive_window_command(
     *,
     worker: WorkerSpec,
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     run_name: str,
     task_state: dict[str, Any],
     remote_result_path: Path,
@@ -711,6 +1116,8 @@ def build_remote_interactive_window_command(
 ) -> list[str]:
     python_args = [
         'run-task',
+        '--round-kind',
+        normalize_round_kind(round_kind),
         '--run-name',
         run_name,
         '--candidate-arm',
@@ -738,7 +1145,7 @@ def build_remote_interactive_window_command(
             ]
         )
     repo_root = Path(worker.repo or str(REPO_ROOT))
-    window_title = f"MahjongAI winner_refine {task_state['task_id']}"
+    window_title = f"MahjongAI {normalize_round_kind(round_kind)} {task_state['task_id']}"
     python_args_base64 = base64.b64encode(json.dumps(python_args, ensure_ascii=True).encode('utf-8')).decode('ascii')
     ps_command = (
         f"& {quote_ps(str(repo_root / 'scripts' / 'start_interactive_remote_python.ps1'))} "
@@ -761,6 +1168,7 @@ def build_remote_interactive_window_command(
 def launch_remote_task(
     worker: WorkerSpec,
     *,
+    round_kind: str = ROUND_KIND_WINNER_REFINE,
     run_name: str,
     task_state: dict[str, Any],
     dispatch_root: Path,
@@ -777,6 +1185,7 @@ def launch_remote_task(
     if launch_mode == 'ssh_inline':
         command = build_remote_command(
             worker=worker,
+            round_kind=round_kind,
             run_name=run_name,
             task_state=task_state,
             remote_result_path=remote_result_path,
@@ -785,6 +1194,7 @@ def launch_remote_task(
     elif launch_mode == 'interactive_window':
         command = build_remote_interactive_window_command(
             worker=worker,
+            round_kind=round_kind,
             run_name=run_name,
             task_state=task_state,
             remote_result_path=remote_result_path,
@@ -903,8 +1313,9 @@ def build_seed_round_payload(
     actual_seed: int,
     task_results: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    round_name = build_seed_round_name(actual_seed)
-    ab_name = build_seed_ab_name(context['run_name'], actual_seed)
+    round_kind = str(context.get('round_kind') or ROUND_KIND_WINNER_REFINE)
+    round_name = build_seed_round_name(actual_seed, round_kind)
+    ab_name = build_seed_ab_name(context['run_name'], actual_seed, round_kind)
     ranking = fidelity.rank_round_entries(
         [task_results[candidate.arm_name]['summary'] for candidate in candidates if candidate.arm_name in task_results],
         ranking_mode=fidelity.P1_RANKING_MODE,
@@ -1054,6 +1465,92 @@ def build_final_round_payload(
     return payload
 
 
+def build_fixed_pool_final_round_payload(
+    *,
+    context: dict[str, Any],
+    seed1_payload: dict[str, Any],
+    seed2_payload: dict[str, Any],
+) -> dict[str, Any]:
+    round_name = final_round_name_for_round_kind(context['round_kind'])
+    first_seed = int(seed1_payload['seed'])
+    second_seed = int(seed2_payload['seed'])
+    seed_rounds = {
+        f's{first_seed}': {
+            'seed': first_seed,
+            'round_name': seed1_payload['round_name'],
+            'ab_name': seed1_payload['ab_name'],
+            'summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+            **seed1_payload,
+        },
+        f's{second_seed}': {
+            'seed': second_seed,
+            'round_name': seed2_payload['round_name'],
+            'ab_name': seed2_payload['ab_name'],
+            'summary_path': str(context['run_dir'] / f'{seed2_payload["round_name"]}.json'),
+            **seed2_payload,
+        },
+    }
+    current_round_signature = fidelity.stable_payload_digest(
+        fidelity.apply_round_signature_ranking_fields(
+            {
+                'schema_version': fidelity.ROUND_CACHE_SCHEMA_VERSION,
+                'scenario_score_version': fidelity.SCENARIO_SCORE_VERSION,
+                'round_name': round_name,
+                'ab_name': context['ab_name'],
+                'base_cfg': context['base_cfg'],
+                'grouped': context['grouped'],
+                'eval_splits': context['eval_splits'],
+                'candidates': [
+                    fidelity.candidate_cache_payload(candidate, include_meta=True)
+                    for candidate in context['candidates']
+                ],
+                'seed': context['seed_base'],
+                'seed_offsets': list(context['seed_offsets']),
+                'step_scale': context['step_scale'],
+                'selector_weights': None,
+                'seed_strategy': 'distributed_full_multiseed',
+            },
+            ranking_mode=fidelity.P1_RANKING_MODE,
+            eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+        )
+    )
+    final_ranking = fidelity.summarize_multiseed_candidates(
+        context['candidates'],
+        seed_rounds,
+        ranking_mode=fidelity.P1_RANKING_MODE,
+        eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+    )
+    payload = fidelity.build_multiseed_payload(
+        round_name=round_name,
+        ab_name=context['ab_name'],
+        seed=context['seed_base'],
+        seed_offsets=list(context['seed_offsets']),
+        step_scale=context['step_scale'],
+        round_signature=current_round_signature,
+        eval_splits=context['eval_splits'],
+        seed_rounds=seed_rounds,
+        ranked=final_ranking,
+        evaluated_arms=len(context['candidates']),
+        extra={
+            'seed_strategy': 'distributed_full_multiseed',
+            'ranking_mode': fidelity.P1_RANKING_MODE,
+            'eligibility_group_key': fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+            'seed1_candidate_count': len(context['candidates']),
+            'seed2_candidate_count': len(context['candidates']),
+            'seed1_round': {
+                'actual_seed': first_seed,
+                'summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+            },
+            'seed2_round': {
+                'actual_seed': second_seed,
+                'summary_path': str(context['run_dir'] / f'{seed2_payload["round_name"]}.json'),
+            },
+        },
+    )
+    fidelity.atomic_write_json(context['run_dir'] / f'{round_name}.json', payload)
+    return payload
+
+
 def stage_results_from_state(stage_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     for task in stage_state.get('tasks', {}).values():
@@ -1108,6 +1605,43 @@ def maybe_promote_seed1_to_seed2(
         run_dir=context['run_dir'],
         dispatch_state_path=dispatch_state_path,
         dispatch_state=dispatch_state,
+    )
+
+
+def maybe_promote_fixed_pool_seed1_to_seed2(
+    *,
+    context: dict[str, Any],
+    dispatch_state: dict[str, Any],
+    dispatch_state_path: Path,
+) -> None:
+    if dispatch_state.get('stage') != 'seed1':
+        return
+    stage_state = dispatch_state['seed1']
+    if not stage_all_tasks_completed(stage_state):
+        return
+    seed1_results = stage_results_from_state(stage_state)
+    seed1_payload = build_seed_round_payload(
+        context=context,
+        candidates=context['candidates'],
+        actual_seed=int(stage_state['seed']),
+        task_results=seed1_results,
+    )
+    second_seed = context['seed_base'] + context['seed_offsets'][1]
+    dispatch_state['seed1_round_summary_path'] = str(
+        context['run_dir'] / f'{seed1_payload["round_name"]}.json'
+    )
+    dispatch_state['seed2'] = build_seed_stage_state(
+        stage_name='seed2',
+        candidates=context['candidates'],
+        actual_seed=second_seed,
+    )
+    dispatch_state['stage'] = 'seed2'
+    write_dispatch_state(dispatch_state_path, dispatch_state)
+    update_run_state_for_dispatch(
+        run_dir=context['run_dir'],
+        dispatch_state_path=dispatch_state_path,
+        dispatch_state=dispatch_state,
+        round_kind=context['round_kind'],
     )
 
 
@@ -1171,9 +1705,406 @@ def maybe_finalize_dispatch(
     return True
 
 
+def maybe_finalize_fixed_pool_dispatch(
+    *,
+    context: dict[str, Any],
+    dispatch_state: dict[str, Any],
+    dispatch_state_path: Path,
+) -> bool:
+    if dispatch_state.get('stage') != 'seed2':
+        return False
+    seed2_state = dispatch_state.get('seed2')
+    if not isinstance(seed2_state, dict) or not stage_all_tasks_completed(seed2_state):
+        return False
+    seed1_results = stage_results_from_state(dispatch_state['seed1'])
+    seed2_results = stage_results_from_state(seed2_state)
+    seed1_payload = build_seed_round_payload(
+        context=context,
+        candidates=context['candidates'],
+        actual_seed=int(dispatch_state['seed1']['seed']),
+        task_results=seed1_results,
+    )
+    seed2_payload = build_seed_round_payload(
+        context=context,
+        candidates=context['candidates'],
+        actual_seed=int(seed2_state['seed']),
+        task_results=seed2_results,
+    )
+    final_round = build_fixed_pool_final_round_payload(
+        context=context,
+        seed1_payload=seed1_payload,
+        seed2_payload=seed2_payload,
+    )
+    final_valid = [entry for entry in final_round['ranking'] if entry.get('valid')]
+    if not final_valid:
+        raise RuntimeError(f'distributed {context["round_kind"]} produced no valid final candidates')
+    front_runner = str(final_valid[0]['arm_name'])
+    dispatch_state['status'] = 'completed'
+    dispatch_state['stage'] = 'completed'
+    dispatch_state['seed2_round_summary_path'] = str(
+        context['run_dir'] / f'{seed2_payload["round_name"]}.json'
+    )
+    dispatch_state['final_round_summary_path'] = str(
+        context['run_dir'] / f'{final_round_name_for_round_kind(context["round_kind"])}.json'
+    )
+    dispatch_state['final_front_runner'] = front_runner
+    dispatch_state['final_p1_winner'] = front_runner
+    write_dispatch_state(dispatch_state_path, dispatch_state)
+    update_run_state_for_dispatch(
+        run_dir=context['run_dir'],
+        dispatch_state_path=dispatch_state_path,
+        dispatch_state=dispatch_state,
+        round_kind=context['round_kind'],
+        front_runner=front_runner,
+        final_round=final_round,
+    )
+    return True
+
+
+def build_protocol_decide_final_round_payload(
+    *,
+    context: dict[str, Any],
+    seed1_payload: dict[str, Any],
+    seed2_payload: dict[str, Any],
+    probe_candidates: list[fidelity.CandidateSpec],
+    decision_candidates: list[fidelity.CandidateSpec],
+    ambiguity_details: dict[str, dict[str, Any]],
+    expanded_groups: list[str],
+    screening_diagnostic: dict[str, Any] | None,
+) -> dict[str, Any]:
+    first_seed = int(seed1_payload['seed'])
+    second_seed = int(seed2_payload['seed'])
+    first_label = f's{first_seed}'
+    second_label = f's{second_seed}'
+    settings = context['search_space']
+    current_round_signature = fidelity.stable_payload_digest(
+        fidelity.apply_round_signature_ranking_fields(
+            {
+                'schema_version': fidelity.ROUND_CACHE_SCHEMA_VERSION,
+                'scenario_score_version': fidelity.SCENARIO_SCORE_VERSION,
+                'round_name': 'p1_protocol_decide_round',
+                'ab_name': context['ab_name'],
+                'base_cfg': context['base_cfg'],
+                'grouped': context['grouped'],
+                'eval_splits': context['eval_splits'],
+                'candidates': [
+                    fidelity.candidate_cache_payload(candidate, include_meta=True)
+                    for candidate in context['candidates']
+                ],
+                'seed': context['seed_base'],
+                'seed_offsets': list(context['seed_offsets']),
+                'step_scale': context['step_scale'],
+                'selector_weights': None,
+                'seed_strategy': 'distributed_progressive_probe_then_expand',
+                'probe_selector_name': 'protocol_all_three_top4',
+                'probe_signature_data': {},
+                'group_key': 'protocol_arm',
+                'ambiguity_mode': settings['protocol_decide_progressive_ambiguity_mode'],
+                'gap_threshold': settings['protocol_decide_progressive_gap_threshold'],
+                'noise_margin_mult': settings['protocol_decide_progressive_noise_margin_mult'],
+                'seed1_probe_compare_scope': 'probe_candidates_only',
+                'screening_diagnostic_name': 'ce_only_anchor',
+            },
+            ranking_mode=fidelity.P1_RANKING_MODE,
+            eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+        )
+    )
+    seed_rounds = {
+        first_label: {
+            'seed': first_seed,
+            'round_name': seed1_payload['round_name'],
+            'ab_name': seed1_payload['ab_name'],
+            'summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+            **seed1_payload,
+        },
+        second_label: {
+            'seed': second_seed,
+            'round_name': seed2_payload['round_name'],
+            'ab_name': seed2_payload['ab_name'],
+            'summary_path': str(context['run_dir'] / f'{seed2_payload["round_name"]}.json'),
+            **seed2_payload,
+        },
+    }
+    final_ranking = fidelity.summarize_multiseed_candidates(
+        decision_candidates,
+        seed_rounds,
+        ranking_mode=fidelity.P1_RANKING_MODE,
+        eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+    )
+    pruned_arm_names = sorted(
+        candidate.arm_name
+        for candidate in context['candidates']
+        if candidate.arm_name not in {item.arm_name for item in decision_candidates}
+    )
+    payload = fidelity.build_multiseed_payload(
+        round_name='p1_protocol_decide_round',
+        ab_name=context['ab_name'],
+        seed=context['seed_base'],
+        seed_offsets=list(context['seed_offsets']),
+        step_scale=context['step_scale'],
+        round_signature=current_round_signature,
+        eval_splits=context['eval_splits'],
+        seed_rounds=seed_rounds,
+        ranked=final_ranking,
+        evaluated_arms=len(context['candidates']),
+        extra={
+            'seed_strategy': 'distributed_progressive_probe_then_expand',
+            'probe_selector_name': 'protocol_all_three_top4',
+            'probe_signature_data': {},
+            'group_key': 'protocol_arm',
+            'ranking_mode': fidelity.P1_RANKING_MODE,
+            'eligibility_group_key': fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+            'ambiguity_mode': settings['protocol_decide_progressive_ambiguity_mode'],
+            'gap_threshold': settings['protocol_decide_progressive_gap_threshold'],
+            'noise_margin_mult': settings['protocol_decide_progressive_noise_margin_mult'],
+            'seed1_probe_compare_scope': 'probe_candidates_only',
+            'probe_candidate_count': len(probe_candidates),
+            'decision_candidate_count': len(decision_candidates),
+            'pruned_candidate_count': len(pruned_arm_names),
+            'pruned_arm_names': pruned_arm_names,
+            'expanded_groups': list(expanded_groups),
+            'ambiguity_details': ambiguity_details,
+            'screening_diagnostic': screening_diagnostic,
+            'screening_round': {
+                'actual_seed': first_seed,
+                'summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+            },
+            'probe_round': {
+                'actual_seed': second_seed,
+                'summary_path': str(context['run_dir'] / f'{seed2_payload["round_name"]}.json'),
+            },
+        },
+    )
+    fidelity.atomic_write_json(context['run_dir'] / 'p1_protocol_decide_round.json', payload)
+    return payload
+
+
+def maybe_promote_protocol_decide_seed1_to_seed2(
+    *,
+    context: dict[str, Any],
+    dispatch_state: dict[str, Any],
+    dispatch_state_path: Path,
+) -> None:
+    if dispatch_state.get('stage') != 'seed1':
+        return
+    stage_state = dispatch_state['seed1']
+    if not stage_all_tasks_completed(stage_state):
+        return
+    seed1_results = stage_results_from_state(stage_state)
+    seed1_payload = build_seed_round_payload(
+        context=context,
+        candidates=context['candidates'],
+        actual_seed=int(stage_state['seed']),
+        task_results=seed1_results,
+    )
+    probe_candidates = fidelity.unique_candidates(
+        fidelity.select_p1_protocol_decide_probe_candidates(
+            seed1_payload['ranking'],
+            context['candidates'],
+            keep=int(dispatch_state['seed2_plan']['probe_keep_per_protocol']),
+        )
+    )
+    second_seed = context['seed_base'] + context['seed_offsets'][1]
+    dispatch_state['seed1_round_summary_path'] = str(
+        context['run_dir'] / f'{seed1_payload["round_name"]}.json'
+    )
+    dispatch_state['seed2_plan']['probe_candidate_names'] = [candidate.arm_name for candidate in probe_candidates]
+    dispatch_state['seed2_plan']['decision_candidate_names'] = [candidate.arm_name for candidate in probe_candidates]
+    dispatch_state['seed2'] = build_seed_stage_state(
+        stage_name='seed2',
+        candidates=probe_candidates,
+        actual_seed=second_seed,
+    )
+    dispatch_state['stage'] = 'seed2'
+    write_dispatch_state(dispatch_state_path, dispatch_state)
+    update_run_state_for_dispatch(
+        run_dir=context['run_dir'],
+        dispatch_state_path=dispatch_state_path,
+        dispatch_state=dispatch_state,
+        round_kind=ROUND_KIND_PROTOCOL_DECIDE,
+    )
+
+
+def maybe_finalize_or_expand_protocol_decide_dispatch(
+    *,
+    context: dict[str, Any],
+    dispatch_state: dict[str, Any],
+    dispatch_state_path: Path,
+) -> bool:
+    if dispatch_state.get('stage') != 'seed2':
+        return False
+    seed2_state = dispatch_state.get('seed2')
+    if not isinstance(seed2_state, dict) or not stage_all_tasks_completed(seed2_state):
+        return False
+    seed1_results = stage_results_from_state(dispatch_state['seed1'])
+    seed2_results = stage_results_from_state(seed2_state)
+    seed1_payload = build_seed_round_payload(
+        context=context,
+        candidates=context['candidates'],
+        actual_seed=int(dispatch_state['seed1']['seed']),
+        task_results=seed1_results,
+    )
+    plan = dispatch_state.get('seed2_plan')
+    if not isinstance(plan, dict):
+        raise RuntimeError('protocol_decide dispatch is missing seed2_plan')
+    probe_names = set(plan.get('probe_candidate_names', []))
+    probe_candidates = [candidate for candidate in context['candidates'] if candidate.arm_name in probe_names]
+    if not probe_candidates:
+        raise RuntimeError('protocol_decide seed2 probe pool is empty')
+    current_seed2_names = {
+        str(task.get('candidate_arm'))
+        for task in seed2_state.get('tasks', {}).values()
+    }
+    seed2_current_candidates = [
+        candidate for candidate in context['candidates'] if candidate.arm_name in current_seed2_names
+    ]
+    seed2_payload = build_seed_round_payload(
+        context=context,
+        candidates=seed2_current_candidates,
+        actual_seed=int(seed2_state['seed']),
+        task_results=seed2_results,
+    )
+    decision_names = set(plan.get('decision_candidate_names', []))
+    ambiguity_details = dict(plan.get('ambiguity_details') or {})
+    expanded_groups = list(plan.get('expanded_groups') or [])
+    screening_diagnostic = plan.get('screening_diagnostic')
+    if not decision_names or decision_names == probe_names:
+        seed_rounds = {
+            f's{int(dispatch_state["seed1"]["seed"])}': {
+                'seed': int(dispatch_state['seed1']['seed']),
+                'round_name': seed1_payload['round_name'],
+                'ab_name': seed1_payload['ab_name'],
+                'summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+                **seed1_payload,
+            },
+            f's{int(seed2_state["seed"])}': {
+                'seed': int(seed2_state['seed']),
+                'round_name': seed2_payload['round_name'],
+                'ab_name': seed2_payload['ab_name'],
+                'summary_path': str(context['run_dir'] / f'{seed2_payload["round_name"]}.json'),
+                **seed2_payload,
+            },
+        }
+        probe_ranking = fidelity.summarize_multiseed_candidates(
+            probe_candidates,
+            seed_rounds,
+            ranking_mode=fidelity.P1_RANKING_MODE,
+            eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+        )
+        seed1_probe_ranking = fidelity.rerank_filtered_entries(
+            seed1_payload['ranking'],
+            entry_selector=lambda entry: entry['arm_name'] in probe_names,
+            ranking_mode=fidelity.P1_RANKING_MODE,
+            eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+        )
+        ambiguity_groups, ambiguity_details = fidelity.detect_progressive_ambiguous_groups(
+            seed1_ranking=seed1_probe_ranking,
+            probe_ranking=probe_ranking,
+            group_key='protocol_arm',
+            ranking_mode=fidelity.P1_RANKING_MODE,
+            ambiguity_mode=str(plan['ambiguity_mode']),
+            gap_threshold=plan.get('gap_threshold'),
+            noise_margin_mult=float(plan['noise_margin_mult']),
+        )
+        decision_candidates = fidelity.build_progressive_active_candidates(
+            all_candidates=context['candidates'],
+            probe_candidates=probe_candidates,
+            ambiguous_groups=ambiguity_groups,
+            group_key='protocol_arm',
+        )
+        decision_names = {candidate.arm_name for candidate in decision_candidates}
+        expanded_groups = sorted(ambiguity_groups)
+        screening_diagnostic = {
+            'name': 'ce_only_anchor',
+            'source_seed': int(dispatch_state['seed1']['seed']),
+            'source_round_name': seed1_payload['round_name'],
+            'source_summary_path': str(context['run_dir'] / f'{seed1_payload["round_name"]}.json'),
+            'ranking': fidelity.rerank_filtered_entries(
+                seed1_payload['ranking'],
+                entry_selector=lambda entry: fidelity.is_p1_protocol_decide_diagnostic_meta(
+                    entry.get('candidate_meta', {})
+                ),
+                ranking_mode=fidelity.P1_RANKING_MODE,
+                eligibility_group_key=fidelity.P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
+            ),
+        }
+        plan['decision_candidate_names'] = sorted(decision_names)
+        plan['expanded_groups'] = list(expanded_groups)
+        plan['ambiguity_details'] = ambiguity_details
+        plan['screening_diagnostic'] = screening_diagnostic
+        missing_candidates = [
+            candidate for candidate in decision_candidates if candidate.arm_name not in current_seed2_names
+        ]
+        if missing_candidates:
+            for candidate in missing_candidates:
+                task_id = build_task_id(
+                    stage_name='seed2',
+                    seed_label=str(seed2_state['seed_label']),
+                    arm_name=candidate.arm_name,
+                )
+                if task_id in seed2_state['tasks']:
+                    continue
+                seed2_state['tasks'][task_id] = {
+                    'task_id': task_id,
+                    'candidate_arm': candidate.arm_name,
+                    'seed': int(seed2_state['seed']),
+                    'seed_label': str(seed2_state['seed_label']),
+                    'status': 'pending',
+                    'attempts': 0,
+                }
+            seed2_state['candidate_count'] = len(seed2_state['tasks'])
+            write_dispatch_state(dispatch_state_path, dispatch_state)
+            update_run_state_for_dispatch(
+                run_dir=context['run_dir'],
+                dispatch_state_path=dispatch_state_path,
+                dispatch_state=dispatch_state,
+                round_kind=ROUND_KIND_PROTOCOL_DECIDE,
+            )
+            return False
+    decision_candidates = [
+        candidate for candidate in context['candidates'] if candidate.arm_name in decision_names
+    ]
+    final_round = build_protocol_decide_final_round_payload(
+        context=context,
+        seed1_payload=seed1_payload,
+        seed2_payload=seed2_payload,
+        probe_candidates=probe_candidates,
+        decision_candidates=decision_candidates,
+        ambiguity_details=ambiguity_details,
+        expanded_groups=expanded_groups,
+        screening_diagnostic=screening_diagnostic,
+    )
+    protocol_compare = fidelity.build_p1_protocol_compare(final_round['ranking'])
+    selected_protocol_arm = str(
+        protocol_compare[0].get('candidate_meta', {}).get('protocol_arm', protocol_compare[0]['arm_name'])
+    )
+    dispatch_state['status'] = 'completed'
+    dispatch_state['stage'] = 'completed'
+    dispatch_state['seed2_round_summary_path'] = str(
+        context['run_dir'] / f'{seed2_payload["round_name"]}.json'
+    )
+    dispatch_state['final_round_summary_path'] = str(context['run_dir'] / 'p1_protocol_decide_round.json')
+    dispatch_state['final_protocol_winner'] = selected_protocol_arm
+    dispatch_state['final_protocol_compare'] = {
+        'round_name': 'p1_protocol_compare',
+        'ranking': protocol_compare,
+    }
+    write_dispatch_state(dispatch_state_path, dispatch_state)
+    update_run_state_for_dispatch(
+        run_dir=context['run_dir'],
+        dispatch_state_path=dispatch_state_path,
+        dispatch_state=dispatch_state,
+        round_kind=ROUND_KIND_PROTOCOL_DECIDE,
+        front_runner=selected_protocol_arm,
+        final_round=final_round,
+    )
+    return True
+
+
 def launch_task_for_worker(
     *,
     worker: WorkerSpec,
+    round_kind: str,
     run_name: str,
     task_state: dict[str, Any],
     dispatch_root: Path,
@@ -1184,6 +2115,7 @@ def launch_task_for_worker(
     if worker.kind == 'local':
         active = launch_local_task(
             worker,
+            round_kind=round_kind,
             run_name=run_name,
             task_state=task_state,
             dispatch_root=dispatch_root,
@@ -1192,6 +2124,7 @@ def launch_task_for_worker(
         worker_control = worker_control_entry(control_state, worker.label)
         active = launch_remote_task(
             worker,
+            round_kind=round_kind,
             run_name=run_name,
             task_state=task_state,
             dispatch_root=dispatch_root,
@@ -1283,27 +2216,41 @@ def apply_worker_control_requests(
 
 
 def run_dispatch(args: argparse.Namespace) -> int:
+    round_kind = normalize_round_kind(getattr(args, 'round_kind', ROUND_KIND_WINNER_REFINE))
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     lock_path = fidelity.acquire_run_lock(run_dir, args.run_name)
     atexit.register(fidelity.release_run_lock, lock_path)
-    dispatch_root = ensure_dir(dispatch_root_for_run(run_dir))
-    dispatch_state_path = dispatch_state_path_for_run(run_dir)
-    dispatch_control_path = dispatch_control_path_for_run(run_dir)
-    context = load_refine_context(run_dir)
+    dispatch_root = ensure_dir(dispatch_root_for_run(run_dir, round_kind))
+    dispatch_state_path = dispatch_state_path_for_run(run_dir, round_kind)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir, round_kind)
+    context = load_round_context(run_dir, round_kind)
     try:
         if dispatch_state_path.exists():
             dispatch_state = load_dispatch_state(dispatch_state_path)
             reset_running_tasks_for_resume(dispatch_state)
         else:
-            dispatch_state = initialize_dispatch_state(
-                context=context,
-                local_label=args.local_label,
-                remote_label=args.remote_label if not args.local_only else None,
-                seed2_min_keep=args.seed2_min_keep,
-                seed2_selection_gap=args.seed2_selection_gap,
-                seed2_max_keep=args.seed2_max_keep,
-            )
+            if round_kind == ROUND_KIND_PROTOCOL_DECIDE:
+                dispatch_state = initialize_protocol_decide_dispatch_state(
+                    context=context,
+                    local_label=args.local_label,
+                    remote_label=args.remote_label if not args.local_only else None,
+                )
+            elif round_kind == ROUND_KIND_ABLATION:
+                dispatch_state = initialize_fixed_pool_multiseed_dispatch_state(
+                    context=context,
+                    local_label=args.local_label,
+                    remote_label=args.remote_label if not args.local_only else None,
+                )
+            else:
+                dispatch_state = initialize_dispatch_state(
+                    context=context,
+                    local_label=args.local_label,
+                    remote_label=args.remote_label if not args.local_only else None,
+                    seed2_min_keep=args.seed2_min_keep,
+                    seed2_selection_gap=args.seed2_selection_gap,
+                    seed2_max_keep=args.seed2_max_keep,
+                )
         if dispatch_control_path.exists():
             control_state = load_dispatch_control(dispatch_control_path)
         else:
@@ -1325,6 +2272,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
             run_dir=run_dir,
             dispatch_state_path=dispatch_state_path,
             dispatch_state=dispatch_state,
+            round_kind=round_kind,
         )
         workers = build_workers(
             enable_remote=not args.local_only,
@@ -1372,23 +2320,51 @@ def run_dispatch(args: argparse.Namespace) -> int:
             if dispatch_state.get('stage') == 'seed1' and not active:
                 stage_state = dispatch_state['seed1']
                 if stage_any_task_failed(stage_state):
-                    raise RuntimeError('distributed winner_refine seed1 exhausted retries')
+                    raise RuntimeError(f'distributed {round_kind} seed1 exhausted retries')
                 if stage_all_tasks_completed(stage_state):
-                    maybe_promote_seed1_to_seed2(
-                        context=context,
-                        dispatch_state=dispatch_state,
-                        dispatch_state_path=dispatch_state_path,
-                    )
+                    if round_kind == ROUND_KIND_PROTOCOL_DECIDE:
+                        maybe_promote_protocol_decide_seed1_to_seed2(
+                            context=context,
+                            dispatch_state=dispatch_state,
+                            dispatch_state_path=dispatch_state_path,
+                        )
+                    elif round_kind == ROUND_KIND_ABLATION:
+                        maybe_promote_fixed_pool_seed1_to_seed2(
+                            context=context,
+                            dispatch_state=dispatch_state,
+                            dispatch_state_path=dispatch_state_path,
+                        )
+                    else:
+                        maybe_promote_seed1_to_seed2(
+                            context=context,
+                            dispatch_state=dispatch_state,
+                            dispatch_state_path=dispatch_state_path,
+                        )
                     continue
             if dispatch_state.get('stage') == 'seed2' and not active:
                 stage_state = dispatch_state['seed2']
                 if stage_any_task_failed(stage_state):
-                    raise RuntimeError('distributed winner_refine seed2 exhausted retries')
-                if maybe_finalize_dispatch(
-                    context=context,
-                    dispatch_state=dispatch_state,
-                    dispatch_state_path=dispatch_state_path,
-                ):
+                    raise RuntimeError(f'distributed {round_kind} seed2 exhausted retries')
+                finalized = False
+                if round_kind == ROUND_KIND_PROTOCOL_DECIDE:
+                    finalized = maybe_finalize_or_expand_protocol_decide_dispatch(
+                        context=context,
+                        dispatch_state=dispatch_state,
+                        dispatch_state_path=dispatch_state_path,
+                    )
+                elif round_kind == ROUND_KIND_ABLATION:
+                    finalized = maybe_finalize_fixed_pool_dispatch(
+                        context=context,
+                        dispatch_state=dispatch_state,
+                        dispatch_state_path=dispatch_state_path,
+                    )
+                else:
+                    finalized = maybe_finalize_dispatch(
+                        context=context,
+                        dispatch_state=dispatch_state,
+                        dispatch_state_path=dispatch_state_path,
+                    )
+                if finalized:
                     break
             if dispatch_state.get('stage') == 'completed':
                 break
@@ -1405,6 +2381,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 _, task_state = next_task
                 active[worker.label] = launch_task_for_worker(
                     worker=worker,
+                    round_kind=round_kind,
                     run_name=args.run_name,
                     task_state=task_state,
                     dispatch_root=dispatch_root,
@@ -1429,6 +2406,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 run_dir=run_dir,
                 dispatch_state_path=dispatch_state_path,
                 dispatch_state=dispatch_state,
+                round_kind=round_kind,
                 status_override='failed',
             )
         raise
@@ -1437,14 +2415,16 @@ def run_dispatch(args: argparse.Namespace) -> int:
 
 
 def print_status(args: argparse.Namespace) -> int:
+    round_kind = normalize_round_kind(getattr(args, 'round_kind', ROUND_KIND_WINNER_REFINE))
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
-    dispatch_state_path = dispatch_state_path_for_run(run_dir)
-    dispatch_control_path = dispatch_control_path_for_run(run_dir)
+    dispatch_state_path = dispatch_state_path_for_run(run_dir, round_kind)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir, round_kind)
     if not dispatch_state_path.exists():
         raise FileNotFoundError(f'missing dispatch state at {dispatch_state_path}')
     dispatch_state = load_dispatch_state(dispatch_state_path)
     control_state = load_dispatch_control(dispatch_control_path) if dispatch_control_path.exists() else {'workers': {}}
     payload = {
+        'round_kind': round_kind,
         'run_name': args.run_name,
         'stage': dispatch_state.get('stage'),
         'status': dispatch_state.get('status'),
@@ -1454,18 +2434,25 @@ def print_status(args: argparse.Namespace) -> int:
             if isinstance(dispatch_state.get('seed2'), dict)
             else None
         ),
-        'seed2_selector': dispatch_state.get('seed2_selector'),
-        'final_front_runner': dispatch_state.get('final_front_runner'),
         'workers': control_state.get('workers', {}),
     }
+    if round_kind == ROUND_KIND_PROTOCOL_DECIDE:
+        payload['seed2_plan'] = dispatch_state.get('seed2_plan')
+        payload['final_protocol_winner'] = dispatch_state.get('final_protocol_winner')
+    elif round_kind == ROUND_KIND_WINNER_REFINE:
+        payload['seed2_selector'] = dispatch_state.get('seed2_selector')
+        payload['final_front_runner'] = dispatch_state.get('final_front_runner')
+    else:
+        payload['final_p1_winner'] = dispatch_state.get('final_p1_winner') or dispatch_state.get('final_front_runner')
     print(json.dumps(fidelity.normalize_payload(payload), ensure_ascii=False, indent=2))
     return 0
 
 
 def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
+    round_kind = normalize_round_kind(getattr(args, 'round_kind', ROUND_KIND_WINNER_REFINE))
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
-    dispatch_state_path = dispatch_state_path_for_run(run_dir)
-    dispatch_control_path = dispatch_control_path_for_run(run_dir)
+    dispatch_state_path = dispatch_state_path_for_run(run_dir, round_kind)
+    dispatch_control_path = dispatch_control_path_for_run(run_dir, round_kind)
     if not dispatch_state_path.exists():
         raise FileNotFoundError(f'missing dispatch state at {dispatch_state_path}')
     dispatch_state = load_dispatch_state(dispatch_state_path)
@@ -1493,6 +2480,7 @@ def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
     )
     write_dispatch_control(dispatch_control_path, control_state)
     payload = {
+        'round_kind': round_kind,
         'run_name': args.run_name,
         'worker_label': args.worker_label,
         'paused': bool(entry.get('paused')),
@@ -1509,8 +2497,9 @@ def parse_args() -> argparse.Namespace:
 
     dispatch = subparsers.add_parser(
         'dispatch',
-        help='Run distributed P1 winner_refine with a local worker and an optional SSH remote worker.',
+        help='Run distributed P1 protocol_decide, winner_refine, or ablation with a local worker and an optional SSH remote worker.',
     )
+    dispatch.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     dispatch.add_argument('--run-name', required=True)
     dispatch.add_argument('--local-only', action='store_true')
     dispatch.add_argument('--local-python', default=sys.executable)
@@ -1534,8 +2523,9 @@ def parse_args() -> argparse.Namespace:
 
     run_task = subparsers.add_parser(
         'run-task',
-        help='Execute a single winner_refine candidate+seed task and write a result json.',
+        help='Execute a single distributed P1 candidate+seed task and write a result json.',
     )
+    run_task.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     run_task.add_argument('--run-name', required=True)
     run_task.add_argument('--candidate-arm', required=True)
     run_task.add_argument('--seed', type=int, required=True)
@@ -1549,14 +2539,16 @@ def parse_args() -> argparse.Namespace:
 
     status = subparsers.add_parser(
         'status',
-        help='Print distributed winner_refine dispatch status.',
+        help='Print distributed P1 dispatch status.',
     )
+    status.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     status.add_argument('--run-name', required=True)
 
     pause_worker = subparsers.add_parser(
         'pause-worker',
         help='Pause a worker; optionally interrupt its active task and requeue it.',
     )
+    pause_worker.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     pause_worker.add_argument('--run-name', required=True)
     pause_worker.add_argument('--worker-label', required=True)
     pause_worker.add_argument('--stop-active', action='store_true')
@@ -1565,6 +2557,7 @@ def parse_args() -> argparse.Namespace:
         'resume-worker',
         help='Resume scheduling on a paused worker.',
     )
+    resume_worker.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     resume_worker.add_argument('--run-name', required=True)
     resume_worker.add_argument('--worker-label', required=True)
     return parser.parse_args()
@@ -1573,11 +2566,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.command == 'run-task':
+        result_json = Path(args.result_json)
         payload = execute_single_task(
+            round_kind=getattr(args, 'round_kind', ROUND_KIND_WINNER_REFINE),
             run_name=args.run_name,
             candidate_arm=args.candidate_arm,
             seed=args.seed,
-            result_json=Path(args.result_json),
+            result_json=result_json,
             machine_label=args.machine_label,
             screening_num_workers=args.screening_num_workers,
             screening_file_batch_size=args.screening_file_batch_size,
@@ -1585,7 +2580,15 @@ def main() -> None:
             screening_val_file_batch_size=args.screening_val_file_batch_size,
             screening_val_prefetch_factor=args.screening_val_prefetch_factor,
         )
-        print(json.dumps(fidelity.normalize_payload(payload), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                fidelity.normalize_payload(
+                    build_run_task_cli_summary(payload, result_json=result_json)
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
     if args.command == 'dispatch':
         raise SystemExit(run_dispatch(args))

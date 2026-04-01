@@ -7,10 +7,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import statistics
 import shutil
 import time
 import traceback
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -91,20 +93,14 @@ P1_JOINT_REFINE_ROUND_SEED_OFFSETS = [0, 1009, 2027]
 P1_PROTOCOL_DECIDE_STEP_SCALE = 1.0
 P1_PROTOCOL_DECIDE_SEED_OFFSETS = [0, 1009]
 P1_PROTOCOL_DECIDE_PROBE_KEEP_PER_PROTOCOL = 4
-P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS = [0.09, 0.12]
-# protocol_decide only needs enough spread to pick the winning protocol.
-# Keep the grid centered near the solo sweet spot, but leave the old upper edge
-# for winner_refine where we can search more locally around a single protocol.
-P1_PROTOCOL_DECIDE_MIXES = [
-    ('anchor', 0.43, 0.21, 0.36),
-    ('rank_lean', 0.53, 0.16, 0.31),
-    ('opp_lean', 0.38, 0.31, 0.31),
-    ('danger_lean', 0.38, 0.16, 0.46),
-]
+P1_PROTOCOL_DECIDE_COORDINATE_MODE = stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_COORDINATE_MODE
+P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS = list(stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS)
+P1_PROTOCOL_DECIDE_MIXES = list(stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_MIXES)
 P1_WINNER_REFINE_STEP_SCALE = 1.5
 P1_WINNER_REFINE_SEED_OFFSETS = [0, 1009]
 P1_WINNER_REFINE_CENTER_MODE = stage05_defaults.CURRENT_P1_WINNER_REFINE_CENTER_MODE
 P1_WINNER_REFINE_PROTOCOL_ARM = stage05_defaults.CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM
+P1_WINNER_REFINE_CENTER_KEEP = getattr(stage05_defaults, 'CURRENT_P1_WINNER_REFINE_CENTER_KEEP', 3)
 P1_WINNER_REFINE_CENTER_ARM_NAMES = tuple(
     stage05_defaults.CURRENT_P1_WINNER_REFINE_CENTER_ARMS
 )
@@ -120,6 +116,7 @@ P1_PROGRESSIVE_NOISE_MARGIN_MULT = (
 )
 P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY = 'legacy_max003_or_2noise'
 P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP = 'flip_or_gap'
+P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET = 'legacy_budget_triplet_grid_v1'
 P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = (
     stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
 )
@@ -137,8 +134,10 @@ P0_ROUND1_MIN_KEEP = 8
 P1_PROTOCOL_ELIGIBILITY_GROUP_KEY = 'protocol_arm'
 P1_BUDGET_RATIO_MIN = 0.00
 P1_BUDGET_RATIO_MAX = 2.00
+P1_BUDGET_RATIO_DIGITS = int(getattr(stage05_defaults, 'CURRENT_P1_BUDGET_RATIO_DIGITS', 4))
 P1_AUX_WEIGHT_MIN = 0.00
 P1_AUX_WEIGHT_MAX = 0.18
+P1_AUX_WEIGHT_DIGITS = int(getattr(stage05_defaults, 'CURRENT_P1_AUX_WEIGHT_DIGITS', 5))
 P1_COMBO_FACTOR_MIN = 0.75
 P1_COMBO_FACTOR_MAX = 1.25
 ARM_CACHE_SCHEMA_VERSION = 2
@@ -2613,9 +2612,12 @@ def clamp_search_value(value: float, *, lower: float, upper: float, digits: int 
 
 
 def encode_budget_ratio(ratio: float) -> str:
-    # Budget ratios are clamped to 3 decimal places, so arm names must preserve
-    # thousandths to keep cache keys and output directories collision-free.
-    return f'{int(round(ratio * 1000)):04d}'
+    # Budget ratios are clamped to P1_BUDGET_RATIO_DIGITS decimal places, so
+    # arm names must preserve that precision to keep cache keys and output
+    # directories collision-free.
+    scale = 10 ** P1_BUDGET_RATIO_DIGITS
+    width = P1_BUDGET_RATIO_DIGITS + 1
+    return f'{int(round(ratio * scale)):0{width}d}'
 
 
 def unique_candidates(candidates: list[CandidateSpec]) -> list[CandidateSpec]:
@@ -2649,8 +2651,37 @@ def clamp_budget_ratio(value: float) -> float:
         value,
         lower=P1_BUDGET_RATIO_MIN,
         upper=P1_BUDGET_RATIO_MAX,
-        digits=3,
+        digits=P1_BUDGET_RATIO_DIGITS,
     )
+
+
+def clamp_aux_weight(value: float) -> float:
+    return clamp_search_value(
+        value,
+        lower=P1_AUX_WEIGHT_MIN,
+        upper=P1_AUX_WEIGHT_MAX,
+        digits=P1_AUX_WEIGHT_DIGITS,
+    )
+
+
+@contextmanager
+def temporary_search_precision(
+    *,
+    budget_ratio_digits: int | None = None,
+    aux_weight_digits: int | None = None,
+):
+    global P1_BUDGET_RATIO_DIGITS, P1_AUX_WEIGHT_DIGITS
+    original_budget_digits = P1_BUDGET_RATIO_DIGITS
+    original_aux_digits = P1_AUX_WEIGHT_DIGITS
+    if budget_ratio_digits is not None:
+        P1_BUDGET_RATIO_DIGITS = int(budget_ratio_digits)
+    if aux_weight_digits is not None:
+        P1_AUX_WEIGHT_DIGITS = int(aux_weight_digits)
+    try:
+        yield
+    finally:
+        P1_BUDGET_RATIO_DIGITS = original_budget_digits
+        P1_AUX_WEIGHT_DIGITS = original_aux_digits
 
 
 def infer_aux_family(*, rank_budget_ratio: float, opp_budget_ratio: float, danger_budget_ratio: float) -> str:
@@ -2857,11 +2888,50 @@ def clamp_combo_factor(value: float) -> float:
 
 
 def budget_ratio_to_aux_weight(budget_ratio: float, *, weight_per_budget_unit: float) -> float:
-    return clamp_search_value(
-        budget_ratio * weight_per_budget_unit,
-        lower=P1_AUX_WEIGHT_MIN,
-        upper=P1_AUX_WEIGHT_MAX,
-        digits=3,
+    return clamp_aux_weight(budget_ratio * weight_per_budget_unit)
+
+
+def aux_weight_to_budget_ratio(
+    aux_weight: float,
+    *,
+    weight_per_budget_unit: float,
+    combo_factor: float = 1.0,
+) -> float:
+    if aux_weight <= 0 or weight_per_budget_unit <= 0:
+        return 0.0
+    effective_combo_factor = combo_factor if combo_factor > 0 else 1.0
+    return clamp_budget_ratio(aux_weight * effective_combo_factor / weight_per_budget_unit)
+
+
+def encode_effective_coord(value: float, *, digits: int) -> str:
+    scale = 10 ** digits
+    width = digits + 1
+    return f'{int(round(float(value) * scale)):0{width}d}'
+
+
+EFFECTIVE_TRIPLET_ARM_RE = re.compile(r'__W_r(?P<rank>\d+)_o(?P<opp>\d+)_d(?P<danger>\d+)$')
+
+
+def infer_effective_precision_from_arm_names(
+    arm_names: Sequence[str] | None,
+) -> tuple[int, int] | None:
+    if arm_names is None:
+        return None
+    for arm_name in arm_names:
+        match = EFFECTIVE_TRIPLET_ARM_RE.search(str(arm_name).strip())
+        if not match:
+            continue
+        rank_digits = max(len(match.group('rank')) - 1, 0)
+        aux_digits = max(len(match.group('opp')) - 1, len(match.group('danger')) - 1, 0)
+        return rank_digits, aux_digits
+    return None
+
+
+def effective_triplet_candidate_name(*, rank_scale: float, opp_weight: float, danger_weight: float) -> str:
+    return (
+        f'W_r{encode_effective_coord(rank_scale, digits=P1_BUDGET_RATIO_DIGITS)}'
+        f'_o{encode_effective_coord(opp_weight, digits=P1_AUX_WEIGHT_DIGITS)}'
+        f'_d{encode_effective_coord(danger_weight, digits=P1_AUX_WEIGHT_DIGITS)}'
     )
 
 
@@ -3015,19 +3085,9 @@ def make_p1_budget_candidate(
     if applied_combo_factor > 0 and applied_combo_mode != 'none':
         compensation = 1.0 / applied_combo_factor
         if opp_weight > 0:
-            opp_weight = clamp_search_value(
-                opp_weight * compensation,
-                lower=P1_AUX_WEIGHT_MIN,
-                upper=P1_AUX_WEIGHT_MAX,
-                digits=3,
-            )
+            opp_weight = clamp_aux_weight(opp_weight * compensation)
         if danger_weight > 0:
-            danger_weight = clamp_search_value(
-                danger_weight * compensation,
-                lower=P1_AUX_WEIGHT_MIN,
-                upper=P1_AUX_WEIGHT_MAX,
-                digits=3,
-            )
+            danger_weight = clamp_aux_weight(danger_weight * compensation)
     rank_target_budget = effective_budget_base * rank_budget_ratio
     opp_target_budget = effective_budget_base * opp_budget_ratio
     danger_target_budget = effective_budget_base * danger_budget_ratio
@@ -3089,6 +3149,203 @@ def make_p1_budget_candidate(
             'weight_profile': protocol.weight_profile,
             'window_profile': protocol.window_profile,
             'source_arm': source_arm,
+        },
+    )
+
+
+def make_p1_effective_triplet_candidate(
+    protocol: CandidateSpec,
+    *,
+    calibration: dict[str, Any],
+    rank_scale: float,
+    opp_weight: float,
+    danger_weight: float,
+    stage: str,
+    source_arm: str | None = None,
+    family: str = 'all_three',
+    coordinate_name: str | None = None,
+) -> CandidateSpec:
+    protocol_arm = str(protocol.meta.get('protocol_arm', protocol.arm_name))
+    rank_scale = clamp_budget_ratio(rank_scale)
+    opp_weight = clamp_aux_weight(opp_weight)
+    danger_weight = clamp_aux_weight(danger_weight)
+    effective_budget_base = float(calibration.get('rank_effective_base', 0.0) or 0.0)
+    opp_weight_per_budget_unit = float(
+        calibration.get('opp_weight_per_budget_unit', P1_DEFAULT_OPP_WEIGHT_PER_BUDGET) or 0.0
+    )
+    danger_weight_per_budget_unit = float(
+        calibration.get('danger_weight_per_budget_unit', P1_DEFAULT_DANGER_WEIGHT_PER_BUDGET) or 0.0
+    )
+    protocol_rank_opp_combo_factor = float(
+        calibration.get('protocol_rank_opp_combo_factors', {}).get(
+            protocol_arm,
+            calibration.get('rank_opp_combo_factor', 1.0),
+        )
+        or 1.0
+    )
+    protocol_rank_danger_combo_factor = float(
+        calibration.get('protocol_rank_danger_combo_factors', {}).get(
+            protocol_arm,
+            calibration.get('rank_danger_combo_factor', 1.0),
+        )
+        or 1.0
+    )
+    protocol_opp_danger_combo_factor = float(
+        calibration.get('protocol_opp_danger_combo_factors', {}).get(
+            protocol_arm,
+            calibration.get(
+                'opp_danger_combo_factor',
+                calibration.get('joint_combo_factor', 1.0),
+            ),
+        )
+        or 1.0
+    )
+    protocol_triple_combo_factor = float(
+        calibration.get('protocol_triple_combo_factors', {}).get(
+            protocol_arm,
+            calibration.get('triple_combo_factor', 1.0),
+        )
+        or 1.0
+    )
+    active_heads = tuple(
+        head
+        for head, enabled in (
+            ('rank', rank_scale > 0),
+            ('opp', opp_weight > 0),
+            ('danger', danger_weight > 0),
+        )
+        if enabled
+    )
+    applied_combo_mode = 'none'
+    applied_combo_factor = 1.0
+    if active_heads == ('rank', 'opp'):
+        applied_combo_mode = 'rank_opp'
+        applied_combo_factor = protocol_rank_opp_combo_factor
+    elif active_heads == ('rank', 'danger'):
+        applied_combo_mode = 'rank_danger'
+        applied_combo_factor = protocol_rank_danger_combo_factor
+    elif active_heads == ('opp', 'danger'):
+        applied_combo_mode = 'opp_danger'
+        applied_combo_factor = protocol_opp_danger_combo_factor
+    elif active_heads == ('rank', 'opp', 'danger'):
+        applied_combo_mode = 'triple'
+        applied_combo_factor = protocol_triple_combo_factor
+    approx_opp_budget_ratio = aux_weight_to_budget_ratio(
+        opp_weight,
+        weight_per_budget_unit=opp_weight_per_budget_unit,
+        combo_factor=applied_combo_factor,
+    )
+    approx_danger_budget_ratio = aux_weight_to_budget_ratio(
+        danger_weight,
+        weight_per_budget_unit=danger_weight_per_budget_unit,
+        combo_factor=applied_combo_factor,
+    )
+    rank_target_budget = effective_budget_base * rank_scale
+    opp_target_budget = effective_budget_base * approx_opp_budget_ratio
+    danger_target_budget = effective_budget_base * approx_danger_budget_ratio
+    total_budget_est = rank_target_budget + opp_target_budget + danger_target_budget
+    cfg_overrides = ab.merge_dict(deepcopy(protocol.cfg_overrides), build_rank_override(rank_scale))
+    cfg_overrides = ab.merge_dict(
+        cfg_overrides,
+        build_aux_override(
+            opp_weight=opp_weight,
+            danger_weight=danger_weight,
+            danger_enabled=danger_weight > 0,
+        ),
+    )
+    realized_rank_scale = rank_scale
+    realized_opp_weight = opp_weight
+    realized_danger_weight = danger_weight
+    realized_name = effective_triplet_candidate_name(
+        rank_scale=realized_rank_scale,
+        opp_weight=realized_opp_weight,
+        danger_weight=realized_danger_weight,
+    )
+    return CandidateSpec(
+        arm_name=f'{protocol_arm}__{realized_name}',
+        scheduler_profile=protocol.scheduler_profile,
+        curriculum_profile=protocol.curriculum_profile,
+        weight_profile=protocol.weight_profile,
+        window_profile=protocol.window_profile,
+        cfg_overrides=cfg_overrides,
+        meta={
+            'stage': stage,
+            'protocol_arm': protocol_arm,
+            'candidate_name': coordinate_name or realized_name,
+            'shared_rank_template_mean': calibration.get('shared_rank_template_mean', 0.0),
+            'effective_budget_base': effective_budget_base,
+            'rank_budget_ratio': rank_scale,
+            'opp_budget_ratio': approx_opp_budget_ratio,
+            'danger_budget_ratio': approx_danger_budget_ratio,
+            'rank_scale': rank_scale,
+            'rank_target_budget': rank_target_budget,
+            'opp_target_budget': opp_target_budget,
+            'danger_target_budget': danger_target_budget,
+            'opp_weight_per_budget_unit': opp_weight_per_budget_unit,
+            'danger_weight_per_budget_unit': danger_weight_per_budget_unit,
+            'opp_weight': opp_weight,
+            'danger_weight': danger_weight,
+            'total_budget_est': total_budget_est,
+            'protocol_rank_opp_combo_factor': protocol_rank_opp_combo_factor,
+            'protocol_rank_danger_combo_factor': protocol_rank_danger_combo_factor,
+            'protocol_opp_danger_combo_factor': protocol_opp_danger_combo_factor,
+            'protocol_triple_combo_factor': protocol_triple_combo_factor,
+            'protocol_joint_combo_factor': protocol_opp_danger_combo_factor,
+            'active_heads': list(active_heads),
+            'applied_combo_mode': applied_combo_mode,
+            'applied_combo_factor': applied_combo_factor,
+            'aux_family': family or infer_aux_family(
+                rank_budget_ratio=rank_scale,
+                opp_budget_ratio=approx_opp_budget_ratio,
+                danger_budget_ratio=approx_danger_budget_ratio,
+            ),
+            'scheduler_profile': protocol.scheduler_profile,
+            'curriculum_profile': protocol.curriculum_profile,
+            'weight_profile': protocol.weight_profile,
+            'window_profile': protocol.window_profile,
+            'coordinate_space': 'effective_weights',
+            'effective_rank_scale': realized_rank_scale,
+            'effective_opp_weight': realized_opp_weight,
+            'effective_danger_weight': realized_danger_weight,
+            'requested_effective_rank_scale': rank_scale,
+            'requested_effective_opp_weight': opp_weight,
+            'requested_effective_danger_weight': danger_weight,
+            'source_arm': source_arm,
+        },
+    )
+
+
+def relabel_triplet_candidate_as_effective(
+    candidate: CandidateSpec,
+    *,
+    coordinate_name: str | None = None,
+) -> CandidateSpec:
+    protocol_arm = str(candidate.meta.get('protocol_arm', candidate.arm_name))
+    realized_rank_scale = float(candidate.meta.get('rank_scale', 0.0))
+    realized_opp_weight = float(candidate.meta.get('opp_weight', 0.0))
+    realized_danger_weight = float(candidate.meta.get('danger_weight', 0.0))
+    realized_name = effective_triplet_candidate_name(
+        rank_scale=realized_rank_scale,
+        opp_weight=realized_opp_weight,
+        danger_weight=realized_danger_weight,
+    )
+    return CandidateSpec(
+        arm_name=f'{protocol_arm}__{realized_name}',
+        scheduler_profile=candidate.scheduler_profile,
+        curriculum_profile=candidate.curriculum_profile,
+        weight_profile=candidate.weight_profile,
+        window_profile=candidate.window_profile,
+        cfg_overrides=candidate.cfg_overrides,
+        meta={
+            **candidate.meta,
+            'candidate_name': coordinate_name or realized_name,
+            'coordinate_space': 'effective_weights',
+            'effective_rank_scale': realized_rank_scale,
+            'effective_opp_weight': realized_opp_weight,
+            'effective_danger_weight': realized_danger_weight,
+            'requested_effective_rank_scale': realized_rank_scale,
+            'requested_effective_opp_weight': realized_opp_weight,
+            'requested_effective_danger_weight': realized_danger_weight,
         },
     )
 
@@ -3655,68 +3912,123 @@ def build_p1_solo_candidates(
 def build_p1_protocol_decide_candidates(
     protocols: list[CandidateSpec],
     calibration: dict[str, Any],
+    search_space: dict[str, Any] | None = None,
 ) -> list[CandidateSpec]:
+    coordinate_mode = protocol_decide_coordinate_mode_from_search_space(search_space)
+    protocol_decide_total_budget_ratios, protocol_decide_mixes = protocol_decide_grid_from_search_space(
+        search_space
+    )
+    budget_digits, aux_digits = precision_from_search_space(
+        search_space,
+        fallback_coordinate_mode=coordinate_mode,
+    )
     candidates: list[CandidateSpec] = []
-    for protocol in protocols:
-        candidates.append(
-            make_p1_budget_candidate(
-                protocol,
-                calibration=calibration,
-                rank_budget_ratio=0.0,
-                opp_budget_ratio=0.0,
-                danger_budget_ratio=0.0,
-                stage='P1_protocol_decide_round',
-                family='ce_only',
+    with temporary_search_precision(
+        budget_ratio_digits=budget_digits,
+        aux_weight_digits=aux_digits,
+    ):
+        for protocol in protocols:
+            candidates.append(
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=0.0,
+                    opp_budget_ratio=0.0,
+                    danger_budget_ratio=0.0,
+                    stage='P1_protocol_decide_round',
+                    family='ce_only',
+                )
             )
-        )
-        for total_budget_ratio in P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS:
-            for mix_name, rank_share, opp_share, danger_share in P1_PROTOCOL_DECIDE_MIXES:
-                candidates.append(
-                    make_p1_triplet_candidate(
+            for total_budget_ratio in protocol_decide_total_budget_ratios:
+                for mix_name, rank_share, opp_share, danger_share in protocol_decide_mixes:
+                    coordinate_name = f'{mix_name}_{int(round(total_budget_ratio * 100)):02d}'
+                    if coordinate_mode == P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
+                        candidates.append(
+                            make_p1_triplet_candidate(
+                                protocol,
+                                calibration=calibration,
+                                total_budget_ratio=total_budget_ratio,
+                                rank_share=rank_share,
+                                opp_share=opp_share,
+                                danger_share=danger_share,
+                                stage='P1_protocol_decide_round',
+                                family='all_three',
+                                mix_name=mix_name,
+                            )
+                        )
+                        continue
+                    base_candidate = make_p1_triplet_candidate(
                         protocol,
                         calibration=calibration,
+                        stage='P1_protocol_decide_round',
+                        family='all_three',
                         total_budget_ratio=total_budget_ratio,
                         rank_share=rank_share,
                         opp_share=opp_share,
                         danger_share=danger_share,
-                        stage='P1_protocol_decide_round',
-                        family='all_three',
                         mix_name=mix_name,
                     )
-                )
+                    candidates.append(
+                        relabel_triplet_candidate_as_effective(
+                            base_candidate,
+                            coordinate_name=coordinate_name,
+                        )
+                    )
     return unique_candidates(candidates)
 
 
 def build_p1_winner_refine_points(
     *,
-    rank_budget_ratio: float,
-    opp_budget_ratio: float,
-    danger_budget_ratio: float,
+    calibration: dict[str, Any],
+    protocol_arm: str,
+    rank_scale: float,
+    opp_weight: float,
+    danger_weight: float,
 ) -> list[tuple[float, float, float]]:
     center = (
-        clamp_budget_ratio(rank_budget_ratio),
-        clamp_budget_ratio(opp_budget_ratio),
-        clamp_budget_ratio(danger_budget_ratio),
+        clamp_budget_ratio(rank_scale),
+        clamp_aux_weight(opp_weight),
+        clamp_aux_weight(danger_weight),
     )
     points: set[tuple[float, float, float]] = {center}
     for scale in P1_WINNER_REFINE_TOTAL_SCALE_FACTORS:
-        scaled = tuple(clamp_budget_ratio(value * scale) for value in center)
+        scaled = (
+            clamp_budget_ratio(center[0] * scale),
+            clamp_aux_weight(center[1] * scale),
+            clamp_aux_weight(center[2] * scale),
+        )
         if min(scaled) > 0:
             points.add(scaled)
-    transfer = P1_WINNER_REFINE_TRANSFER_DELTA
-    transfers = (
-        (transfer, -transfer, 0.0),
-        (-transfer, transfer, 0.0),
-        (transfer, 0.0, -transfer),
-        (-transfer, 0.0, transfer),
-        (0.0, transfer, -transfer),
-        (0.0, -transfer, transfer),
+    rank_transfer = P1_WINNER_REFINE_TRANSFER_DELTA
+    protocol_triple_combo_factor = float(
+        calibration.get('protocol_triple_combo_factors', {}).get(
+            protocol_arm,
+            calibration.get('triple_combo_factor', 1.0),
+        )
+        or 1.0
     )
-    for delta_rank, delta_opp, delta_danger in transfers:
+    opp_weight_per_budget_unit = float(
+        calibration.get('opp_weight_per_budget_unit', P1_DEFAULT_OPP_WEIGHT_PER_BUDGET) or 0.0
+    )
+    danger_weight_per_budget_unit = float(
+        calibration.get('danger_weight_per_budget_unit', P1_DEFAULT_DANGER_WEIGHT_PER_BUDGET) or 0.0
+    )
+    combo = max(protocol_triple_combo_factor, 1e-12)
+    opp_transfer = clamp_aux_weight(rank_transfer * opp_weight_per_budget_unit / combo)
+    danger_transfer = clamp_aux_weight(rank_transfer * danger_weight_per_budget_unit / combo)
+    transfers = (
+        (rank_transfer, -opp_transfer, 0.0),
+        (-rank_transfer, opp_transfer, 0.0),
+        (rank_transfer, 0.0, -danger_transfer),
+        (-rank_transfer, 0.0, danger_transfer),
+        (0.0, opp_transfer, -danger_transfer),
+        (0.0, -opp_transfer, danger_transfer),
+    )
+    for delta_rank, delta_opp_weight, delta_danger_weight in transfers:
         candidate = (
             clamp_budget_ratio(center[0] + delta_rank),
-            clamp_budget_ratio(center[1] + delta_opp),
-            clamp_budget_ratio(center[2] + delta_danger),
+            clamp_aux_weight(center[1] + delta_opp_weight),
+            clamp_aux_weight(center[2] + delta_danger_weight),
         )
         if min(candidate) <= 0:
             continue
@@ -3728,6 +4040,7 @@ def build_p1_winner_refine_candidates(
     protocols: list[CandidateSpec],
     calibration: dict[str, Any],
     centers: list[CandidateSpec],
+    search_space: dict[str, Any] | None = None,
 ) -> list[CandidateSpec]:
     protocol_index = {
         str(protocol.meta.get('protocol_arm', protocol.arm_name)): protocol
@@ -3737,30 +4050,42 @@ def build_p1_winner_refine_candidates(
     usable_centers = [
         center for center in centers if is_p1_winner_refine_center_meta(center.meta)
     ]
-    for center in usable_centers:
-        protocol_arm = str(center.meta.get('protocol_arm', center.arm_name))
-        protocol = protocol_index[protocol_arm]
-        center_rank = float(center.meta.get('rank_budget_ratio', 0.0))
-        center_opp = float(center.meta.get('opp_budget_ratio', 0.0))
-        center_danger = float(center.meta.get('danger_budget_ratio', 0.0))
-        center_name = center.arm_name
-        for rank_point, opp_point, danger_point in build_p1_winner_refine_points(
-            rank_budget_ratio=center_rank,
-            opp_budget_ratio=center_opp,
-            danger_budget_ratio=center_danger,
-        ):
-            candidates.append(
-                make_p1_budget_candidate(
-                    protocol,
-                    calibration=calibration,
-                    rank_budget_ratio=rank_point,
-                    opp_budget_ratio=opp_point,
-                    danger_budget_ratio=danger_point,
-                    stage='P1_winner_refine_round',
-                    family='all_three',
-                    source_arm=center_name,
+    coordinate_mode = protocol_decide_coordinate_mode_from_search_space(search_space)
+    budget_digits, aux_digits = precision_from_search_space(
+        search_space,
+        fallback_coordinate_mode=coordinate_mode,
+    )
+    with temporary_search_precision(
+        budget_ratio_digits=budget_digits,
+        aux_weight_digits=aux_digits,
+    ):
+        for center in usable_centers:
+            center_meta = center.meta
+            protocol_arm = str(center_meta.get('protocol_arm', center.arm_name))
+            protocol = protocol_index[protocol_arm]
+            center_rank = float(center_meta.get('effective_rank_scale', center_meta.get('rank_scale', 0.0)))
+            center_opp = float(center_meta.get('effective_opp_weight', center_meta.get('opp_weight', 0.0)))
+            center_danger = float(center_meta.get('effective_danger_weight', center_meta.get('danger_weight', 0.0)))
+            center_name = center.arm_name
+            for rank_point, opp_point, danger_point in build_p1_winner_refine_points(
+                calibration=calibration,
+                protocol_arm=protocol_arm,
+                rank_scale=center_rank,
+                opp_weight=center_opp,
+                danger_weight=center_danger,
+            ):
+                candidates.append(
+                    make_p1_effective_triplet_candidate(
+                        protocol,
+                        calibration=calibration,
+                        rank_scale=rank_point,
+                        opp_weight=opp_point,
+                        danger_weight=danger_point,
+                        stage='P1_winner_refine_round',
+                        family='all_three',
+                        source_arm=center_name,
+                    )
                 )
-            )
     if not candidates:
         raise RuntimeError('p1_winner_refine_round requires at least one all_three center')
     return unique_candidates(candidates)
@@ -3770,6 +4095,7 @@ def build_p1_ablation_candidates(
     protocols: list[CandidateSpec],
     calibration: dict[str, Any],
     winner: CandidateSpec,
+    search_space: dict[str, Any] | None = None,
 ) -> list[CandidateSpec]:
     protocol_index = {
         str(protocol.meta.get('protocol_arm', protocol.arm_name)): protocol
@@ -3777,62 +4103,130 @@ def build_p1_ablation_candidates(
     }
     protocol_arm = str(winner.meta.get('protocol_arm', winner.arm_name))
     protocol = protocol_index[protocol_arm]
-    rank_budget_ratio = float(winner.meta.get('rank_budget_ratio', 0.0))
-    opp_budget_ratio = float(winner.meta.get('opp_budget_ratio', 0.0))
-    danger_budget_ratio = float(winner.meta.get('danger_budget_ratio', 0.0))
     winner_name = winner.arm_name
-    candidates = [
-        make_p1_budget_candidate(
-            protocol,
-            calibration=calibration,
-            rank_budget_ratio=0.0,
-            opp_budget_ratio=0.0,
-            danger_budget_ratio=0.0,
-            stage='P1_ablation_round',
-            family='ce_only',
-            source_arm=winner_name,
-        ),
-        make_p1_budget_candidate(
-            protocol,
-            calibration=calibration,
-            rank_budget_ratio=rank_budget_ratio,
-            opp_budget_ratio=opp_budget_ratio,
-            danger_budget_ratio=danger_budget_ratio,
-            stage='P1_ablation_round',
-            family='all_three',
-            source_arm=winner_name,
-        ),
-        make_p1_budget_candidate(
-            protocol,
-            calibration=calibration,
-            rank_budget_ratio=0.0,
-            opp_budget_ratio=opp_budget_ratio,
-            danger_budget_ratio=danger_budget_ratio,
-            stage='P1_ablation_round',
-            family='drop_rank',
-            source_arm=winner_name,
-        ),
-        make_p1_budget_candidate(
-            protocol,
-            calibration=calibration,
-            rank_budget_ratio=rank_budget_ratio,
-            opp_budget_ratio=0.0,
-            danger_budget_ratio=danger_budget_ratio,
-            stage='P1_ablation_round',
-            family='drop_opp',
-            source_arm=winner_name,
-        ),
-        make_p1_budget_candidate(
-            protocol,
-            calibration=calibration,
-            rank_budget_ratio=rank_budget_ratio,
-            opp_budget_ratio=opp_budget_ratio,
-            danger_budget_ratio=0.0,
-            stage='P1_ablation_round',
-            family='drop_danger',
-            source_arm=winner_name,
-        ),
-    ]
+    coordinate_mode = protocol_decide_coordinate_mode_from_search_space(search_space)
+    budget_digits, aux_digits = precision_from_search_space(
+        search_space,
+        fallback_coordinate_mode=coordinate_mode,
+    )
+    with temporary_search_precision(
+        budget_ratio_digits=budget_digits,
+        aux_weight_digits=aux_digits,
+    ):
+        if str(winner.meta.get('coordinate_space', '')) == 'effective_weights':
+            rank_scale = float(winner.meta.get('effective_rank_scale', winner.meta.get('rank_scale', 0.0)))
+            opp_weight = float(winner.meta.get('effective_opp_weight', winner.meta.get('opp_weight', 0.0)))
+            danger_weight = float(
+                winner.meta.get('effective_danger_weight', winner.meta.get('danger_weight', 0.0))
+            )
+            candidates = [
+                make_p1_effective_triplet_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_scale=0.0,
+                    opp_weight=0.0,
+                    danger_weight=0.0,
+                    stage='P1_ablation_round',
+                    family='ce_only',
+                    source_arm=winner_name,
+                ),
+                make_p1_effective_triplet_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_scale=rank_scale,
+                    opp_weight=opp_weight,
+                    danger_weight=danger_weight,
+                    stage='P1_ablation_round',
+                    family='all_three',
+                    source_arm=winner_name,
+                ),
+                make_p1_effective_triplet_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_scale=0.0,
+                    opp_weight=opp_weight,
+                    danger_weight=danger_weight,
+                    stage='P1_ablation_round',
+                    family='drop_rank',
+                    source_arm=winner_name,
+                ),
+                make_p1_effective_triplet_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_scale=rank_scale,
+                    opp_weight=0.0,
+                    danger_weight=danger_weight,
+                    stage='P1_ablation_round',
+                    family='drop_opp',
+                    source_arm=winner_name,
+                ),
+                make_p1_effective_triplet_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_scale=rank_scale,
+                    opp_weight=opp_weight,
+                    danger_weight=0.0,
+                    stage='P1_ablation_round',
+                    family='drop_danger',
+                    source_arm=winner_name,
+                ),
+            ]
+        else:
+            rank_budget_ratio = float(winner.meta.get('rank_budget_ratio', 0.0))
+            opp_budget_ratio = float(winner.meta.get('opp_budget_ratio', 0.0))
+            danger_budget_ratio = float(winner.meta.get('danger_budget_ratio', 0.0))
+            candidates = [
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=0.0,
+                    opp_budget_ratio=0.0,
+                    danger_budget_ratio=0.0,
+                    stage='P1_ablation_round',
+                    family='ce_only',
+                    source_arm=winner_name,
+                ),
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=rank_budget_ratio,
+                    opp_budget_ratio=opp_budget_ratio,
+                    danger_budget_ratio=danger_budget_ratio,
+                    stage='P1_ablation_round',
+                    family='all_three',
+                    source_arm=winner_name,
+                ),
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=0.0,
+                    opp_budget_ratio=opp_budget_ratio,
+                    danger_budget_ratio=danger_budget_ratio,
+                    stage='P1_ablation_round',
+                    family='drop_rank',
+                    source_arm=winner_name,
+                ),
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=rank_budget_ratio,
+                    opp_budget_ratio=0.0,
+                    danger_budget_ratio=danger_budget_ratio,
+                    stage='P1_ablation_round',
+                    family='drop_opp',
+                    source_arm=winner_name,
+                ),
+                make_p1_budget_candidate(
+                    protocol,
+                    calibration=calibration,
+                    rank_budget_ratio=rank_budget_ratio,
+                    opp_budget_ratio=opp_budget_ratio,
+                    danger_budget_ratio=0.0,
+                    stage='P1_ablation_round',
+                    family='drop_danger',
+                    source_arm=winner_name,
+                ),
+            ]
     return unique_candidates(candidates)
 
 
@@ -4056,12 +4450,87 @@ def current_protocol_decide_mix_payload() -> list[dict[str, float | str]]:
     return [
         {
             'name': name,
-            'rank_share': rank_share,
-            'opp_share': opp_share,
-            'danger_share': danger_share,
+            'rank_share': float(rank_share),
+            'opp_share': float(opp_share),
+            'danger_share': float(danger_share),
         }
         for name, rank_share, opp_share, danger_share in P1_PROTOCOL_DECIDE_MIXES
     ]
+
+
+def protocol_decide_coordinate_mode_from_search_space(search_space: dict[str, Any] | None) -> str:
+    if not isinstance(search_space, dict):
+        return P1_PROTOCOL_DECIDE_COORDINATE_MODE
+    explicit_mode = str(search_space.get('protocol_decide_coordinate_mode', '') or '').strip()
+    if explicit_mode:
+        if explicit_mode in (
+            P1_PROTOCOL_DECIDE_COORDINATE_MODE,
+            P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET,
+        ):
+            return explicit_mode
+        raise RuntimeError(f'unsupported protocol_decide coordinate mode `{explicit_mode}`')
+    explicit_centers = [
+        str(item).strip()
+        for item in search_space.get('winner_refine_center_arm_names', [])
+        if str(item).strip()
+    ]
+    if any('__B_' in item for item in explicit_centers):
+        return P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
+    if (
+        'winner_refine_center_protocol_arm' in search_space
+        and 'winner_refine_center_arm_names' in search_space
+        and 'budget_ratio_digits' not in search_space
+        and 'aux_weight_digits' not in search_space
+    ):
+        return P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
+    return P1_PROTOCOL_DECIDE_COORDINATE_MODE
+
+
+def protocol_decide_grid_from_search_space(
+    search_space: dict[str, Any] | None,
+) -> tuple[list[float], list[tuple[str, float, float, float]]]:
+    if not isinstance(search_space, dict):
+        return list(P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS), list(P1_PROTOCOL_DECIDE_MIXES)
+    total_budget_ratios_raw = search_space.get('protocol_decide_total_budget_ratios')
+    if isinstance(total_budget_ratios_raw, (list, tuple)):
+        total_budget_ratios = [clamp_budget_ratio(item) for item in total_budget_ratios_raw]
+    else:
+        total_budget_ratios = list(P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS)
+    mixes_raw = search_space.get('protocol_decide_mixes')
+    if isinstance(mixes_raw, (list, tuple)):
+        mixes: list[tuple[str, float, float, float]] = []
+        for item in mixes_raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '')).strip()
+            if not name:
+                continue
+            mixes.append(
+                (
+                    name,
+                    float(item.get('rank_share', 0.0)),
+                    float(item.get('opp_share', 0.0)),
+                    float(item.get('danger_share', 0.0)),
+                )
+            )
+        if mixes:
+            return total_budget_ratios, mixes
+    return total_budget_ratios, list(P1_PROTOCOL_DECIDE_MIXES)
+
+
+def precision_from_search_space(
+    search_space: dict[str, Any] | None,
+    *,
+    fallback_coordinate_mode: str | None = None,
+) -> tuple[int, int]:
+    if isinstance(search_space, dict):
+        budget_digits = search_space.get('budget_ratio_digits')
+        aux_digits = search_space.get('aux_weight_digits')
+        if budget_digits is not None and aux_digits is not None:
+            return int(budget_digits), int(aux_digits)
+    if fallback_coordinate_mode == P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
+        return 3, 3
+    return P1_BUDGET_RATIO_DIGITS, P1_AUX_WEIGHT_DIGITS
 
 
 def current_p1_winner_refine_center_arm_payload() -> list[str]:
@@ -4071,24 +4540,69 @@ def current_p1_winner_refine_center_arm_payload() -> list[str]:
 def current_p1_winner_refine_search_space_payload() -> dict[str, Any]:
     return {
         'winner_refine_center_mode': P1_WINNER_REFINE_CENTER_MODE,
-        'winner_refine_center_protocol_arm': P1_WINNER_REFINE_PROTOCOL_ARM,
+        'winner_refine_center_keep': P1_WINNER_REFINE_CENTER_KEEP,
         'winner_refine_center_arm_names': current_p1_winner_refine_center_arm_payload(),
         'winner_refine_seed_offsets': list(P1_WINNER_REFINE_SEED_OFFSETS),
         'winner_refine_total_scale_factors': list(P1_WINNER_REFINE_TOTAL_SCALE_FACTORS),
         'winner_refine_transfer_delta': P1_WINNER_REFINE_TRANSFER_DELTA,
+        'budget_ratio_digits': P1_BUDGET_RATIO_DIGITS,
+        'aux_weight_digits': P1_AUX_WEIGHT_DIGITS,
     }
 
 
-def current_p1_winner_refine_explicit_center_arm_names(protocol_arm: str) -> tuple[str, ...]:
-    if P1_WINNER_REFINE_CENTER_MODE != 'explicit_arm_names':
-        return ()
-    if protocol_arm != P1_WINNER_REFINE_PROTOCOL_ARM:
-        raise RuntimeError(
-            'current winner_refine defaults are frozen for '
-            f'{P1_WINNER_REFINE_PROTOCOL_ARM}, but protocol_decide selected {protocol_arm}; '
-            'update stage05_current_defaults.py and docs before continuing'
+def current_p1_winner_refine_center_selection(protocol_arm: str) -> dict[str, Any]:
+    if P1_WINNER_REFINE_CENTER_MODE == 'explicit_arm_names':
+        if protocol_arm != P1_WINNER_REFINE_PROTOCOL_ARM:
+            raise RuntimeError(
+                'current winner_refine defaults are frozen for '
+                f'{P1_WINNER_REFINE_PROTOCOL_ARM}, but protocol_decide selected {protocol_arm}; '
+                'update stage05_current_defaults.py and docs before continuing'
+            )
+        return {
+            'keep': None,
+            'explicit_arm_names': tuple(P1_WINNER_REFINE_CENTER_ARM_NAMES),
+        }
+    if P1_WINNER_REFINE_CENTER_MODE == 'top_ranked_keep':
+        return {
+            'keep': int(P1_WINNER_REFINE_CENTER_KEEP),
+            'explicit_arm_names': (),
+        }
+    raise RuntimeError(f'unsupported winner_refine center mode `{P1_WINNER_REFINE_CENTER_MODE}`')
+
+
+def winner_refine_center_selection_from_search_space(
+    search_space: dict[str, Any] | None,
+    protocol_arm: str,
+) -> dict[str, Any]:
+    if not isinstance(search_space, dict):
+        return current_p1_winner_refine_center_selection(protocol_arm)
+    mode = str(search_space.get('winner_refine_center_mode', P1_WINNER_REFINE_CENTER_MODE) or '').strip()
+    if not mode:
+        return current_p1_winner_refine_center_selection(protocol_arm)
+    if mode == 'explicit_arm_names':
+        frozen_protocol_arm = str(
+            search_space.get('winner_refine_center_protocol_arm', P1_WINNER_REFINE_PROTOCOL_ARM) or ''
+        ).strip()
+        explicit_arm_names = tuple(
+            str(item).strip()
+            for item in search_space.get('winner_refine_center_arm_names', [])
+            if str(item).strip()
         )
-    return P1_WINNER_REFINE_CENTER_ARM_NAMES
+        if frozen_protocol_arm and protocol_arm != frozen_protocol_arm:
+            raise RuntimeError(
+                'winner_refine centers in persisted search_space are frozen for '
+                f'{frozen_protocol_arm}, but protocol_decide selected {protocol_arm}'
+            )
+        return {
+            'keep': None,
+            'explicit_arm_names': explicit_arm_names,
+        }
+    if mode == 'top_ranked_keep':
+        return {
+            'keep': int(search_space.get('winner_refine_center_keep', P1_WINNER_REFINE_CENTER_KEEP)),
+            'explicit_arm_names': (),
+        }
+    return current_p1_winner_refine_center_selection(protocol_arm)
 
 
 def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
@@ -4099,11 +4613,19 @@ def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
         P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS
     ):
         return False
+    if str(
+        search_space.get('protocol_decide_coordinate_mode', P1_PROTOCOL_DECIDE_COORDINATE_MODE)
+    ) != str(P1_PROTOCOL_DECIDE_COORDINATE_MODE):
+        return False
     if list(search_space.get('protocol_decide_total_budget_ratios', [])) != list(
         P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
     ):
         return False
     if list(search_space.get('protocol_decide_mixes', [])) != current_protocol_decide_mix_payload():
+        return False
+    if int(search_space.get('budget_ratio_digits', P1_BUDGET_RATIO_DIGITS)) != int(P1_BUDGET_RATIO_DIGITS):
+        return False
+    if int(search_space.get('aux_weight_digits', P1_AUX_WEIGHT_DIGITS)) != int(P1_AUX_WEIGHT_DIGITS):
         return False
     if str(search_space.get('calibration_mode', P1_CALIBRATION_DEFAULT_MODE)) != P1_CALIBRATION_DEFAULT_MODE:
         return False
@@ -4136,8 +4658,8 @@ def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
         return False
     if str(search_space.get('winner_refine_center_mode', '')) != str(P1_WINNER_REFINE_CENTER_MODE):
         return False
-    if str(search_space.get('winner_refine_center_protocol_arm', '')) != str(
-        P1_WINNER_REFINE_PROTOCOL_ARM
+    if int(search_space.get('winner_refine_center_keep', P1_WINNER_REFINE_CENTER_KEEP)) != int(
+        P1_WINNER_REFINE_CENTER_KEEP
     ):
         return False
     if list(search_space.get('winner_refine_center_arm_names', [])) != current_p1_winner_refine_center_arm_payload():
@@ -4332,18 +4854,21 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
                 'calibration_mode_note',
                 'combo_scheme',
                 'inherited_single_head_source',
+                'protocol_decide_coordinate_mode',
                 'protocol_decide_total_budget_ratios',
                 'protocol_decide_mixes',
                 'protocol_decide_progressive_ambiguity_mode',
                 'protocol_decide_progressive_gap_threshold',
                 'protocol_decide_progressive_noise_margin_mult',
+                'budget_ratio_digits',
+                'aux_weight_digits',
                 'rank_opp_combo_factor',
                 'rank_danger_combo_factor',
                 'opp_danger_combo_factor',
                 'triple_combo_factor',
                 'protocol_decide_probe_keep_per_protocol',
                 'winner_refine_center_mode',
-                'winner_refine_center_protocol_arm',
+                'winner_refine_center_keep',
                 'winner_refine_center_arm_names',
                 'winner_refine_total_scale_factors',
                 'winner_refine_transfer_delta',
@@ -4891,12 +5416,15 @@ def run_p1(
         ),
         'calibration_protocol_arms': list(calibration.get('calibration_protocol_arms', [])),
         'inherited_single_head_source': calibration.get('inherited_single_head_source'),
+        'protocol_decide_coordinate_mode': P1_PROTOCOL_DECIDE_COORDINATE_MODE,
         'protocol_decide_total_budget_ratios': list(P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
         'protocol_decide_mixes': current_protocol_decide_mix_payload(),
         'ranking_mode': P1_RANKING_MODE,
         'eligibility_group_key': P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
         'policy_loss_epsilon': P1_POLICY_LOSS_EPSILON,
         'old_regression_policy_loss_epsilon': P1_OLD_REGRESSION_POLICY_EPSILON,
+        'budget_ratio_digits': P1_BUDGET_RATIO_DIGITS,
+        'aux_weight_digits': P1_AUX_WEIGHT_DIGITS,
         'mapping_mode': calibration.get('mapping_mode', P1_CALIBRATION_MAPPING_MODE),
         'combo_scheme': calibration.get('combo_scheme', P1_CALIBRATION_SCHEME),
         'opp_weight_per_budget_unit': calibration['opp_weight_per_budget_unit'],
@@ -4939,7 +5467,11 @@ def run_p1(
         base_cfg=base_cfg,
         grouped=grouped,
         eval_splits=eval_splits,
-        candidates=build_p1_protocol_decide_candidates(protocols, calibration),
+        candidates=build_p1_protocol_decide_candidates(
+            protocols,
+            calibration,
+            search_space=p1_state.get('search_space'),
+        ),
         seed=seed + 505,
         seed_offsets=P1_PROTOCOL_DECIDE_SEED_OFFSETS,
         step_scale=P1_PROTOCOL_DECIDE_STEP_SCALE,
@@ -4978,12 +5510,15 @@ def run_p1(
     if stop_after_protocol_decide:
         return None, []
 
+    winner_center_selection = winner_refine_center_selection_from_search_space(
+        p1_state.get('search_space'),
+        selected_protocol_arm,
+    )
     winner_centers = select_p1_protocol_centers(
         protocol_decide_round['ranking'],
         protocol_arm=selected_protocol_arm,
-        explicit_arm_names=current_p1_winner_refine_explicit_center_arm_names(
-            selected_protocol_arm
-        ),
+        keep=winner_center_selection['keep'],
+        explicit_arm_names=winner_center_selection['explicit_arm_names'],
     )
     p1_state['winner_refine_centers'] = [candidate.arm_name for candidate in winner_centers]
     winner_refine_round = execute_round_multiseed(
@@ -4993,7 +5528,12 @@ def run_p1(
         base_cfg=base_cfg,
         grouped=grouped,
         eval_splits=eval_splits,
-        candidates=build_p1_winner_refine_candidates(protocols, calibration, winner_centers),
+        candidates=build_p1_winner_refine_candidates(
+            protocols,
+            calibration,
+            winner_centers,
+            search_space=p1_state.get('search_space'),
+        ),
         seed=seed + 606,
         seed_offsets=P1_WINNER_REFINE_SEED_OFFSETS,
         step_scale=P1_WINNER_REFINE_STEP_SCALE,
@@ -5020,7 +5560,12 @@ def run_p1(
         base_cfg=base_cfg,
         grouped=grouped,
         eval_splits=eval_splits,
-        candidates=build_p1_ablation_candidates(protocols, calibration, refine_winner),
+        candidates=build_p1_ablation_candidates(
+            protocols,
+            calibration,
+            refine_winner,
+            search_space=p1_state.get('search_space'),
+        ),
         seed=seed + 707,
         seed_offsets=P1_ABLATION_SEED_OFFSETS,
         step_scale=P1_ABLATION_STEP_SCALE,

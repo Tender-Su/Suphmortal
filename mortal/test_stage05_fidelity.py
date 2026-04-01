@@ -50,74 +50,58 @@ def make_ranking_entry(
     }
 
 
+def make_current_p1_search_space(**overrides):
+    payload = {
+        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
+        'protocol_decide_coordinate_mode': fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
+        'protocol_decide_total_budget_ratios': list(fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
+        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
+        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
+        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
+        'protocol_decide_progressive_ambiguity_mode': fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE,
+        'protocol_decide_progressive_gap_threshold': fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD,
+        'protocol_decide_progressive_noise_margin_mult': fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT,
+        'budget_ratio_digits': fidelity.P1_BUDGET_RATIO_DIGITS,
+        'aux_weight_digits': fidelity.P1_AUX_WEIGHT_DIGITS,
+        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
+        'winner_refine_center_keep': fidelity.P1_WINNER_REFINE_CENTER_KEEP,
+        'winner_refine_center_arm_names': fidelity.current_p1_winner_refine_center_arm_payload(),
+        'selection_policy': {
+            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
+            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 class Stage05FidelityCacheTests(unittest.TestCase):
     def test_p1_snapshot_uses_current_defaults_detects_old_protocol_decide_grid(self):
         self.assertTrue(
             fidelity.p1_snapshot_uses_current_defaults(
                 {
-                    'search_space': {
-                        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
-                        'protocol_decide_total_budget_ratios': list(
-                            fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
-                        ),
-                        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
-                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
-                        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
-                        'protocol_decide_progressive_ambiguity_mode': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
-                        ),
-                        'protocol_decide_progressive_gap_threshold': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
-                        ),
-                        'protocol_decide_progressive_noise_margin_mult': (
-                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
-                        ),
-                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
-                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
-                        'winner_refine_center_arm_names': (
-                            fidelity.current_p1_winner_refine_center_arm_payload()
-                        ),
-                        'selection_policy': {
-                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
-                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
-                        },
-                    }
+                    'search_space': make_current_p1_search_space()
                 }
             )
         )
         self.assertFalse(
             fidelity.p1_snapshot_uses_current_defaults(
                 {
-                    'search_space': {
-                        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
-                        'protocol_decide_total_budget_ratios': [0.08, 0.11, 0.14],
-                        'protocol_decide_mixes': [
+                    'search_space': make_current_p1_search_space(
+                        protocol_decide_total_budget_ratios=[0.08, 0.11, 0.14]
+                    )
+                }
+            )
+        )
+        self.assertFalse(
+            fidelity.p1_snapshot_uses_current_defaults(
+                {
+                    'search_space': make_current_p1_search_space(
+                        protocol_decide_mixes=[
                             {'name': 'anchor', 'rank_share': 0.43, 'opp_share': 0.21, 'danger_share': 0.36},
                             {'name': 'rank_lean', 'rank_share': 0.53, 'opp_share': 0.16, 'danger_share': 0.31},
-                            {'name': 'opp_lean', 'rank_share': 0.33, 'opp_share': 0.31, 'danger_share': 0.36},
-                            {'name': 'danger_lean', 'rank_share': 0.38, 'opp_share': 0.16, 'danger_share': 0.46},
-                        ],
-                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
-                        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
-                        'protocol_decide_progressive_ambiguity_mode': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
-                        ),
-                        'protocol_decide_progressive_gap_threshold': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
-                        ),
-                        'protocol_decide_progressive_noise_margin_mult': (
-                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
-                        ),
-                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
-                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
-                        'winner_refine_center_arm_names': (
-                            fidelity.current_p1_winner_refine_center_arm_payload()
-                        ),
-                        'selection_policy': {
-                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
-                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
-                        },
-                    }
+                        ]
+                    )
                 }
             )
         )
@@ -126,33 +110,9 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         self.assertFalse(
             fidelity.p1_snapshot_uses_current_defaults(
                 {
-                    'search_space': {
-                        'calibration_protocol_arms': ['nondefault_protocol_arm'],
-                        'protocol_decide_total_budget_ratios': list(
-                            fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
-                        ),
-                        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
-                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
-                        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
-                        'protocol_decide_progressive_ambiguity_mode': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
-                        ),
-                        'protocol_decide_progressive_gap_threshold': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
-                        ),
-                        'protocol_decide_progressive_noise_margin_mult': (
-                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
-                        ),
-                        'winner_refine_center_mode': fidelity.P1_WINNER_REFINE_CENTER_MODE,
-                        'winner_refine_center_protocol_arm': fidelity.P1_WINNER_REFINE_PROTOCOL_ARM,
-                        'winner_refine_center_arm_names': (
-                            fidelity.current_p1_winner_refine_center_arm_payload()
-                        ),
-                        'selection_policy': {
-                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
-                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
-                        },
-                    }
+                    'search_space': make_current_p1_search_space(
+                        calibration_protocol_arms=['nondefault_protocol_arm']
+                    )
                 }
             )
         )
@@ -161,29 +121,9 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         self.assertFalse(
             fidelity.p1_snapshot_uses_current_defaults(
                 {
-                    'search_space': {
-                        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
-                        'protocol_decide_total_budget_ratios': list(
-                            fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
-                        ),
-                        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
-                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
-                        'inherited_single_head_source': fidelity.P1_SINGLE_HEAD_CALIBRATION_SOURCE,
-                        'protocol_decide_progressive_ambiguity_mode': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
-                        ),
-                        'protocol_decide_progressive_gap_threshold': (
-                            fidelity.P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD
-                        ),
-                        'protocol_decide_progressive_noise_margin_mult': (
-                            fidelity.P1_PROGRESSIVE_NOISE_MARGIN_MULT
-                        ),
-                        'winner_refine_centers': 2,
-                        'selection_policy': {
-                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
-                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
-                        },
-                    }
+                    'search_space': make_current_p1_search_space(
+                        winner_refine_centers=2
+                    )
                 }
             )
         )
@@ -221,19 +161,9 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         self.assertFalse(
             fidelity.p1_snapshot_uses_current_defaults(
                 {
-                    'search_space': {
-                        'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
-                        'protocol_decide_total_budget_ratios': list(
-                            fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
-                        ),
-                        'protocol_decide_mixes': fidelity.current_protocol_decide_mix_payload(),
-                        'calibration_mode': fidelity.P1_CALIBRATION_DEFAULT_MODE,
-                        'inherited_single_head_source': 'historical baseline',
-                        'selection_policy': {
-                            'policy_loss_epsilon': fidelity.P1_POLICY_LOSS_EPSILON,
-                            'old_regression_policy_loss_epsilon': fidelity.P1_OLD_REGRESSION_POLICY_EPSILON,
-                        },
-                    }
+                    'search_space': make_current_p1_search_space(
+                        inherited_single_head_source='historical baseline'
+                    )
                 }
             )
         )
@@ -426,18 +356,25 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         )
         self.assertEqual('ce_only', candidates[0].meta['aux_family'])
         all_three = [candidate for candidate in candidates if candidate.meta['aux_family'] == 'all_three']
-        self.assertEqual(8, len(all_three))
-        self.assertTrue(all(candidate.meta['total_budget_ratio'] > 0 for candidate in all_three))
+        self.assertEqual(
+            len(fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS) * len(fidelity.P1_PROTOCOL_DECIDE_MIXES),
+            len(all_three),
+        )
         self.assertTrue(all(candidate.meta['applied_combo_mode'] == 'triple' for candidate in all_three))
         self.assertTrue(all(abs(candidate.meta['applied_combo_factor'] - 0.902) < 1e-9 for candidate in all_three))
         self.assertEqual(
-            {'anchor', 'rank_lean', 'opp_lean', 'danger_lean'},
-            {candidate.meta['mix_name'] for candidate in all_three},
+            {
+                f'{mix_name}_{int(round(total_budget_ratio * 100)):02d}'
+                for total_budget_ratio in fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS
+                for mix_name, _, _, _ in fidelity.P1_PROTOCOL_DECIDE_MIXES
+            },
+            {candidate.meta['candidate_name'] for candidate in all_three},
         )
-        by_mix = {candidate.meta['mix_name']: candidate for candidate in all_three if candidate.meta['total_budget_ratio'] == 0.12}
-        self.assertAlmostEqual(0.046, by_mix['opp_lean'].meta['rank_budget_ratio'])
-        self.assertAlmostEqual(0.037, by_mix['opp_lean'].meta['opp_budget_ratio'])
-        self.assertAlmostEqual(0.037, by_mix['opp_lean'].meta['danger_budget_ratio'])
+        by_name = {candidate.meta['candidate_name']: candidate for candidate in all_three}
+        self.assertAlmostEqual(0.0456, by_name['opp_lean_12'].meta['effective_rank_scale'])
+        self.assertAlmostEqual(0.00214, by_name['opp_lean_12'].meta['effective_opp_weight'], places=5)
+        self.assertAlmostEqual(0.00743, by_name['opp_lean_12'].meta['effective_danger_weight'], places=5)
+        self.assertAlmostEqual(0.00111, by_name['rank_lean_12'].meta['effective_opp_weight'], places=5)
 
     def test_build_p1_calibration_candidates_combo_only_uses_only_pairwise_and_triple_probes(self):
         protocol = fidelity.CandidateSpec(
@@ -485,15 +422,14 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.968,
             },
         }
-        center = fidelity.make_p1_triplet_candidate(
+        center = fidelity.make_p1_effective_triplet_candidate(
             protocol,
             calibration=calibration,
-            total_budget_ratio=0.14,
-            rank_share=0.43,
-            opp_share=0.21,
-            danger_share=0.36,
+            rank_scale=0.052,
+            opp_weight=0.001,
+            danger_weight=0.008,
             stage='P1_protocol_decide_round',
-            mix_name='anchor',
+            coordinate_name='anchor_12',
         )
 
         refine_candidates = fidelity.build_p1_winner_refine_candidates(
@@ -507,11 +443,34 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             center,
         )
 
-        self.assertGreaterEqual(len(refine_candidates), 8)
+        self.assertGreaterEqual(len(refine_candidates), 7)
         self.assertTrue(all(candidate.meta['aux_family'] == 'all_three' for candidate in refine_candidates))
         drop_rank = next(candidate for candidate in ablation_candidates if candidate.meta['aux_family'] == 'drop_rank')
         self.assertEqual('opp_danger', drop_rank.meta['applied_combo_mode'])
         self.assertAlmostEqual(0.968, drop_rank.meta['applied_combo_factor'])
+        all_three_ablation = next(
+            candidate for candidate in ablation_candidates if candidate.meta['aux_family'] == 'all_three'
+        )
+        self.assertAlmostEqual(
+            center.meta['effective_opp_weight'],
+            all_three_ablation.meta['effective_opp_weight'],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            center.meta['effective_danger_weight'],
+            all_three_ablation.meta['effective_danger_weight'],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            center.meta['effective_opp_weight'],
+            drop_rank.meta['effective_opp_weight'],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            center.meta['effective_danger_weight'],
+            drop_rank.meta['effective_danger_weight'],
+            places=5,
+        )
         self.assertEqual(
             {'ce_only', 'all_three', 'drop_rank', 'drop_opp', 'drop_danger'},
             {candidate.meta['aux_family'] for candidate in ablation_candidates},
@@ -550,6 +509,145 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         self.assertEqual(
             len(candidates),
             len({candidate.arm_name for candidate in candidates}),
+        )
+
+    def test_build_p1_protocol_decide_candidates_legacy_search_space_preserves_budget_names(self):
+        protocol = fidelity.CandidateSpec(
+            arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
+            scheduler_profile='cosine',
+            curriculum_profile='broad_to_recent',
+            weight_profile='strong',
+            window_profile='24m_12m',
+            cfg_overrides={},
+            meta={'protocol_arm': 'C_A2x_cosine_broad_to_recent_strong_24m_12m'},
+        )
+        calibration = {
+            'rank_effective_base': 0.05121494575615136,
+            'opp_weight_per_budget_unit': 0.052,
+            'danger_weight_per_budget_unit': 0.18,
+            'triple_combo_factor': 0.902,
+            'joint_combo_factor': 0.968,
+            'protocol_triple_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.902,
+            },
+            'protocol_joint_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.968,
+            },
+        }
+        legacy_search_space = {
+            'protocol_decide_total_budget_ratios': [0.12],
+            'protocol_decide_mixes': [
+                {'name': 'opp_lean', 'rank_share': 0.38, 'opp_share': 0.31, 'danger_share': 0.31},
+            ],
+            'winner_refine_center_mode': 'explicit_arm_names',
+            'winner_refine_center_protocol_arm': protocol.arm_name,
+            'winner_refine_center_arm_names': [
+                f'{protocol.arm_name}__B_r0046_o0037_d0037',
+            ],
+        }
+
+        candidates = fidelity.build_p1_protocol_decide_candidates(
+            [protocol],
+            calibration,
+            search_space=legacy_search_space,
+        )
+
+        all_three = [candidate for candidate in candidates if candidate.meta['aux_family'] == 'all_three']
+        self.assertEqual(1, len(all_three))
+        self.assertTrue(all_three[0].arm_name.endswith('__B_r0046_o0037_d0037'))
+        self.assertNotIn('coordinate_space', all_three[0].meta)
+
+    def test_build_p1_protocol_decide_candidates_normalizes_custom_mix_and_uses_pairwise_factor(self):
+        protocol = fidelity.CandidateSpec(
+            arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
+            scheduler_profile='cosine',
+            curriculum_profile='broad_to_recent',
+            weight_profile='strong',
+            window_profile='24m_12m',
+            cfg_overrides={},
+            meta={'protocol_arm': 'C_A2x_cosine_broad_to_recent_strong_24m_12m'},
+        )
+        calibration = {
+            'rank_effective_base': 0.05121494575615136,
+            'opp_weight_per_budget_unit': 0.052,
+            'danger_weight_per_budget_unit': 0.18,
+            'triple_combo_factor': 0.902,
+            'rank_danger_combo_factor': 0.811,
+            'protocol_triple_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.902,
+            },
+            'protocol_rank_danger_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.811,
+            },
+        }
+        custom_search_space = {
+            'protocol_decide_coordinate_mode': fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
+            'protocol_decide_total_budget_ratios': [0.12],
+            'protocol_decide_mixes': [
+                {'name': 'rank_danger_corner', 'rank_share': 2.0, 'opp_share': 0.0, 'danger_share': 2.0},
+            ],
+        }
+
+        candidates = fidelity.build_p1_protocol_decide_candidates(
+            [protocol],
+            calibration,
+            search_space=custom_search_space,
+        )
+
+        all_three = [candidate for candidate in candidates if candidate.meta['aux_family'] == 'all_three']
+        self.assertEqual(1, len(all_three))
+        candidate = all_three[0]
+        self.assertEqual('rank_danger', candidate.meta['applied_combo_mode'])
+        self.assertAlmostEqual(0.811, candidate.meta['applied_combo_factor'])
+        self.assertAlmostEqual(0.06, candidate.meta['rank_budget_ratio'], places=4)
+        self.assertAlmostEqual(0.0, candidate.meta['opp_budget_ratio'], places=6)
+        self.assertAlmostEqual(0.06, candidate.meta['danger_budget_ratio'], places=4)
+
+    def test_build_p1_protocol_decide_candidates_respects_persisted_precision(self):
+        protocol = fidelity.CandidateSpec(
+            arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
+            scheduler_profile='cosine',
+            curriculum_profile='broad_to_recent',
+            weight_profile='strong',
+            window_profile='24m_12m',
+            cfg_overrides={},
+            meta={'protocol_arm': 'C_A2x_cosine_broad_to_recent_strong_24m_12m'},
+        )
+        calibration = {
+            'rank_effective_base': 0.05121494575615136,
+            'opp_weight_per_budget_unit': 0.052,
+            'danger_weight_per_budget_unit': 0.18,
+            'triple_combo_factor': 0.902,
+            'protocol_triple_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.902,
+            },
+        }
+        search_space = {
+            'protocol_decide_coordinate_mode': fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
+            'protocol_decide_total_budget_ratios': [0.12],
+            'protocol_decide_mixes': [
+                {'name': 'opp_lean', 'rank_share': 0.38, 'opp_share': 0.31, 'danger_share': 0.31},
+            ],
+            'budget_ratio_digits': 3,
+            'aux_weight_digits': 3,
+        }
+
+        with fidelity.temporary_search_precision(budget_ratio_digits=3, aux_weight_digits=3):
+            expected = fidelity.build_p1_protocol_decide_candidates(
+                [protocol],
+                calibration,
+                search_space=search_space,
+            )
+        with fidelity.temporary_search_precision(budget_ratio_digits=5, aux_weight_digits=6):
+            rebuilt = fidelity.build_p1_protocol_decide_candidates(
+                [protocol],
+                calibration,
+                search_space=search_space,
+            )
+
+        self.assertEqual(
+            [candidate.arm_name for candidate in expected],
+            [candidate.arm_name for candidate in rebuilt],
         )
 
     def test_select_p1_protocol_centers_excludes_ce_only_anchor(self):
@@ -689,6 +787,110 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             all(candidate.meta['rank_budget_ratio'] > 0 for candidate in refine_candidates)
         )
 
+    def test_build_p1_winner_refine_candidates_respects_persisted_precision(self):
+        protocol = fidelity.CandidateSpec(
+            arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
+            scheduler_profile='cosine',
+            curriculum_profile='broad_to_recent',
+            weight_profile='strong',
+            window_profile='24m_12m',
+            cfg_overrides={},
+            meta={'protocol_arm': 'C_A2x_cosine_broad_to_recent_strong_24m_12m'},
+        )
+        calibration = {
+            'rank_effective_base': 0.05121494575615136,
+            'opp_weight_per_budget_unit': 0.052,
+            'danger_weight_per_budget_unit': 0.18,
+            'triple_combo_factor': 0.902,
+            'protocol_triple_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.902,
+            },
+        }
+        search_space = {
+            'budget_ratio_digits': 3,
+            'aux_weight_digits': 3,
+        }
+        with fidelity.temporary_search_precision(budget_ratio_digits=3, aux_weight_digits=3):
+            center = fidelity.make_p1_effective_triplet_candidate(
+                protocol,
+                calibration=calibration,
+                rank_scale=0.046,
+                opp_weight=0.002,
+                danger_weight=0.007,
+                stage='P1_protocol_decide_round',
+                coordinate_name='opp_lean_12',
+            )
+            expected = fidelity.build_p1_winner_refine_candidates(
+                [protocol],
+                calibration,
+                [center],
+                search_space=search_space,
+            )
+        with fidelity.temporary_search_precision(budget_ratio_digits=5, aux_weight_digits=6):
+            rebuilt = fidelity.build_p1_winner_refine_candidates(
+                [protocol],
+                calibration,
+                [center],
+                search_space=search_space,
+            )
+
+        self.assertEqual(
+            [candidate.arm_name for candidate in expected],
+            [candidate.arm_name for candidate in rebuilt],
+        )
+
+    def test_build_p1_ablation_candidates_respects_persisted_precision(self):
+        protocol = fidelity.CandidateSpec(
+            arm_name='C_A2x_cosine_broad_to_recent_strong_24m_12m',
+            scheduler_profile='cosine',
+            curriculum_profile='broad_to_recent',
+            weight_profile='strong',
+            window_profile='24m_12m',
+            cfg_overrides={},
+            meta={'protocol_arm': 'C_A2x_cosine_broad_to_recent_strong_24m_12m'},
+        )
+        calibration = {
+            'rank_effective_base': 0.05121494575615136,
+            'opp_weight_per_budget_unit': 0.052,
+            'danger_weight_per_budget_unit': 0.18,
+            'triple_combo_factor': 0.902,
+            'protocol_triple_combo_factors': {
+                'C_A2x_cosine_broad_to_recent_strong_24m_12m': 0.902,
+            },
+        }
+        search_space = {
+            'budget_ratio_digits': 3,
+            'aux_weight_digits': 3,
+        }
+        with fidelity.temporary_search_precision(budget_ratio_digits=3, aux_weight_digits=3):
+            refine_winner = fidelity.make_p1_effective_triplet_candidate(
+                protocol,
+                calibration=calibration,
+                rank_scale=0.046,
+                opp_weight=0.002,
+                danger_weight=0.007,
+                stage='P1_winner_refine_round',
+                coordinate_name='winner_refine_center',
+            )
+            expected = fidelity.build_p1_ablation_candidates(
+                [protocol],
+                calibration,
+                refine_winner,
+                search_space=search_space,
+            )
+        with fidelity.temporary_search_precision(budget_ratio_digits=5, aux_weight_digits=6):
+            rebuilt = fidelity.build_p1_ablation_candidates(
+                [protocol],
+                calibration,
+                refine_winner,
+                search_space=search_space,
+            )
+
+        self.assertEqual(
+            [candidate.arm_name for candidate in expected],
+            [candidate.arm_name for candidate in rebuilt],
+        )
+
     def test_run_p1_fails_when_ablation_has_no_valid_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
@@ -810,8 +1012,8 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 ),
                 patch.object(
                     fidelity,
-                    'current_p1_winner_refine_explicit_center_arm_names',
-                    return_value=(refine_winner.arm_name,),
+                    'winner_refine_center_selection_from_search_space',
+                    return_value={'keep': None, 'explicit_arm_names': (refine_winner.arm_name,)},
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, 'p1_ablation_round produced no valid candidates'):
@@ -1704,7 +1906,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             stage='P1_solo_round',
         )
 
-        self.assertEqual('proto_arm__B_r1500_o0500_d1000', candidate.arm_name)
+        self.assertEqual('proto_arm__B_r15000_o05000_d10000', candidate.arm_name)
         self.assertEqual(1.5, candidate.meta['rank_scale'])
         self.assertEqual(1.5, candidate.meta['rank_budget_ratio'])
         self.assertEqual(0.5, candidate.meta['opp_budget_ratio'])
@@ -2140,8 +2342,8 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             patch.object(fidelity, 'execute_round_multiseed', side_effect=fake_execute_round_multiseed),
             patch.object(
                 fidelity,
-                'current_p1_winner_refine_explicit_center_arm_names',
-                return_value=(protocol_entry['arm_name'],),
+                'winner_refine_center_selection_from_search_space',
+                return_value={'keep': None, 'explicit_arm_names': (protocol_entry['arm_name'],)},
             ),
             patch.object(fidelity, 'atomic_write_json'),
             patch.object(fidelity, 'update_results_doc'),
