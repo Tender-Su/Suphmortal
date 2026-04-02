@@ -542,7 +542,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             'winner_refine_center_mode': 'explicit_arm_names',
             'winner_refine_center_protocol_arm': protocol.arm_name,
             'winner_refine_center_arm_names': [
-                f'{protocol.arm_name}__B_r0046_o0037_d0037',
+                f'{protocol.arm_name}__W_r00516_o000135_d000804',
             ],
         }
 
@@ -554,8 +554,8 @@ class Stage05FidelityCacheTests(unittest.TestCase):
 
         all_three = [candidate for candidate in candidates if candidate.meta['aux_family'] == 'all_three']
         self.assertEqual(1, len(all_three))
-        self.assertTrue(all_three[0].arm_name.endswith('__B_r0046_o0037_d0037'))
-        self.assertNotIn('coordinate_space', all_three[0].meta)
+        self.assertTrue(all_three[0].arm_name.endswith('__W_r00456_o000214_d000743'))
+        self.assertEqual('effective_weights', all_three[0].meta['coordinate_space'])
 
     def test_build_p1_protocol_decide_candidates_normalizes_custom_mix_and_uses_pairwise_factor(self):
         protocol = fidelity.CandidateSpec(

@@ -1,46 +1,53 @@
 # 文档导航
 
-这套文档现在按受众和用途拆开了。默认原则只有两条：
+这套文档现在分成两层：
 
-- 想知道“现在默认怎么做”，先看当前入口，不看历史长文。
-- 想知道“为什么这样做”，再进入研究记录、复盘或归档。
+- 活跃 handoff 文档：给无上下文 agent 和当前操作者，回答“现在默认是什么、停在哪、下一步怎么做”。
+- 历史 / 研究文档：给回溯、复盘和方法论使用，不作为当前默认入口。
 
-## 先看哪里
+## 默认读取顺序
 
-- 当前默认主线与续工入口：`agent/current-plan.md`
-- 当前稳定默认、阶段地图、冻结结论：`agent/mainline.md`
-- 当前实验流程、人工停点、运行纪律：`agent/experiment-workflow.md`
-- 当前真实进度与在跑什么：`status/stage05-verified-status.md`
-- `P1` 唯一有效选模口径：`status/p1-selection-canonical.md`
-- 自动生成的 run 快照：`status/stage05-fidelity-results.md`
+1. `../AGENTS.md`
+2. `agent/current-plan.md`
+3. `agent/mainline.md`
+4. `status/stage05-verified-status.md`
+5. `status/p1-selection-canonical.md`
+6. 任务涉及双机或 Git 同步时，再读 `agent/laptop-remote-ops.md` / `agent/code-sync.md`
 
-## 按问题找文档
+## 活跃文档分工
 
-- 想快速上手仓库：`../README.md`
-- 想看 agent 工程规范和硬约束：`../AGENTS.md`
-- 想看 `Stage 0 / GRP` 研究结论：`research/stage0/grp-experience.md`
-- 想看 `Stage 0.5` 当前仍有效的工程方法：`research/stage05/engineering-playbook.md`
-- 想看 `P1` selector 的统计审计：`research/stage05/selector-stat-audit.md`
-- 想看某次专项实验：`research/stage05/`
-- 想看人机协同、个人成长和方法复盘：`reflections/README.md`
-- 想看已经退役的阶段快照或旧入口：`archive/README.md`
+- `agent/current-plan.md`
+  - 当前主线、真实停点、启动前清理状态、下一步。
+- `agent/mainline.md`
+  - 当前冻结默认。只放稳定规则，不放 run 过程叙事。
+- `agent/experiment-workflow.md`
+  - 当前阶段应该怎么跑、在哪些点强制停下来。
+- `agent/code-sync.md`
+  - 台式机与笔记本的 Git 同步。
+- `agent/laptop-remote-ops.md`
+  - 笔记本 shell、数据根、远端运行前提和踩坑结论。
+- `status/stage05-verified-status.md`
+  - 当前 Stage `0.5 / P1` 的人工核对结论。
+- `status/p1-selection-canonical.md`
+  - `P1` 唯一有效的选模与解释口径。
+- `status/stage05-fidelity-results.md`
+  - 历史 run snapshot。只回答“那次 run 写出了什么”，不回答“现在默认是什么”。
 
 ## 目录分工
 
 - `agent/`
-  - 给 agent 的短入口文档，只放当前默认、稳定规则和续工顺序。
+  - 当前默认、当前流程、当前运维入口。
 - `status/`
-  - 给人和 agent 共用的“当前状态”与“当前口径”。
-  - 其中 `stage05-fidelity-results.md` 是自动生成的 run 快照，不是默认手册。
+  - 当前状态、当前口径、当前 benchmark 结论。
 - `research/`
-  - 给人看的方法、实验设计、专项研究和仍有参考价值的技术结论。
+  - 方法、证据、专项实验与工程经验。
 - `reflections/`
-  - 给人看的复盘、协同经验、论文素材和长期成长记录。
+  - 人机协作、复盘和长期记录。
 - `archive/`
-  - 历史快照、旧入口、旧长文。可回查，但不能当当前默认。
+  - 已退役入口、旧快照、旧长文。默认不参与当前判断。
 
-## 使用规则
+## 使用纪律
 
-- `current-plan.md`、`mainline.md`、`stage05-verified-status.md`、`p1-selection-canonical.md` 之间如果冲突，优先检查是否有人误用了历史文档。
-- `stage05-fidelity-results.md` 只回答“这次 run 写出了什么”，不回答“现在默认是什么”。
-- `archive/` 下的任何内容都默认不是当前主线，除非当前入口文档明确重新启用。
+- 先读活跃 handoff 文档，不要先从 `research/` 或 `archive/` 开始。
+- 如果某份 run snapshot、旧研究文档或旧状态摘要与活跃 handoff 文档冲突，以活跃 handoff 文档为准。
+- `P1` winner 的解释一律以 `status/p1-selection-canonical.md` 为准。

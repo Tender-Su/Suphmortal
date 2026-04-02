@@ -15,8 +15,13 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import toml
 import torch
+
+MORTAL_DIR = Path(__file__).resolve().parents[1] / "mortal"
+if str(MORTAL_DIR) not in os.sys.path:
+    os.sys.path.insert(0, str(MORTAL_DIR))
+
+from toml_utils import load_toml_file, write_toml_file
 
 
 TRAIN_RE = re.compile(r"TRAIN E1:\s*(\d+)batch .*? ([0-9.]+)batch/s")
@@ -417,7 +422,7 @@ def main() -> None:
     if not dataset_root.exists():
         raise FileNotFoundError(f"dataset root does not exist: {dataset_root}")
 
-    base_cfg = toml.load(args.base_config)
+    base_cfg = load_toml_file(args.base_config)
     cfg = make_case_config(
         base_cfg=base_cfg,
         case_dir=case_dir,
@@ -434,7 +439,7 @@ def main() -> None:
         val_prefetch_factor=args.val_prefetch_factor,
     )
     config_path = case_dir / "config.toml"
-    atomic_write_text(config_path, toml.dumps(cfg))
+    write_toml_file(config_path, cfg)
     file_index_path = Path(cfg["supervised"]["file_index"])
     exclude_files = list(args.exclude_file)
     total_started_at = time.time()

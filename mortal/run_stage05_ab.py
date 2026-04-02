@@ -15,7 +15,6 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-import toml
 import torch
 from cpu_affinity import AFFINITY_ENV_VAR
 from stage05_selection import (
@@ -26,6 +25,7 @@ from stage05_selection import (
     scenario_quality_score,
     selection_tiebreak_key,
 )
+from toml_utils import load_toml_file, write_toml_file
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -469,14 +469,11 @@ def select_checkpoint_candidate(candidates: dict[str, dict]) -> tuple[str, dict]
 
 
 def build_base_config() -> dict:
-    with BASE_CFG_PATH.open(encoding='utf-8') as f:
-        return toml.load(f)
+    return load_toml_file(BASE_CFG_PATH)
 
 
 def write_toml(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('w', encoding='utf-8', newline='\n') as f:
-        toml.dump(data, f)
+    write_toml_file(path, data)
 
 
 def write_index(path: Path, *, train_files: list[str], monitor_recent_files: list[str], full_recent_files: list[str], old_regression_files: list[str], meta: dict) -> None:

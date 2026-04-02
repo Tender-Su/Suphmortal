@@ -405,12 +405,20 @@ class WinnerRefineDistributedTests(unittest.TestCase):
 
     def test_select_winner_refine_seed2_candidates_keeps_floor_and_gap_band(self):
         candidates = [make_candidate(name) for name in ('a', 'b', 'c', 'd')]
+        candidates[0].meta['source_arm'] = 'center_a'
+        candidates[1].meta['source_arm'] = 'center_a'
+        candidates[2].meta['source_arm'] = 'center_b'
+        candidates[3].meta['source_arm'] = 'center_b'
         ranking = [
             make_ranking_entry('a', selection_quality_score=0.5500, comparison_recent_loss=0.3000),
             make_ranking_entry('b', selection_quality_score=0.5497, comparison_recent_loss=0.3002),
             make_ranking_entry('c', selection_quality_score=0.5492, comparison_recent_loss=0.3005),
             make_ranking_entry('d', selection_quality_score=0.5475, comparison_recent_loss=0.3012),
         ]
+        ranking[0]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[1]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[2]['candidate_meta']['source_arm'] = 'center_b'
+        ranking[3]['candidate_meta']['source_arm'] = 'center_b'
 
         selected, details = distributed.select_winner_refine_seed2_candidates(
             ranking,
@@ -421,16 +429,26 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         )
 
         self.assertEqual(['a', 'b', 'c'], [candidate.arm_name for candidate in selected])
-        self.assertEqual('eligible_then_selection_gap', details['mode'])
+        self.assertEqual('per_source_floor_then_selection_gap', details['mode'])
         self.assertEqual(3, details['candidate_count'])
+        self.assertEqual(['a', 'c'], details['source_floor_arm_names'])
 
-    def test_select_winner_refine_seed2_candidates_prefers_eligible_pool(self):
-        candidates = [make_candidate(name) for name in ('a', 'b', 'c')]
+    def test_select_winner_refine_seed2_candidates_preserves_one_valid_point_per_center(self):
+        candidates = [make_candidate(name) for name in ('a', 'b', 'c', 'd')]
+        candidates[0].meta['source_arm'] = 'center_a'
+        candidates[1].meta['source_arm'] = 'center_a'
+        candidates[2].meta['source_arm'] = 'center_c'
+        candidates[3].meta['source_arm'] = 'center_d'
         ranking = [
             make_ranking_entry('a', selection_quality_score=0.5500, comparison_recent_loss=0.3000, eligible=True),
-            make_ranking_entry('b', selection_quality_score=0.5494, comparison_recent_loss=0.3006, eligible=True),
-            make_ranking_entry('c', selection_quality_score=0.5498, comparison_recent_loss=0.3003, eligible=False),
+            make_ranking_entry('b', selection_quality_score=0.5480, comparison_recent_loss=0.3015, eligible=True),
+            make_ranking_entry('c', selection_quality_score=0.5470, comparison_recent_loss=0.3020, eligible=True),
+            make_ranking_entry('d', selection_quality_score=0.5460, comparison_recent_loss=0.3030, eligible=False),
         ]
+        ranking[0]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[1]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[2]['candidate_meta']['source_arm'] = 'center_c'
+        ranking[3]['candidate_meta']['source_arm'] = 'center_d'
 
         selected, details = distributed.select_winner_refine_seed2_candidates(
             ranking,
@@ -440,8 +458,65 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             max_keep=9,
         )
 
-        self.assertEqual(['a', 'b'], [candidate.arm_name for candidate in selected])
+        self.assertEqual(['a', 'c', 'd'], [candidate.arm_name for candidate in selected])
+        self.assertEqual(['a', 'c', 'd'], details['source_floor_arm_names'])
+        self.assertEqual(3, details['source_count'])
         self.assertEqual('eligible', details['pool_mode'])
+
+    def test_select_winner_refine_seed2_candidates_prefers_eligible_pool(self):
+        candidates = [make_candidate(name) for name in ('a', 'b', 'c')]
+        candidates[0].meta['source_arm'] = 'center_a'
+        candidates[1].meta['source_arm'] = 'center_b'
+        candidates[2].meta['source_arm'] = 'center_c'
+        ranking = [
+            make_ranking_entry('a', selection_quality_score=0.5500, comparison_recent_loss=0.3000, eligible=True),
+            make_ranking_entry('b', selection_quality_score=0.5494, comparison_recent_loss=0.3006, eligible=True),
+            make_ranking_entry('c', selection_quality_score=0.5498, comparison_recent_loss=0.3003, eligible=False),
+        ]
+        ranking[0]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[1]['candidate_meta']['source_arm'] = 'center_b'
+        ranking[2]['candidate_meta']['source_arm'] = 'center_c'
+
+        selected, details = distributed.select_winner_refine_seed2_candidates(
+            ranking,
+            candidates,
+            min_keep=2,
+            selection_gap=0.001,
+            max_keep=9,
+        )
+
+        self.assertEqual(['a', 'b', 'c'], [candidate.arm_name for candidate in selected])
+        self.assertEqual('eligible', details['pool_mode'])
+
+    def test_select_winner_refine_seed2_candidates_caps_per_source_floor_by_max_keep(self):
+        candidates = [make_candidate(name) for name in ('a', 'b', 'c', 'd')]
+        candidates[0].meta['source_arm'] = 'center_a'
+        candidates[1].meta['source_arm'] = 'center_b'
+        candidates[2].meta['source_arm'] = 'center_c'
+        candidates[3].meta['source_arm'] = 'center_d'
+        ranking = [
+            make_ranking_entry('a', selection_quality_score=0.5500, comparison_recent_loss=0.3000),
+            make_ranking_entry('b', selection_quality_score=0.5495, comparison_recent_loss=0.3002),
+            make_ranking_entry('c', selection_quality_score=0.5490, comparison_recent_loss=0.3004),
+            make_ranking_entry('d', selection_quality_score=0.5485, comparison_recent_loss=0.3006),
+        ]
+        ranking[0]['candidate_meta']['source_arm'] = 'center_a'
+        ranking[1]['candidate_meta']['source_arm'] = 'center_b'
+        ranking[2]['candidate_meta']['source_arm'] = 'center_c'
+        ranking[3]['candidate_meta']['source_arm'] = 'center_d'
+
+        selected, details = distributed.select_winner_refine_seed2_candidates(
+            ranking,
+            candidates,
+            min_keep=4,
+            selection_gap=0.001,
+            max_keep=2,
+        )
+
+        self.assertEqual(['a', 'b'], [candidate.arm_name for candidate in selected])
+        self.assertEqual(['a', 'b'], details['source_floor_arm_names'])
+        self.assertEqual(2, details['candidate_count'])
+        self.assertEqual(2, details['floor_target'])
 
     def test_reset_running_tasks_for_resume_requeues_inflight_tasks(self):
         state = {
@@ -951,7 +1026,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             self.assertEqual([0.11], build_candidates.call_args.kwargs['search_space']['protocol_decide_total_budget_ratios'])
             self.assertEqual('custom_anchor', build_candidates.call_args.kwargs['search_space']['protocol_decide_mixes'][0]['name'])
 
-    def test_load_protocol_decide_context_legacy_search_space_keeps_budget_coordinate_candidates(self):
+    def test_load_protocol_decide_context_ignores_legacy_budget_centers_when_rebuilding_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / 'protocol_decide_run'
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -976,7 +1051,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
                         ],
                         'winner_refine_center_mode': 'explicit_arm_names',
                         'winner_refine_center_protocol_arm': protocol_arm,
-                        'winner_refine_center_arm_names': [f'{protocol_arm}__B_r0046_o0037_d0037'],
+                        'winner_refine_center_arm_names': ['legacy_budget_center'],
                     },
                     'calibration_round': {'seed': custom_seed + 404},
                 },
@@ -1001,10 +1076,23 @@ class WinnerRefineDistributedTests(unittest.TestCase):
                     'build_protocol_candidates',
                     return_value=[make_candidate(protocol_arm)],
                 ),
+                patch.object(
+                    distributed.fidelity,
+                    'is_budget_triplet_arm_name',
+                    side_effect=lambda arm_name: str(arm_name) == 'legacy_budget_center',
+                ),
             ):
                 ctx = distributed.load_protocol_decide_context(run_dir)
 
-            self.assertTrue(any(candidate.arm_name.endswith('__B_r0046_o0037_d0037') for candidate in ctx['candidates']))
+            all_three = [
+                candidate
+                for candidate in ctx['candidates']
+                if str(candidate.meta.get('aux_family', '')) == 'all_three'
+            ]
+            self.assertTrue(all_three)
+            self.assertTrue(
+                all(not distributed.fidelity.is_budget_triplet_arm_name(candidate.arm_name) for candidate in all_three)
+            )
 
     def test_load_protocol_decide_context_prefers_persisted_dispatch_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

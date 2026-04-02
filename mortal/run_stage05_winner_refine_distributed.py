@@ -30,9 +30,9 @@ DEFAULT_LOCAL_LABEL = 'desktop'
 DEFAULT_REMOTE_LABEL = 'laptop'
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_MAX_ATTEMPTS = 2
-DEFAULT_SEED2_MIN_KEEP = 3
+DEFAULT_SEED2_MIN_KEEP = 4
 DEFAULT_SEED2_SELECTION_GAP = 0.001
-DEFAULT_SEED2_MAX_KEEP = 9
+DEFAULT_SEED2_MAX_KEEP = 12
 DEFAULT_REMOTE_LAUNCH_MODE = 'interactive_window'
 DEFAULT_REMOTE_SCREENING_NUM_WORKERS = 4
 DEFAULT_REMOTE_SCREENING_FILE_BATCH_SIZE = 10
@@ -497,6 +497,27 @@ def load_protocol_decide_context(run_dir: Path) -> dict[str, Any]:
     search_space = p1_state.get('search_space')
     if not isinstance(search_space, dict):
         search_space = p1_only.build_p1_search_space(calibration)
+    else:
+        search_space = dict(search_space)
+        search_space.pop('winner_refine_centers', None)
+        explicit_center_arm_names = [
+            str(item).strip()
+            for item in search_space.get('winner_refine_center_arm_names', [])
+            if str(item).strip()
+        ]
+        if any(fidelity.is_budget_triplet_arm_name(item) for item in explicit_center_arm_names):
+            search_space.pop('winner_refine_center_mode', None)
+            search_space.pop('winner_refine_center_protocol_arm', None)
+            search_space.pop('winner_refine_center_arm_names', None)
+        if (
+            str(search_space.get('protocol_decide_progressive_ambiguity_mode', '') or '').strip()
+            == fidelity.P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY
+        ):
+            search_space.pop('protocol_decide_progressive_ambiguity_mode', None)
+            search_space.pop('protocol_decide_progressive_gap_threshold', None)
+        search_space.setdefault('protocol_decide_coordinate_mode', fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE)
+        search_space.setdefault('budget_ratio_digits', fidelity.P1_BUDGET_RATIO_DIGITS)
+        search_space.setdefault('aux_weight_digits', fidelity.P1_AUX_WEIGHT_DIGITS)
     search_space = fidelity.apply_protocol_decide_progressive_settings(search_space)
     persisted_candidates = load_persisted_dispatch_candidates(run_dir, ROUND_KIND_PROTOCOL_DECIDE)
     candidates = (
@@ -737,6 +758,25 @@ def seed2_selection_within_gap(
     return recent_loss <= leader_recent_loss + fidelity.P1_POLICY_LOSS_EPSILON
 
 
+def winner_refine_seed2_source_arm(
+    entry: dict[str, Any],
+    *,
+    candidate_index: dict[str, fidelity.CandidateSpec],
+) -> str:
+    entry_meta = entry.get('candidate_meta')
+    if isinstance(entry_meta, dict):
+        source_arm = str(entry_meta.get('source_arm', '') or '').strip()
+        if source_arm:
+            return source_arm
+    arm_name = str(entry.get('arm_name', '') or '').strip()
+    candidate = candidate_index.get(arm_name)
+    if candidate is not None:
+        source_arm = str(candidate.meta.get('source_arm', '') or '').strip()
+        if source_arm:
+            return source_arm
+    return arm_name
+
+
 def select_winner_refine_seed2_candidates(
     ranking: list[dict[str, Any]],
     candidates: list[fidelity.CandidateSpec],
@@ -756,12 +796,31 @@ def select_winner_refine_seed2_candidates(
     leader_recent_loss = float(
         leader.get('comparison_recent_loss', leader.get('recent_policy_loss', math.inf))
     )
-    selected_names: list[str] = []
+    selected_name_set: set[str] = set()
+    center_floor_entries: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for entry in valid_entries:
+        source_arm = winner_refine_seed2_source_arm(entry, candidate_index=candidate_index)
+        if source_arm in seen_sources:
+            continue
+        seen_sources.add(source_arm)
+        center_floor_entries.append(entry)
     floor_keep = max(int(min_keep), 1)
+    center_floor_limit = len(center_floor_entries)
+    if max_keep is not None:
+        center_floor_limit = min(center_floor_limit, max_keep)
+    for entry in center_floor_entries[:center_floor_limit]:
+        selected_name_set.add(str(entry['arm_name']))
+    floor_target = max(floor_keep, len(selected_name_set))
+    if max_keep is not None:
+        floor_target = min(floor_target, max_keep)
     for entry in pool:
-        if max_keep is not None and len(selected_names) >= max_keep:
+        if max_keep is not None and len(selected_name_set) >= max_keep:
             break
-        keep_due_to_floor = len(selected_names) < floor_keep
+        arm_name = str(entry['arm_name'])
+        if arm_name in selected_name_set:
+            continue
+        keep_due_to_floor = len(selected_name_set) < floor_target
         keep_due_to_gap = seed2_selection_within_gap(
             entry,
             leader_selection_score=leader_score,
@@ -769,26 +828,36 @@ def select_winner_refine_seed2_candidates(
             leader_recent_loss=leader_recent_loss,
         )
         if keep_due_to_floor or keep_due_to_gap:
-            selected_names.append(entry['arm_name'])
+            selected_name_set.add(arm_name)
             continue
-        if len(selected_names) >= floor_keep:
+        if len(selected_name_set) >= floor_target:
             break
-    if len(selected_names) < floor_keep:
+    if len(selected_name_set) < floor_target:
         for entry in pool:
-            if entry['arm_name'] in selected_names:
+            arm_name = str(entry['arm_name'])
+            if arm_name in selected_name_set:
                 continue
-            if max_keep is not None and len(selected_names) >= max_keep:
+            if max_keep is not None and len(selected_name_set) >= max_keep:
                 break
-            selected_names.append(entry['arm_name'])
-            if len(selected_names) >= floor_keep:
+            selected_name_set.add(arm_name)
+            if len(selected_name_set) >= floor_target:
                 break
+    selected_names = [
+        str(entry['arm_name'])
+        for entry in valid_entries
+        if str(entry.get('arm_name', '')) in selected_name_set
+    ]
     selected_candidates = [candidate_index[name] for name in selected_names if name in candidate_index]
     if not selected_candidates:
         raise RuntimeError('winner_refine seed2 selector returned no candidates')
     details = {
-        'mode': 'eligible_then_selection_gap',
+        'mode': 'per_source_floor_then_selection_gap',
         'pool_mode': 'eligible' if preferred_pool else 'valid',
         'min_keep': floor_keep,
+        'floor_target': floor_target,
+        'per_source_floor': 1,
+        'source_count': len(center_floor_entries),
+        'source_floor_arm_names': [str(entry['arm_name']) for entry in center_floor_entries[:center_floor_limit]],
         'selection_gap': float(selection_gap),
         'max_keep': None if max_keep is None else int(max_keep),
         'leader_arm_name': leader['arm_name'],

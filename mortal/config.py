@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 
-import toml
+try:
+    from .toml_utils import load_toml_file
+except ImportError:
+    from toml_utils import load_toml_file
 
 
 PATH_KEYS = {
@@ -63,5 +66,4 @@ else:
     if not config_path.is_absolute():
         config_path = (Path.cwd() / config_path).resolve()
 
-with config_path.open(encoding='utf-8') as f:
-    config = _resolve_config_paths(toml.load(f), config_path.parent)
+config = _resolve_config_paths(load_toml_file(config_path), config_path.parent)

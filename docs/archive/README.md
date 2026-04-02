@@ -6,6 +6,8 @@
 
 - `agent/current-plan-legacy-2026-03-29.md`
   - 重构前的长版 agent 入口
+- `status/laptop-stage05-loader-benchmark-2026-03-30.md`
+  - 已被 `2026-03-31` 的交互前台复核覆盖的旧笔记本 loader benchmark
 - `status/stage05-progress-2026-03-22.md`
   - 当时的阶段快照，不代表现在
 - `status/stage05-fidelity-results-root-legacy.md`

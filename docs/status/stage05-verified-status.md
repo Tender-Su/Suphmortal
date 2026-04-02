@@ -4,18 +4,20 @@
 
 ## 当前结论
 
-- 核对日期：`2026-03-30`
+- 核对日期：`2026-04-03`
 - 当前主线阶段：`P1 protocol_decide` 已完成
-- 当前活跃 run：
+- 当前活跃主线 run：
   - `logs/stage05_fidelity/s05_fidelity_p1_top3_cali_slim_20260329_001413/`
 - 当前状态字段：
   - `stopped_after_p1_protocol_decide`
 - 当前已验证协议 winner：
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
+- 当前已验证 winner 点位：
+  - `0.12 + A2x`
 - 当前下一步只应进入：
   - `A2x winner_refine`
 
-## 当前已冻结的事实
+## 当前主线已经确认的事实
 
 - `P0` 官方 `top3` 顺序：
   - `C_A2y_cosine_broad_to_recent_strong_12m_6m`
@@ -30,58 +32,44 @@
 - `P1` 当前唯一有效选模口径：
   - `docs/status/p1-selection-canonical.md`
 
-## 当前 P1 默认
+## 当前 protocol_decide 已收口
 
-### calibration
-
-- 当前瘦版 `calibration` 代表协议固定为 `A2y`
-- 它只用于 budget mapping 和 combo factor 定标
-- 它不代表当前下游 protocol winner
-
-### protocol_decide
-
-- 当前默认 seed2 扩展规则固定为：
-  - `ambiguity_mode = flip_or_gap`
-  - `gap_threshold = 0.001`
-- 历史旧 `ambig` 规则只允许作为旧 run 兼容字段读取
-
-### winner_refine
-
-- 当前默认只在 `A2x` 内部继续
-- 当前默认不是自动 `top-k center`
-- 当前冻结三中心：
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043`
-- 当前局部搜索规则：
-  - `total_scale_factors = [0.85, 1.0, 1.15]`
-  - `transfer_delta = 0.01`
-  - `step_scale = 1.5`
-- 如果要让笔记本参与，当前推荐执行入口不是两台机器共同写同一个 run，而是桌面机调度：
-  - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
-- 这个双机入口只改变执行方式：
-  - `seed1` 全量
-  - `seed2` 只补 `seed1` 后仍处在竞争带里的候选
-- 它不改变当前 `winner_refine` 的 center、局部搜索点或最终 winner 解释口径
-
-## 当前这轮已经确认的结果
-
-- 当前 `protocol_decide` 已收口
-- 当前结果是 `27 / 27` 全部有效
+- 双 seed 已完成
+- 当前结果为 `27 / 27` 全部有效
 - 先前唯一失败臂 `A2x danger_lean 0.12` 已补跑成功
 - 补跑前它被压到总榜第 `27`
 - 补跑后它回到总榜第 `6`
 - 协议 winner 没有变化，仍然是 `A2x`
+- 当前被人工确认的 winner 点位仍然是 `0.12 + A2x`
+
+## 启动前清理状态
+
+- 当前主线 run 的启动前清理已完成
+- 没有旧 `winner_refine` 产物残留需要恢复或复用
+- 已删除退役的旧 `ambig` 状态字段：
+  - `state.json`
+  - `p1_protocol_decide_round.json`
+  - `distributed/protocol_decide_dispatch/dispatch_state.json`
+- 当前仍保留的有效 seed2 规则是：
+  - `flip_or_gap @ 0.001`
+
+## 2026-04-02 额外 probe 结论
+
+- 额外 probe run：
+  - `logs/stage05_fidelity/s05_fidelity_p1_a2x_budget018_probe3_20260402_195712/`
+- 这轮只测了 `A2x @ 0.18` 的三臂：
+  - `anchor_18`
+  - `rank_lean_18`
+  - `danger_lean_18`
+- 这轮是 `seed1-only negative probe`
+- 它不改变默认网格
+- 它不改变当前主线 winner
+- 它不恢复 `seed2`
 
 ## 当前停点
 
-- 当前停在 `protocol_decide` 收口点
+- 当前停在主线 `protocol_decide` 收口点
 - 不自动进入 `winner_refine`
+- 不恢复 `0.18` probe 的 `seed2`
+- 不复用任何旧预算口径留下的 `winner_refine` 残留
 - 用户确认方向后，只在 `A2x` 内部继续下一阶段
-
-## 怎么用这份文档
-
-- 问“项目现在真实停在哪一步”，看这里
-- 问“P1 应该按什么口径解释 winner”，看 `p1-selection-canonical.md`
-- 问“某个 run 当时写出了什么摘要”，看 `stage05-fidelity-results.md`
-- 问“历史旧流程当时怎么跑”，去 `docs/archive/`

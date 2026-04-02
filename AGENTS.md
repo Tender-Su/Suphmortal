@@ -180,6 +180,7 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 ## Project Conventions (Non-obvious)
 
 - **Conda env name mismatch**: `environment.yml` says `mortal`, batch scripts activate `mahjong`. Be aware when writing scripts.
+- **PowerShell file writes**: never use `Set-Content`, `Out-File`, or `>` to write `*.toml` / config files from Windows PowerShell unless you explicitly force BOM-free UTF-8. Prefer `apply_patch` for edits, or Python `Path.write_text(..., encoding='utf-8', newline='\n')`. Runtime TOML loaders are BOM-tolerant, but writers should still emit BOM-free UTF-8.
 - **CPU affinity is now opt-in**: training entry points no longer default to `p_cores`. Leave `MORTAL_CPU_AFFINITY` unset for normal Windows scheduling, or set it explicitly to values such as `p_cores`, `all`, or a CPU list/mask when you really want pinning.
 - **GroupNorm default**: `Brain.__init__` defaults to `"BN"`, but actual config and `player.py` both use `Norm="GN"` (GroupNorm, 32 groups). Always pass norm explicitly.
 - **SE Attention in every ResBlock**: Unlike standard ResNets, every block has channel attention — do not remove it.
@@ -197,7 +198,7 @@ There is no formal CI/CD pipeline. The project runs locally as a research traini
 - Buffer/drain directories configured in `config.toml [online.server]` with `buffer_dir`, `drain_dir`, `capacity`.
 
 ### Evaluation
-- **`one_vs_three.py`** — Runs challenger vs champion (or vs akochan) matches using `libriichi.arena.OneVsThree`. Configured via `config.toml [1v3]`.
+- **`one_vs_three.py`** — Runs challenger vs champion matches using `libriichi.arena.OneVsThree`. Configured via `config.toml [1v3]`.
 - **TensorBoard**: `tensorboard --logdir ./mortal/tb_log_supervised_main` (Stage `0.5`), `./mortal/tb_log` (legacy Stage `1` / Stage `2`), or `./mortal/tb_log_grp` (Stage `0`).
 
 ### Checkpoint Artifacts

@@ -29,7 +29,7 @@
 ### 3. 当前默认必须写成显式规则，不能靠口头约定
 
 - `protocol_decide` 当前默认 seed2 扩展规则是 `flip_or_gap @ 0.001`
-- `winner_refine` 当前默认是冻结三中心，不是自动 `top-k`
+- `winner_refine` 当前默认是从 rerun `protocol_decide` effective-coordinate 排名里取 `top4`
 - 这些规则必须同时写进代码默认、测试和主线文档
 - 如果未来要改，必须显式更新 `stage05_current_defaults.py` 与对应文档，而不是让脚本默默漂移
 

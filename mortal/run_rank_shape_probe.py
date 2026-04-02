@@ -6,7 +6,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import toml
 import torch
 from torch.utils.data import DataLoader
 
@@ -225,7 +224,7 @@ def build_rank_shape_candidates(
 
 
 def build_plan(run_dir: Path, protocol_arm: str, *, step_scale: float) -> dict[str, Any]:
-    base_cfg = toml.load(ab.BASE_CFG_PATH)
+    base_cfg = ab.build_base_config()
     grouped = ab.group_files_by_month(ab.load_all_files())
     eval_splits = ab.build_eval_splits(grouped, ab.BASE_SCREENING["seed"], ab.BASE_SCREENING["eval_files"])
     version = int(base_cfg["control"]["version"])

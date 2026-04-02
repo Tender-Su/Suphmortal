@@ -732,7 +732,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
                     },
                     'selected_protocol_arm': resumed_protocol_arm,
                     'winner_refine_centers': [
-                        f'{resumed_protocol_arm}__B_r0046_o0037_d0037',
+                        refine_winner.arm_name,
                     ],
                 },
                 'final_conclusion': {
@@ -841,7 +841,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
         select_protocol_centers.assert_called_once()
         execute_round_multiseed.assert_called_once()
 
-    def test_run_p1_only_continue_to_winner_refine_recovers_sparse_legacy_search_space_from_persisted_centers(self):
+    def test_run_p1_only_continue_to_winner_refine_drops_legacy_budget_centers_and_uses_current_defaults(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / 'p1_only_run'
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -861,10 +861,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
                 'protocol_triple_combo_factors': {protocol_arm: 0.85},
                 'protocol_joint_combo_factors': {protocol_arm: 0.91},
             }
-            persisted_centers = [
-                f'{protocol_arm}__B_r0046_o0037_d0037',
-                f'{protocol_arm}__B_r0034_o0014_d0041',
-            ]
+            persisted_centers = ['legacy_center_a', 'legacy_center_b']
             refine_winner = p1_only.fidelity.CandidateSpec(
                 arm_name='resume_refine_winner',
                 scheduler_profile=protocol_candidate.scheduler_profile,
@@ -968,6 +965,11 @@ class Stage05P1OnlyTests(unittest.TestCase):
                         'seed': resumed_seed + 606,
                     },
                 ) as execute_round_multiseed,
+                patch.object(
+                    p1_only.fidelity,
+                    'is_budget_triplet_arm_name',
+                    side_effect=lambda arm_name: str(arm_name).startswith('legacy_center'),
+                ),
                 patch.object(p1_only, 'select_protocol_centers', return_value=[refine_winner]) as select_protocol_centers,
             ):
                 state = p1_only.run_p1_only(
@@ -976,23 +978,26 @@ class Stage05P1OnlyTests(unittest.TestCase):
                 )
 
         self.assertEqual('stopped_after_p1_winner_refine', state['status'])
-        self.assertEqual('explicit_arm_names', state['p1']['search_space']['winner_refine_center_mode'])
-        self.assertEqual(persisted_centers, state['p1']['search_space']['winner_refine_center_arm_names'])
-        self.assertEqual(protocol_arm, state['p1']['search_space']['winner_refine_center_protocol_arm'])
-        self.assertEqual(3, state['p1']['search_space']['budget_ratio_digits'])
-        self.assertEqual(3, state['p1']['search_space']['aux_weight_digits'])
+        self.assertEqual('top_ranked_keep', state['p1']['search_space']['winner_refine_center_mode'])
+        self.assertEqual(p1_only.fidelity.P1_WINNER_REFINE_CENTER_KEEP, state['p1']['search_space']['winner_refine_center_keep'])
+        self.assertEqual(4, state['p1']['search_space']['budget_ratio_digits'])
+        self.assertEqual(5, state['p1']['search_space']['aux_weight_digits'])
         self.assertEqual(
-            tuple(persisted_centers),
+            (),
             select_protocol_centers.call_args.kwargs['explicit_arm_names'],
+        )
+        self.assertEqual(
+            p1_only.fidelity.P1_WINNER_REFINE_CENTER_KEEP,
+            select_protocol_centers.call_args.kwargs['keep'],
         )
         build_p1_calibration_candidates.assert_not_called()
         derive_calibration.assert_not_called()
         build_p1_protocol_decide_candidates.assert_not_called()
         execute_round_progressive_multiseed.assert_not_called()
         build_p1_winner_refine_candidates.assert_called_once()
-        self.assertEqual(
-            persisted_centers,
-            build_p1_winner_refine_candidates.call_args.kwargs['search_space']['winner_refine_center_arm_names'],
+        self.assertNotIn(
+            'winner_refine_center_arm_names',
+            build_p1_winner_refine_candidates.call_args.kwargs['search_space'],
         )
         execute_round_multiseed.assert_called_once()
 

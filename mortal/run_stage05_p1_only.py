@@ -157,6 +157,13 @@ def hydrate_post_protocol_decide_search_space(
 ) -> dict[str, object]:
     raw_search_space = p1_state.get('search_space')
     search_space: dict[str, object] = dict(raw_search_space) if isinstance(raw_search_space, dict) else {}
+    search_space.pop('winner_refine_centers', None)
+    if (
+        str(search_space.get('protocol_decide_progressive_ambiguity_mode', '') or '').strip()
+        == fidelity.P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY
+    ):
+        search_space.pop('protocol_decide_progressive_ambiguity_mode', None)
+        search_space.pop('protocol_decide_progressive_gap_threshold', None)
     selected_protocol_arm = str(
         p1_state.get('selected_protocol_arm')
         or final_conclusion.get('p1_protocol_winner')
@@ -164,6 +171,11 @@ def hydrate_post_protocol_decide_search_space(
     ).strip()
     explicit_center_arm_names = normalize_candidate_name_list(search_space.get('winner_refine_center_arm_names'))
     persisted_centers = explicit_center_arm_names or normalize_candidate_name_list(p1_state.get('winner_refine_centers'))
+    if persisted_centers and any(fidelity.is_budget_triplet_arm_name(item) for item in persisted_centers):
+        persisted_centers = []
+        search_space.pop('winner_refine_center_mode', None)
+        search_space.pop('winner_refine_center_protocol_arm', None)
+        search_space.pop('winner_refine_center_arm_names', None)
     if persisted_centers:
         search_space['winner_refine_center_mode'] = 'explicit_arm_names'
         search_space['winner_refine_center_arm_names'] = list(persisted_centers)
@@ -171,6 +183,10 @@ def hydrate_post_protocol_decide_search_space(
             inferred_protocol_arm = selected_protocol_arm or infer_protocol_arm_from_candidate_name(persisted_centers[0])
             if inferred_protocol_arm:
                 search_space['winner_refine_center_protocol_arm'] = inferred_protocol_arm
+    if not str(search_space.get('winner_refine_center_mode', '') or '').strip():
+        search_space['winner_refine_center_mode'] = fidelity.P1_WINNER_REFINE_CENTER_MODE
+    if str(search_space.get('winner_refine_center_mode', '') or '').strip() == 'top_ranked_keep':
+        search_space.setdefault('winner_refine_center_keep', fidelity.P1_WINNER_REFINE_CENTER_KEEP)
 
     mode = str(search_space.get('winner_refine_center_mode', '') or '').strip()
     if require_winner_refine_selection:
@@ -210,13 +226,10 @@ def hydrate_post_protocol_decide_search_space(
             budget_digits, aux_digits = inferred_precision
             search_space.setdefault('budget_ratio_digits', budget_digits)
             search_space.setdefault('aux_weight_digits', aux_digits)
-    if not str(search_space.get('protocol_decide_coordinate_mode', '') or '').strip():
-        if any('__B_' in arm_name for arm_name in reference_arm_names):
-            search_space['protocol_decide_coordinate_mode'] = fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
+    search_space.setdefault('protocol_decide_coordinate_mode', fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE)
+    search_space.setdefault('budget_ratio_digits', fidelity.P1_BUDGET_RATIO_DIGITS)
+    search_space.setdefault('aux_weight_digits', fidelity.P1_AUX_WEIGHT_DIGITS)
     coordinate_mode = fidelity.protocol_decide_coordinate_mode_from_search_space(search_space)
-    if coordinate_mode == fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
-        search_space.setdefault('budget_ratio_digits', 3)
-        search_space.setdefault('aux_weight_digits', 3)
     if (
         require_effective_precision
         and coordinate_mode == fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE

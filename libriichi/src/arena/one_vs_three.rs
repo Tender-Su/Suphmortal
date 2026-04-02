@@ -1,6 +1,6 @@
 use super::game::{BatchGame, Index};
 use super::result::GameResult;
-use crate::agent::{AkochanAgent, BatchAgent, new_py_agent};
+use crate::agent::{BatchAgent, new_py_agent};
 use std::fs::{self, File};
 use std::io;
 use std::iter;
@@ -48,56 +48,6 @@ impl OneVsThree {
             let results = self.run_batch(
                 |player_ids| new_py_agent(challenger, player_ids),
                 |player_ids| new_py_agent(champion, player_ids),
-                seed_start,
-                seed_count,
-            )?;
-
-            let mut rankings = [0; 4];
-            for (i, result) in results.iter().enumerate() {
-                let rank = result.rankings().rank_by_player[i % 4];
-                rankings[rank as usize] += 1;
-            }
-            Ok(rankings)
-        })
-    }
-
-    /// Returns the rankings of the challenger (akochan in this case).
-    pub fn ako_vs_py(
-        &self,
-        engine: PyObject,
-        seed_start: (u64, u64),
-        seed_count: u64,
-        py: Python<'_>,
-    ) -> Result<[i32; 4]> {
-        py.allow_threads(move || {
-            let results = self.run_batch(
-                |player_ids| AkochanAgent::new_batched(player_ids).map(|a| Box::new(a) as _),
-                |player_ids| new_py_agent(engine, player_ids),
-                seed_start,
-                seed_count,
-            )?;
-
-            let mut rankings = [0; 4];
-            for (i, result) in results.iter().enumerate() {
-                let rank = result.rankings().rank_by_player[i % 4];
-                rankings[rank as usize] += 1;
-            }
-            Ok(rankings)
-        })
-    }
-
-    /// Returns the rankings of the challenger (python agent in this case).
-    pub fn py_vs_ako(
-        &self,
-        engine: PyObject,
-        seed_start: (u64, u64),
-        seed_count: u64,
-        py: Python<'_>,
-    ) -> Result<[i32; 4]> {
-        py.allow_threads(move || {
-            let results = self.run_batch(
-                |player_ids| new_py_agent(engine, player_ids),
-                |player_ids| AkochanAgent::new_batched(player_ids).map(|a| Box::new(a) as _),
                 seed_start,
                 seed_count,
             )?;

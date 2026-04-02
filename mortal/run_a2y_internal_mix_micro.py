@@ -5,8 +5,6 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-import toml
-
 import run_rank_shape_probe as rsp
 import run_stage05_ab as ab
 import run_stage05_fidelity as fidelity
@@ -290,7 +288,7 @@ def main() -> None:
     run_dir = make_run_dir()
     print(f"[start] run_dir={run_dir}", flush=True)
 
-    base_cfg = toml.load(ab.BASE_CFG_PATH)
+    base_cfg = ab.build_base_config()
     grouped = ab.group_files_by_month(ab.load_all_files())
     eval_splits = ab.build_eval_splits(grouped, SEED, ab.BASE_SCREENING["eval_files"])
     version = int(base_cfg["control"]["version"])

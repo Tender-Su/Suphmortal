@@ -261,7 +261,7 @@ mod test {
     fn json_consistency() {
         let lines = r#"
             {"type":"none"}
-            {"type":"start_game","names":["Equim","Mortal","akochan","NoName"],"seed":[123,456]}
+            {"type":"start_game","names":["Equim","Mortal","Baseline","NoName"],"seed":[123,456]}
             {"type":"start_kyoku","bakaze":"E","dora_marker":"5s","kyoku":1,"honba":0,"kyotaku":0,"oya":0,"scores":[25000,25000,25000,25000],"tehais":[["N","3p","W","W","7m","N","S","C","7m","P","8p","2m","5m"],["7p","1p","2m","3m","4m","C","7s","7s","9s","9p","1m","C","1s"],["3s","E","5m","P","5m","F","7p","6m","5s","9p","1s","S","N"],["2p","4s","4p","E","5p","F","3p","1s","8p","6s","8s","7s","5p"]]}
             {"type":"tsumo","actor":0,"pai":"1m"}
             {"type":"dahai","actor":0,"pai":"2m","tsumogiri":true}

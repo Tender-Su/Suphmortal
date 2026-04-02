@@ -80,10 +80,11 @@ CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = 'flip_or_gap'
 CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_GAP_THRESHOLD = 0.001
 CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_NOISE_MARGIN_MULT = 2.0
 
-# Current winner_refine defaults now bootstrap from the rerun
-# protocol_decide ranking in the same realized-coordinate space instead of
-# relying on the retired explicit frozen centers from the old budget-ratio run.
+# Current winner_refine defaults bootstrap from the rerun protocol_decide
+# ranking in the same realized-coordinate space. Keep the full 0.12 four-mix
+# surface because the current rerun ranking shows no meaningful cliff between
+# the old top3 cutoff and the fourth point.
 CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
 CURRENT_P1_WINNER_REFINE_CENTER_MODE = 'top_ranked_keep'
-CURRENT_P1_WINNER_REFINE_CENTER_KEEP = 3
+CURRENT_P1_WINNER_REFINE_CENTER_KEEP = 4
 CURRENT_P1_WINNER_REFINE_CENTER_ARMS = ()

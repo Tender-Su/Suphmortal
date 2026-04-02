@@ -116,7 +116,6 @@ P1_PROGRESSIVE_NOISE_MARGIN_MULT = (
 )
 P1_PROGRESSIVE_AMBIGUITY_MODE_LEGACY = 'legacy_max003_or_2noise'
 P1_PROGRESSIVE_AMBIGUITY_MODE_FLIP_OR_GAP = 'flip_or_gap'
-P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET = 'legacy_budget_triplet_grid_v1'
 P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE = (
     stage05_defaults.CURRENT_P1_PROTOCOL_DECIDE_PROGRESSIVE_AMBIGUITY_MODE
 )
@@ -2910,6 +2909,11 @@ def encode_effective_coord(value: float, *, digits: int) -> str:
 
 
 EFFECTIVE_TRIPLET_ARM_RE = re.compile(r'__W_r(?P<rank>\d+)_o(?P<opp>\d+)_d(?P<danger>\d+)$')
+BUDGET_TRIPLET_ARM_RE = re.compile(r'__B_r\d+_o\d+_d\d+$')
+
+
+def is_budget_triplet_arm_name(arm_name: object) -> bool:
+    return bool(BUDGET_TRIPLET_ARM_RE.search(str(arm_name).strip()))
 
 
 def infer_effective_precision_from_arm_names(
@@ -3942,21 +3946,6 @@ def build_p1_protocol_decide_candidates(
             for total_budget_ratio in protocol_decide_total_budget_ratios:
                 for mix_name, rank_share, opp_share, danger_share in protocol_decide_mixes:
                     coordinate_name = f'{mix_name}_{int(round(total_budget_ratio * 100)):02d}'
-                    if coordinate_mode == P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
-                        candidates.append(
-                            make_p1_triplet_candidate(
-                                protocol,
-                                calibration=calibration,
-                                total_budget_ratio=total_budget_ratio,
-                                rank_share=rank_share,
-                                opp_share=opp_share,
-                                danger_share=danger_share,
-                                stage='P1_protocol_decide_round',
-                                family='all_three',
-                                mix_name=mix_name,
-                            )
-                        )
-                        continue
                     base_candidate = make_p1_triplet_candidate(
                         protocol,
                         calibration=calibration,
@@ -4463,10 +4452,7 @@ def protocol_decide_coordinate_mode_from_search_space(search_space: dict[str, An
         return P1_PROTOCOL_DECIDE_COORDINATE_MODE
     explicit_mode = str(search_space.get('protocol_decide_coordinate_mode', '') or '').strip()
     if explicit_mode:
-        if explicit_mode in (
-            P1_PROTOCOL_DECIDE_COORDINATE_MODE,
-            P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET,
-        ):
+        if explicit_mode == P1_PROTOCOL_DECIDE_COORDINATE_MODE:
             return explicit_mode
         raise RuntimeError(f'unsupported protocol_decide coordinate mode `{explicit_mode}`')
     explicit_centers = [
@@ -4474,15 +4460,12 @@ def protocol_decide_coordinate_mode_from_search_space(search_space: dict[str, An
         for item in search_space.get('winner_refine_center_arm_names', [])
         if str(item).strip()
     ]
-    if any('__B_' in item for item in explicit_centers):
-        return P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
-    if (
-        'winner_refine_center_protocol_arm' in search_space
-        and 'winner_refine_center_arm_names' in search_space
-        and 'budget_ratio_digits' not in search_space
-        and 'aux_weight_digits' not in search_space
-    ):
-        return P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET
+    if any(is_budget_triplet_arm_name(item) for item in explicit_centers):
+        raise RuntimeError(
+            'legacy budget-space winner_refine centers are no longer supported; '
+            'clear stale `winner_refine_center_arm_names` and regenerate centers '
+            'from the rerun protocol_decide ranking'
+        )
     return P1_PROTOCOL_DECIDE_COORDINATE_MODE
 
 
@@ -4528,8 +4511,6 @@ def precision_from_search_space(
         aux_digits = search_space.get('aux_weight_digits')
         if budget_digits is not None and aux_digits is not None:
             return int(budget_digits), int(aux_digits)
-    if fallback_coordinate_mode == P1_PROTOCOL_DECIDE_COORDINATE_MODE_LEGACY_BUDGET:
-        return 3, 3
     return P1_BUDGET_RATIO_DIGITS, P1_AUX_WEIGHT_DIGITS
 
 
@@ -4588,6 +4569,12 @@ def winner_refine_center_selection_from_search_space(
             for item in search_space.get('winner_refine_center_arm_names', [])
             if str(item).strip()
         )
+        if any(is_budget_triplet_arm_name(item) for item in explicit_arm_names):
+            raise RuntimeError(
+                'legacy budget-space winner_refine centers are no longer supported; '
+                'clear stale explicit centers and regenerate them from the rerun '
+                'protocol_decide ranking'
+            )
         if frozen_protocol_arm and protocol_arm != frozen_protocol_arm:
             raise RuntimeError(
                 'winner_refine centers in persisted search_space are frozen for '

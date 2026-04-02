@@ -30,11 +30,8 @@
 
 - 当前 downstream 默认协议写死为 `A2x`
 - 当前 `protocol_decide` 默认 seed2 扩展规则写死为 `flip_or_gap @ 0.001`
-- 当前 `winner_refine` 默认不再是自动 `top-k center`
-- 当前 `winner_refine` 冻结三中心：
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0046_o0037_d0037`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0034_o0014_d0041`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__B_r0052_o0025_d0043`
+- 这份 closeout 当时写下的旧 `winner_refine` 三中心口径已经被 `2026-04-02` 的新版 rerun 替换
+- 当前 `winner_refine` 默认改为从 rerun `protocol_decide` effective-coordinate 排名取 `top4`
 
 ## 这轮最重要的经验
 
