@@ -325,12 +325,6 @@ games_per_iter = 2000
 # seed_count = 500
 # Optional: split a single 1v3 iteration across multiple local shard workers.
 # shard_count = 2
-# Optional: execution backend. Keep `process` as the default operating mode.
-# `broker` is available for explicit experiments on a single local CUDA device,
-# but it is not the default path.
-# execution_mode = 'process'
-# broker_batch_window_ms = 0.0
-# broker_shard_count = 3
 iters = 500
 log_dir = '/path/to/1v3'
 
@@ -344,8 +338,6 @@ log_dir = '/path/to/1v3'
 # Current built-in GPU defaults verified on 2026-04-02:
 #   RTX 5070 Ti -> seed_count = 1024, shard_count = 4
 #   RTX 4060 Laptop GPU -> seed_count = 640, shard_count = 3
-# Current broker-specific built-in shard default verified on 2026-04-03:
-#   RTX 5070 Ti -> broker_shard_count = 3
 #
 # [1v3.machine_overrides.YOUR_HOSTNAME]
 # seed_count = 1024
