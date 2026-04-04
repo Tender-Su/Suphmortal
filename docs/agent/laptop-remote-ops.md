@@ -79,6 +79,21 @@ python mortal/run_stage05_winner_refine_distributed.py dispatch `
 
 缺任何一个，远端 `winner_refine` 都可能直接失败。
 
+## 当前双机 formal_1v3 口径
+
+- 同样不要让两台机器各自独立写同一个 `run_dir`
+- 当前推荐仍由桌面机统一调度：
+
+```powershell
+python mortal/run_stage05_formal_1v3_distributed.py dispatch `
+  --run-name <run_name>
+```
+
+- 当前 `formal_1v3` 与 `winner_refine` 的远端依赖基本一致：
+  - `mortal/config.toml`
+  - `logs/stage05_fidelity/<run_name>/state.json`
+- 但它额外依赖当前 run 已经存在 `formal` checkpoint pack；没有 `formal.status = completed` 时不要启动
+
 ## 最稳的远程操作方式
 
 ### 短命令

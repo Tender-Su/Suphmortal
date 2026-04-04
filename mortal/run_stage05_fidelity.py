@@ -153,38 +153,6 @@ P1_COMBO_FACTOR_MIN = 0.75
 P1_COMBO_FACTOR_MAX = 1.25
 ARM_CACHE_SCHEMA_VERSION = 2
 ROUND_CACHE_SCHEMA_VERSION = 3
-P2_MAX_FINALISTS = 4
-
-SELECTOR_PROFILES = {
-    'S0_default': dict(ACTION_SCORE_WEIGHTS),
-    'S1_riichi_heavy': {
-        'discard_nll': 0.40,
-        'riichi_decision_balanced_bce': 0.24,
-        'agari_decision_balanced_bce': 0.18,
-        'chi_decision_balanced_bce': 0.04,
-        'chi_exact_nll': 0.02,
-        'pon_decision_balanced_bce': 0.07,
-        'kan_decision_balanced_bce': 0.05,
-    },
-    'S2_call_heavy': {
-        'discard_nll': 0.40,
-        'riichi_decision_balanced_bce': 0.18,
-        'agari_decision_balanced_bce': 0.16,
-        'chi_decision_balanced_bce': 0.06,
-        'chi_exact_nll': 0.04,
-        'pon_decision_balanced_bce': 0.10,
-        'kan_decision_balanced_bce': 0.06,
-    },
-    'S3_discard_heavy': {
-        'discard_nll': 0.52,
-        'riichi_decision_balanced_bce': 0.16,
-        'agari_decision_balanced_bce': 0.16,
-        'chi_decision_balanced_bce': 0.04,
-        'chi_exact_nll': 0.02,
-        'pon_decision_balanced_bce': 0.06,
-        'kan_decision_balanced_bce': 0.04,
-    },
-}
 
 P1_SELECTION_TIEBREAK_FIELDS = [
     'selection_quality_score',
@@ -524,7 +492,7 @@ def reset_state_for_stop_flags(
         or stop_after_p1_winner_refine
     ):
         return
-    for key in ('p0', 'p1', 'p2', 'formal', 'final_conclusion'):
+    for key in ('p0', 'p1', 'formal', 'formal_1v3', 'final_conclusion'):
         state.pop(key, None)
 
 
@@ -681,18 +649,6 @@ def as_float(metrics: dict[str, Any], key: str, default: float = float('-inf')) 
 
 def action_quality_with_weights(metrics: dict[str, Any], weights: dict[str, float]) -> float:
     return action_quality_score(metrics, weights)
-
-
-def selection_key_for_summary(summary: dict[str, Any], weights: dict[str, float] | None = None) -> tuple[float, ...]:
-    metrics = full_recent_metrics(summary) or summary
-    recent_loss = recent_ranking_loss_for_summary(summary, ranking_mode='full_recent')
-    old_loss = old_regression_ranking_loss_for_summary(summary, ranking_mode='full_recent')
-    return selection_tiebreak_key(
-        metrics,
-        recent_loss=recent_loss,
-        old_regression_loss=math.inf if old_loss is None or not math.isfinite(old_loss) else old_loss,
-        action_weights=ACTION_SCORE_WEIGHTS if weights is None else weights,
-    )
 
 
 def recent_policy_loss_for_summary(summary: dict[str, Any]) -> float:
@@ -4709,8 +4665,8 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
         f'- 运行目录：`{run_dir}`',
         f'- 更新时间：`{ts_now()}`',
         f'- 当前状态：`{state.get("status", "unknown")}`',
-        '- 自动串联范围：`P0 + P1 + P2 + Stage 0.5 formal`',
-        '- 说明：`P3(Stage 1 transfer)` 不作为本轮 `Stage 0.5 formal` 启动前置条件，避免把 Stage 1 下游转移实验混入 0.5 阶段主协议定型。',
+        '- 自动串联范围：`P0 + P1 + Stage 0.5 formal_train`',
+        '- 说明：`formal checkpoint pack` 产出后不再直接做 canonical 落位；当前主线会停在 `formal_1v3` 之前，最终 canonical 落位由 `formal_1v3` 决胜完成。',
         '',
     ]
 
@@ -4741,8 +4697,9 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
             f'- P1 最终总胜者：`{final.get("p1_winner", "TBD")}`',
             f'- P1 winner 来源：`{final.get("p1_winner_source", "TBD")}`',
             f'- P1 ablation 策略：`{final.get("p1_ablation_policy", P1_ABLATION_POLICY)}`',
-            f'- P2 默认 checkpoint：`{final.get("p2_default_checkpoint", "TBD")}`',
-            f'- 正式训练：`{final.get("formal_status", "pending")}`',
+            f'- formal_train：`{final.get("formal_train_status", final.get("formal_status", "pending"))}`',
+            f'- formal_1v3：`{final.get("formal_1v3_status", "pending")}`',
+            f'- Stage 0.5 canonical 落位：`{final.get("formal_status", "pending")}`',
             '',
         ])
 
@@ -4979,24 +4936,31 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
             lines.extend(entry_table(final_round['ranking'], ranking_mode=P1_RANKING_MODE))
             lines.append('')
 
-    p2 = state.get('p2')
-    if p2:
-        lines.extend(['## P2', ''])
-        for curve in p2.get('curves', []):
-            lines.append(f"- `{curve['run_name']}`")
-            lines.append(f"  - 默认 selector：`{curve['default_selector_winner']}`")
-            lines.append(f"  - 去重后候选：`{', '.join(curve['unique_checkpoint_types'])}`")
-        if p2.get('selected_checkpoints'):
-            lines.append(f"- P2 汇总候选：`{', '.join(item['label'] for item in p2['selected_checkpoints'])}`")
-        lines.append('')
-
     formal_state = state.get('formal')
     if formal_state:
         lines.extend(['## Formal', '', f"- 状态：`{formal_state.get('status', 'pending')}`"])
         if formal_state.get('ab_name'):
             lines.append(f"- 日志目录：`logs/stage05_ab/{formal_state['ab_name']}`")
-        if formal_state.get('winner'):
-            lines.append(f"- checkpoint winner：`{formal_state['winner']}`")
+        if formal_state.get('offline_checkpoint_winner'):
+            lines.append(f"- offline pack leader：`{formal_state['offline_checkpoint_winner']}`")
+        pack_types = formal_state.get('checkpoint_pack_types') or formal_state.get('shortlist_checkpoint_types') or []
+        if pack_types:
+            lines.append(f"- checkpoint_pack：`{', '.join(pack_types)}`")
+        if formal_state.get('result', {}).get('latest_discarded'):
+            lines.append('- latest：`dropped before formal_1v3`')
+        lines.append('')
+
+    formal_1v3_state = state.get('formal_1v3')
+    if formal_1v3_state:
+        lines.extend(['## Formal 1v3', '', f"- 状态：`{formal_1v3_state.get('status', 'pending')}`"])
+        if formal_1v3_state.get('dispatch_state_path'):
+            lines.append(f"- dispatch：`{formal_1v3_state['dispatch_state_path']}`")
+        if formal_1v3_state.get('winner'):
+            lines.append(f"- winner：`{formal_1v3_state['winner']}`")
+        if formal_1v3_state.get('close_call'):
+            lines.append(f"- close_call：`{formal_1v3_state['close_call']}`")
+        if formal_1v3_state.get('published_canonical_checkpoints'):
+            lines.append(f"- canonical_alias_updates：`{len(formal_1v3_state['published_canonical_checkpoints'])}`")
         lines.append('')
 
     lines.extend([
@@ -5591,75 +5555,6 @@ def run_p1(
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
     return refine_winner, [candidate_from_entry(entry) for entry in winner_refine_valid]
-
-
-def checkpoint_selector_winner(candidates: dict[str, dict[str, Any]], action_weights: dict[str, float]) -> tuple[str, list[str]]:
-    best_loss = min(ab.full_recent_loss(candidate) for candidate in candidates.values())
-    eligible = {
-        name: candidate
-        for name, candidate in candidates.items()
-        if ab.full_recent_loss(candidate) <= best_loss + LOSS_EPSILON
-    }
-    winner = max(eligible.items(), key=lambda item: selection_key_for_summary(item[1], action_weights))[0]
-    return winner, sorted(eligible)
-
-
-def run_p2(run_dir: Path, finalists: list[CandidateSpec], state: dict[str, Any]) -> None:
-    p2_state = {'curves': [], 'selected_checkpoints': []}
-    selected: dict[str, dict[str, Any]] = {}
-    for candidate in finalists[:P2_MAX_FINALISTS]:
-        arm_result = load_json(find_arm_result_path(run_dir, candidate))
-        final = arm_result['run']['final']
-        ckpt_candidates = {
-            'K1_best_loss': final['best_loss'],
-            'K2_best_acc': final['best_acc'],
-            'K3_best_rank': final['best_rank'],
-            'K4_latest': final['latest'],
-        }
-        selector_winners = {}
-        unique_types: set[str] = set()
-        for selector_name, weights in SELECTOR_PROFILES.items():
-            winner, eligible = checkpoint_selector_winner(ckpt_candidates, weights)
-            selector_winners[selector_name] = {'winner': winner, 'eligible': eligible}
-            unique_types.add(winner)
-            label = f'{candidate.arm_name}:{winner}'
-            selected.setdefault(
-                label,
-                {
-                    'label': label,
-                    'run_name': candidate.arm_name,
-                    'checkpoint_type': winner,
-                    'checkpoint_path': ckpt_candidates[winner]['path'],
-                    'selectors': [],
-                },
-            )
-            selected[label]['selectors'].append(selector_name)
-        p2_state['curves'].append(
-            {
-                'run_name': candidate.arm_name,
-                'default_selector_winner': selector_winners['S0_default']['winner'],
-                'selector_winners': selector_winners,
-                'unique_checkpoint_types': sorted(unique_types),
-            }
-        )
-    p2_state['selected_checkpoints'] = sorted(
-        selected.values(),
-        key=lambda item: (
-            len(item['selectors']),
-            1 if 'S0_default' in item['selectors'] else 0,
-            item['run_name'],
-            item['checkpoint_type'],
-        ),
-        reverse=True,
-    )[:3]
-    state['p2'] = p2_state
-    state.setdefault('final_conclusion', {})['p2_default_checkpoint'] = (
-        p2_state['curves'][0]['default_selector_winner'] if p2_state['curves'] else None
-    )
-    atomic_write_json(run_dir / 'state.json', state)
-    update_results_doc(run_dir, state)
-
-
 def run_formal(
     run_dir: Path,
     base_cfg: dict[str, Any],
@@ -5690,10 +5585,31 @@ def run_formal(
             result,
             protocol_arm=protocol_arm,
         )
-        state['formal'] = {'status': 'completed', 'ab_name': ab_name, 'winner': result['winner'], 'result': result}
+        shortlist_types = list(result.get('shortlist_checkpoint_types') or [])
+        checkpoint_pack_types = list(result.get('checkpoint_pack_types') or shortlist_types)
+        state['formal'] = {
+            'status': 'completed',
+            'ab_name': ab_name,
+            'offline_checkpoint_winner': result.get('offline_checkpoint_winner'),
+            'shortlist_checkpoint_types': shortlist_types,
+            'checkpoint_pack_types': checkpoint_pack_types,
+            'result': result,
+        }
+        state['formal_1v3'] = {
+            'status': 'pending',
+            'shortlist_checkpoint_types': shortlist_types,
+            'checkpoint_pack_types': checkpoint_pack_types,
+            'candidate_count': len(checkpoint_pack_types),
+        }
+        state.setdefault('final_conclusion', {})['formal_train_status'] = 'completed'
+        state['final_conclusion']['formal_1v3_status'] = 'pending'
+        state['final_conclusion']['formal_status'] = 'pending_1v3'
     except Exception as exc:
         state['formal'] = {'status': 'failed', 'ab_name': ab_name, 'error': str(exc), 'traceback': traceback.format_exc()}
-    state.setdefault('final_conclusion', {})['formal_status'] = state['formal']['status']
+        state['formal_1v3'] = {'status': 'blocked_by_formal_failure'}
+        state.setdefault('final_conclusion', {})['formal_train_status'] = 'failed'
+        state['final_conclusion']['formal_1v3_status'] = 'blocked_by_formal_failure'
+        state['final_conclusion']['formal_status'] = 'failed'
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
 
@@ -5838,16 +5754,22 @@ def main() -> None:
         elif args.stop_after_p1_winner_refine:
             state['status'] = 'stopped_after_p1_winner_refine'
         else:
-            run_p2(run_dir, p1_final_ranked, state)
             if args.skip_formal:
                 state['formal'] = {'status': 'skipped'}
-                state.setdefault('final_conclusion', {})['formal_status'] = 'skipped'
+                state['formal_1v3'] = {'status': 'skipped'}
+                state.setdefault('final_conclusion', {})['formal_train_status'] = 'skipped'
+                state['final_conclusion']['formal_1v3_status'] = 'skipped'
+                state['final_conclusion']['formal_status'] = 'skipped'
                 atomic_write_json(state_path, state)
                 update_results_doc(run_dir, state)
+                state['status'] = 'completed'
             else:
                 assert p1_winner is not None
                 run_formal(run_dir, base_cfg, grouped, p1_winner, args.seed + 2000, args.formal_step_scale, state)
-            state['status'] = 'completed'
+                if state.get('formal', {}).get('status') == 'completed':
+                    state['status'] = 'stopped_after_formal_candidate_pack'
+                else:
+                    state['status'] = 'failed'
     except Exception as exc:
         state['status'] = 'failed'
         state['fatal_error'] = str(exc)

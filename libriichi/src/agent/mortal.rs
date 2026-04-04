@@ -24,6 +24,7 @@ pub struct MortalBatchAgent {
     enable_quick_eval: bool,
     enable_rule_based_agari_guard: bool,
     enable_metadata: bool,
+    use_obs_encode_into: bool,
     name: String,
     player_ids: Vec<u8>,
 
@@ -98,6 +99,36 @@ fn stack_mask_batch(masks: Vec<[bool; ACTION_SPACE]>) -> Result<Array2<bool>> {
     Ok(stacked)
 }
 
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn encode_obs_legacy(
+    state: &PlayerState,
+    version: u32,
+    at_kan_select: bool,
+) -> (Simple2DArray<34, f32>, [bool; ACTION_SPACE]) {
+    let (feature, mask) = state.encode_obs(version, at_kan_select);
+    let mut feature_simple = Simple2DArray::new(feature.nrows());
+    feature_simple.as_mut_slice().copy_from_slice(
+        feature
+            .as_slice()
+            .expect("encode_obs produced a non-contiguous array"),
+    );
+    let mask = mask
+        .to_vec()
+        .try_into()
+        .expect("encode_obs produced an unexpected mask length");
+    (feature_simple, mask)
+}
+
 impl MortalBatchAgent {
     pub fn new(engine: PyObject, player_ids: &[u8]) -> Result<Self> {
         ensure!(player_ids.iter().all(|&id| matches!(id, 0..=3)));
@@ -154,6 +185,7 @@ impl MortalBatchAgent {
             enable_quick_eval,
             enable_rule_based_agari_guard,
             enable_metadata,
+            use_obs_encode_into: env_flag("MORTAL_1V3_ENABLE_ENCODE_INTO", true),
             name,
             player_ids: player_ids.to_vec(),
 
@@ -278,6 +310,11 @@ impl BatchAgent for MortalBatchAgent {
         self.is_oracle.then_some(self.version)
     }
 
+    #[inline]
+    fn uses_event_log(&self) -> bool {
+        false
+    }
+
     fn set_scene(
         &mut self,
         index: usize,
@@ -331,6 +368,7 @@ impl BatchAgent for MortalBatchAgent {
         };
 
         let version = self.version;
+        let use_obs_encode_into = self.use_obs_encode_into;
         let state = state.clone();
         let sync_fields = Arc::clone(&self.sync_fields);
         let wg = self.wg.clone();
@@ -342,14 +380,23 @@ impl BatchAgent for MortalBatchAgent {
             // the sp feature (since v4).
             let state_rows = obs_shape(version).0;
             let kan = need_kan_select.then(|| {
-                let mut kan_feature = Simple2DArray::new(state_rows);
-                let mut kan_mask = [false; ACTION_SPACE];
-                state.encode_obs_into(version, true, &mut kan_feature, &mut kan_mask);
-                (kan_feature, kan_mask)
+                if use_obs_encode_into {
+                    let mut kan_feature = Simple2DArray::new(state_rows);
+                    let mut kan_mask = [false; ACTION_SPACE];
+                    state.encode_obs_into(version, true, &mut kan_feature, &mut kan_mask);
+                    (kan_feature, kan_mask)
+                } else {
+                    encode_obs_legacy(&state, version, true)
+                }
             });
-            let mut feature = Simple2DArray::new(state_rows);
-            let mut mask = [false; ACTION_SPACE];
-            state.encode_obs_into(version, false, &mut feature, &mut mask);
+            let (feature, mask) = if use_obs_encode_into {
+                let mut feature = Simple2DArray::new(state_rows);
+                let mut mask = [false; ACTION_SPACE];
+                state.encode_obs_into(version, false, &mut feature, &mut mask);
+                (feature, mask)
+            } else {
+                encode_obs_legacy(&state, version, false)
+            };
 
             let SyncFields {
                 states,

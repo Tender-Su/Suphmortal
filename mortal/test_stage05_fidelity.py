@@ -314,12 +314,10 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 'started_at': '2026-03-20 09:00:00',
                 'p0': {'round3': {'ranking': []}, 'winner': 'old_p0'},
                 'p1': {'winner': 'old_p1', 'protocol_decide_round': {'ranking': []}},
-                'p2': {'selected_checkpoints': []},
                 'formal': {'status': 'completed'},
                 'final_conclusion': {
                     'p0_winner': 'old_p0',
                     'p1_winner': 'old_p1',
-                    'p2_default_checkpoint': 'K1_best_loss',
                     'formal_status': 'completed',
                 },
             }
@@ -1161,7 +1159,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             [candidate.arm_name for candidate in survivors],
         )
 
-    def test_run_formal_finalizes_and_publishes_canonical_checkpoints(self):
+    def test_run_formal_prepares_checkpoint_pack_and_marks_formal_1v3_pending(self):
         winner = fidelity.CandidateSpec(
             arm_name='C_A2y_cosine_broad_to_recent_strong_12m_6m__B_r000_o000_d000',
             scheduler_profile='cosine',
@@ -1176,7 +1174,8 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         )
         finalized_result = {
             'winner': 'best_acc',
-            'published_canonical_checkpoints': [{'source': 'src', 'destination': 'dst'}],
+            'offline_checkpoint_winner': 'best_acc',
+            'shortlist_checkpoint_types': ['best_loss', 'best_acc', 'best_rank'],
             'selected_protocol_arm': 'C_A2y_cosine_broad_to_recent_strong_12m_6m',
         }
 
@@ -1219,8 +1218,13 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             protocol_arm='C_A2y_cosine_broad_to_recent_strong_12m_6m',
         )
         self.assertEqual('completed', state['formal']['status'])
-        self.assertEqual([{'source': 'src', 'destination': 'dst'}], state['formal']['result']['published_canonical_checkpoints'])
-        self.assertEqual('completed', state['final_conclusion']['formal_status'])
+        self.assertEqual('best_acc', state['formal']['offline_checkpoint_winner'])
+        self.assertEqual(['best_loss', 'best_acc', 'best_rank'], state['formal']['shortlist_checkpoint_types'])
+        self.assertEqual(['best_loss', 'best_acc', 'best_rank'], state['formal']['checkpoint_pack_types'])
+        self.assertEqual('pending', state['formal_1v3']['status'])
+        self.assertEqual('completed', state['final_conclusion']['formal_train_status'])
+        self.assertEqual('pending', state['final_conclusion']['formal_1v3_status'])
+        self.assertEqual('pending_1v3', state['final_conclusion']['formal_status'])
         write_mock.assert_called_once_with(run_dir / 'state.json', state)
         update_mock.assert_called_once_with(run_dir, state)
 

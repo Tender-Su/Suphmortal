@@ -76,6 +76,28 @@ class Stage1AbSummaryTests(unittest.TestCase):
 
         self.assertEqual('./checkpoints/stage0_5_supervised_best_loss.pth', stage1_cfg['init_state_file'])
 
+    def test_main_blocks_pending_formal_1v3_before_stage1_launch(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            init_state_file = Path(tmp_dir) / 'stage0_5_supervised.pth'
+            init_state_file.write_text('checkpoint', encoding='utf-8')
+            base_cfg = {'stage1': {'init_state_file': str(init_state_file)}}
+
+            with (
+                patch.object(sys, 'argv', ['run_stage1_ab.py']),
+                patch.object(stage1_ab.s05, 'build_base_config', return_value=base_cfg),
+                patch.object(stage1_ab, 'ensure_stage1_section', return_value=base_cfg),
+                patch.object(
+                    stage1_ab.stage05_formal,
+                    'ensure_stage1_canonical_handoff_ready',
+                    side_effect=RuntimeError('pending formal_1v3'),
+                ),
+                patch.object(stage1_ab, 'run_block_c') as run_block_c,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'pending formal_1v3'):
+                    stage1_ab.main()
+
+        run_block_c.assert_not_called()
+
     def test_stage1_arm_exp_dir_keeps_recipe_mode_layout_stable(self):
         exp_dir = stage1_ab.stage1_arm_exp_dir(
             ab_name='stage1_recipe_test',

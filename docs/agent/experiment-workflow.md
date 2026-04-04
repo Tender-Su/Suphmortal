@@ -28,7 +28,15 @@
    - 目标：只在 winner 协议内部细调三头全开配比
    - 当前只允许在 `A2x` 内部继续
    - 当前 center 与局部搜索规则看 `docs/agent/mainline.md`
-5. `P1 ablation`
+5. `formal_train`
+   - 目标：用 `P1 winner` 的完整 recipe 跑正式版 Stage `0.5` supervised
+   - 这一步只产出 checkpoint pack：`best_loss / best_acc / best_rank`
+   - 当前 `latest` 不再进入后续发布链路
+6. `formal_1v3`
+   - 目标：在正式 checkpoint pack 上用 `1v3` 决定最终 canonical winner
+   - 判定口径：`avg_pt` 为主，`avg_rank` 为辅
+   - 流程：先 `1 iter` 粗筛；若 `top2` 仍 close，再换新 `seed_key` 连跑 `3~5` 轮
+7. `P1 ablation`
    - 当前不属于默认主线
    - 目标仍然是验证 `all_three / drop_* / ce_only` 的边际贡献
    - 只作为 `backlog / manual only` 保留
@@ -38,6 +46,7 @@
 - 当前停在 `protocol_decide` 收口点
 - 不自动进入 `winner_refine`
 - `winner_refine` 跑完后再次停下
+- `formal_train` 跑完后也再次停下
 - 默认不再把 `ablation` 当成写入下游默认的前置条件
 
 ## winner_refine 当前推荐跑法
@@ -97,11 +106,32 @@ python mortal/run_stage05_winner_refine_distributed.py resume-worker `
   --worker-label laptop
 ```
 
+## formal_1v3 当前推荐跑法
+
+- `formal_train` 完成后，不要直接手工做 canonical 落位
+- 当前推荐仍由桌面机统一调度：
+
+```powershell
+python mortal/run_stage05_formal_1v3_distributed.py dispatch `
+  --run-name <run_name>
+```
+
+- 查看状态：
+
+```powershell
+python mortal/run_stage05_formal_1v3_distributed.py status `
+  --run-name <run_name>
+```
+
+- 暂停或恢复某个 worker 的入口与 `winner_refine` 相同，只是脚本名改为 `run_stage05_formal_1v3_distributed.py`
+
 ## 结果解释边界
 
 - 是否入围、谁是 winner、谁只是诊断信息，一律按 `docs/status/p1-selection-canonical.md`
 - `protocol_decide` 只回答“哪个协议继续往下走”
 - `winner_refine` 只回答“winner 协议下三头该怎么配”
+- `formal_train` 只回答“正式训练后三个 checkpoint 候选分别是谁”，不直接做 canonical 落位
+- `formal_1v3` 才回答“哪一个 formal checkpoint 应该成为 canonical winner，并触发 canonical alias 落位”
 - `ablation` 只回答“三个头是否都还有边际贡献”，而且当前只作 backlog 诊断
 
 ## 不再使用的旧流程

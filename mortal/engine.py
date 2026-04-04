@@ -80,12 +80,36 @@ class MortalEngine:
         actions, _, q_out, masks, is_greedy = self._react_batch_impl(obs, masks, invisible_obs)
         return actions.tolist(), q_out.tolist(), masks.tolist(), is_greedy.tolist()
 
+    def _prepare_batch_tensors(self, obs, masks, invisible_obs):
+        if not (
+            isinstance(obs, torch.Tensor)
+            and isinstance(masks, torch.Tensor)
+            and (invisible_obs is None or isinstance(invisible_obs, torch.Tensor))
+        ):
+            obs, masks, invisible_obs = coerce_batch_inputs(obs, masks, invisible_obs)
+
+        def _to_tensor(value, *, dtype):
+            if value is None:
+                return None
+            tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+            if tensor.dtype != dtype:
+                tensor = tensor.to(dtype=dtype)
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            if tensor.device != self.device:
+                tensor = tensor.to(
+                    device=self.device,
+                    non_blocking=self.device.type == 'cuda' and tensor.device.type == 'cpu',
+                )
+            return tensor
+
+        obs = _to_tensor(obs, dtype=torch.float32)
+        masks = _to_tensor(masks, dtype=torch.bool)
+        invisible_obs = _to_tensor(invisible_obs, dtype=torch.float32)
+        return obs, masks, invisible_obs
+
     def _react_batch_impl(self, obs, masks, invisible_obs):
-        obs, masks, invisible_obs = coerce_batch_inputs(obs, masks, invisible_obs)
-        obs = torch.as_tensor(obs, device=self.device)
-        masks = torch.as_tensor(masks, device=self.device)
-        if invisible_obs is not None:
-            invisible_obs = torch.as_tensor(invisible_obs, device=self.device)
+        obs, masks, invisible_obs = self._prepare_batch_tensors(obs, masks, invisible_obs)
         batch_size = obs.shape[0]
 
         match self.version:

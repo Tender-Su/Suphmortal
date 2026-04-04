@@ -89,6 +89,10 @@ impl BatchAgent for MjaiLogBatchAgent {
         self.name.clone()
     }
 
+    fn uses_event_log(&self) -> bool {
+        true
+    }
+
     fn set_scene(
         &mut self,
         index: usize,

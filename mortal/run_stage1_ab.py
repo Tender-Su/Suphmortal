@@ -14,6 +14,7 @@ from typing import Any
 import torch
 
 import run_stage05_ab as s05
+import run_stage05_formal as stage05_formal
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -734,6 +735,7 @@ def main() -> None:
     init_state_file = args.init_state or base_cfg['stage1'].get('init_state_file', '')
     if not init_state_file:
         raise RuntimeError('missing Stage 1 init checkpoint; pass --init-state or set stage1.init_state_file')
+    stage05_formal.ensure_stage1_canonical_handoff_ready(init_state_file)
     if not Path(init_state_file).exists():
         raise RuntimeError(f'Stage 1 init checkpoint does not exist: {init_state_file}')
 

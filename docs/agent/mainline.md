@@ -45,6 +45,22 @@
 - `best_acc` 只作受控对照
 - `latest` 只用于续训
 
+## Stage 0.5 formal 当前冻结默认
+
+- `formal_train` 不再直接做 canonical checkpoint 落位
+- `formal_train` 只保留：
+  - `best_loss`
+  - `best_acc`
+  - `best_rank`
+- `latest` 在进入 `formal_1v3` 前直接丢弃
+- 当前正式发布结构固定为：
+  - `formal_train -> checkpoint pack(best_loss / best_acc / best_rank) -> formal_1v3 -> canonical alias落位`
+- `formal_1v3` 当前判定口径：
+  - 先跑 `1 iter` 粗筛
+  - 若 `top2` 的 `avg_pt` 仍在估计噪声带内，则换新 `seed_key` 继续加赛
+  - 默认先补 `3` 轮；若仍 close，再补到最多 `5` 轮
+  - 最终按 `avg_pt` 为主、`avg_rank` 为辅决定 winner
+
 ## Stage 0.5 / P1 当前冻结默认
 
 - `P0` 事实 `top3` 顺序固定为：
@@ -126,4 +142,5 @@
 ## 下游原则
 
 - `Stage 1` 默认主线：`Oracle Dropout Supervised Refinement`
+- `Stage 1` 只读取 `formal_1v3` 决胜并完成 canonical alias落位后的 Stage `0.5` checkpoint
 - `Stage 2` 只在新的 `Stage 1` 稳定后再推进

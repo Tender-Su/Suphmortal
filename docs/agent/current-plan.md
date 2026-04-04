@@ -21,7 +21,9 @@
   - `calibration -> protocol_decide -> winner_refine`
 - `P1 ablation` 当前定位：
   - `backlog / manual only`
-  - 不再阻塞 downstream `P2 / formal`
+  - 不再阻塞 downstream `formal_train -> formal_1v3`
+- 当前 `winner_refine` 之后的下游结构：
+  - `formal_train -> checkpoint pack(best_loss / best_acc / best_rank) -> formal_1v3 -> canonical alias落位`
 - 当前已验证协议 winner：
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
 - 当前已验证 winner 点位：
@@ -61,8 +63,11 @@
 3. 如果让笔记本参与，使用桌面机调度入口：
    - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name s05_fidelity_p1_top3_cali_slim_20260329_001413`
 4. 这个双机入口只改变调度方式，不改变 center、局部搜索点或最终 winner 解释口径
-5. `winner_refine` 跑完后，默认直接把 front runner 当作当前 `P1 winner` 进入 downstream
-6. `ablation` 不再属于默认主线；只有在需要确认边际贡献或评估删头时，才作为 backlog 手动启动
+5. `winner_refine` 跑完后，默认直接把 front runner 当作当前 `P1 winner`
+6. 后续不要再把 `formal` 理解成“训练完直接做 canonical 落位”；当前代码已经改成：
+   - `formal_train` 只产出 `best_loss / best_acc / best_rank` checkpoint pack，`latest` 丢弃
+   - 最终 canonical alias 落位由 `formal_1v3` 决胜后完成
+7. `ablation` 不再属于默认主线；只有在需要确认边际贡献或评估删头时，才作为 backlog 手动启动
 
 ## 不要这样做
 

@@ -60,6 +60,11 @@ where
     }
 
     #[inline]
+    fn uses_event_log(&self) -> bool {
+        self.inner[0].uses_event_log()
+    }
+
+    #[inline]
     fn set_scene(
         &mut self,
         index: usize,

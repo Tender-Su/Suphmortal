@@ -32,6 +32,8 @@
 - `P1 ablation` 当前定位：
   - `backlog / manual only`
   - 不作为 downstream 默认 gate
+- 当前 `winner_refine` 之后的固定下游结构：
+  - `formal_train -> checkpoint pack(best_loss / best_acc / best_rank) -> formal_1v3 -> canonical alias落位`
 - `P1` 当前唯一有效选模口径：
   - `docs/status/p1-selection-canonical.md`
 

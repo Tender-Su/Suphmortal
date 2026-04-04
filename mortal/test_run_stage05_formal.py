@@ -1,3 +1,5 @@
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -55,7 +57,7 @@ class RunStage05FormalTests(unittest.TestCase):
 
         publish_map = {str(destination): str(source) for destination, source in plan}
         self.assertEqual(
-            'C:\\virtual\\source\\latest.pth',
+            'C:\\virtual\\source\\best_acc.pth',
             publish_map['C:\\virtual\\mortal\\checkpoints\\stage0_5_latest.pth'],
         )
         self.assertEqual(
@@ -179,7 +181,7 @@ class RunStage05FormalTests(unittest.TestCase):
 
             self.assertEqual(4, len(published))
             self.assertEqual(
-                'latest',
+                'best_acc',
                 (config_dir / 'checkpoints' / 'stage0_5_latest.pth').read_text(encoding='utf-8'),
             )
             self.assertEqual(
@@ -244,7 +246,7 @@ class RunStage05FormalTests(unittest.TestCase):
                 (config_dir / 'checkpoints' / 'stage0_5_supervised_best_loss.pth').read_text(encoding='utf-8'),
             )
 
-    def test_publish_stage05_canonical_checkpoints_skips_non_primary_protocol_arm(self):
+    def test_publish_stage05_canonical_checkpoints_skips_non_frozen_primary_protocol_arm(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             source_dir = tmpdir / 'source'
@@ -290,13 +292,92 @@ class RunStage05FormalTests(unittest.TestCase):
                 payload,
                 config_dir=config_dir,
                 protocol_arm=non_primary_arm,
+                primary_protocol_arm=stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM,
             )
 
             self.assertEqual([], published)
             self.assertFalse((config_dir / 'checkpoints' / 'stage0_5_latest.pth').exists())
             self.assertFalse((config_dir / 'checkpoints' / 'stage0_5_supervised.pth').exists())
 
+    def test_publish_stage05_canonical_checkpoints_uses_frozen_primary_protocol_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            source_dir = tmpdir / 'source'
+            config_dir = tmpdir / 'config'
+            source_dir.mkdir()
+            config_dir.mkdir()
+
+            latest = source_dir / 'latest.pth'
+            best_loss = source_dir / 'best_loss.pth'
+            best_acc = source_dir / 'best_acc.pth'
+            best_rank = source_dir / 'best_rank.pth'
+            latest.write_text('latest', encoding='utf-8')
+            best_loss.write_text('best_loss', encoding='utf-8')
+            best_acc.write_text('best_acc', encoding='utf-8')
+            best_rank.write_text('best_rank', encoding='utf-8')
+
+            base_cfg = {
+                'supervised': {
+                    'state_file': './checkpoints/stage0_5_latest.pth',
+                    'best_state_file': './checkpoints/stage0_5_supervised.pth',
+                    'best_loss_state_file': './checkpoints/stage0_5_supervised.pth',
+                    'best_acc_state_file': './checkpoints/stage0_5_supervised_best_acc.pth',
+                    'best_rank_state_file': './checkpoints/stage0_5_supervised_best_rank.pth',
+                },
+            }
+            payload = {
+                'winner': 'best_acc',
+                'candidates': {
+                    'latest': {'path': str(latest)},
+                    'best_loss': {'path': str(best_loss)},
+                    'best_acc': {'path': str(best_acc)},
+                    'best_rank': {'path': str(best_rank)},
+                },
+            }
+            frozen_primary_arm = next(
+                arm_name
+                for arm_name in stage05_formal.PROTOCOL_ARM_MAP
+                if arm_name != stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM
+            )
+
+            published = stage05_formal.publish_stage05_canonical_checkpoints(
+                base_cfg,
+                payload,
+                config_dir=config_dir,
+                protocol_arm=frozen_primary_arm,
+                primary_protocol_arm=frozen_primary_arm,
+            )
+
+            self.assertEqual(4, len(published))
+            self.assertEqual(
+                'best_acc',
+                (config_dir / 'checkpoints' / 'stage0_5_latest.pth').read_text(encoding='utf-8'),
+            )
+            self.assertEqual(
+                'best_acc',
+                (config_dir / 'checkpoints' / 'stage0_5_supervised.pth').read_text(encoding='utf-8'),
+            )
+
     def test_finalize_formal_result_adds_metadata_and_published_outputs(self):
+        base_cfg = {
+            'supervised': {
+                'state_file': './checkpoints/stage0_5_latest.pth',
+                'best_state_file': './checkpoints/stage0_5_supervised.pth',
+                'best_loss_state_file': './checkpoints/stage0_5_supervised_best_loss.pth',
+                'best_acc_state_file': './checkpoints/stage0_5_supervised_best_acc.pth',
+                'best_rank_state_file': './checkpoints/stage0_5_supervised_best_rank.pth',
+            },
+            '1v3': {
+                'challenger': {
+                    'device': 'cuda:0',
+                    'state_file': './checkpoints/challenger.pth',
+                },
+                'champion': {
+                    'device': 'cuda:0',
+                    'state_file': './checkpoints/baseline.pth',
+                },
+            },
+        }
         result = {
             'winner': 'best_acc',
             'candidates': {
@@ -307,30 +388,213 @@ class RunStage05FormalTests(unittest.TestCase):
             },
         }
 
-        with patch.object(
-            stage05_formal,
-            'publish_stage05_canonical_checkpoints',
-            return_value=[{'source': 'src', 'destination': 'dst'}],
-        ) as publish_mock:
-            finalized = stage05_formal.finalize_formal_result(
-                {'supervised': {}},
-                result,
-                protocol_arm=stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM,
-            )
-
-        publish_mock.assert_called_once_with(
-            {'supervised': {}},
+        finalized = stage05_formal.finalize_formal_result(
+            base_cfg,
             result,
-            config_dir=None,
             protocol_arm=stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM,
+            config_path=Path('C:/virtual/mortal/config.toml'),
         )
+
         self.assertIs(result, finalized)
+        self.assertEqual('best_acc', finalized['offline_checkpoint_winner'])
+        self.assertEqual(
+            ['best_loss', 'best_acc', 'best_rank'],
+            finalized['shortlist_checkpoint_types'],
+        )
+        self.assertEqual(
+            ['best_loss', 'best_acc', 'best_rank'],
+            finalized['checkpoint_pack_types'],
+        )
+        self.assertTrue(finalized['latest_discarded'])
+        self.assertTrue(finalized['publish_pending'])
+        self.assertTrue(finalized['canonical_alias_sync_pending'])
+        self.assertEqual(
+            'C:\\virtual\\mortal\\config.toml',
+            finalized['config_snapshot']['config_path'],
+        )
+        self.assertEqual(
+            'C:\\virtual\\mortal\\checkpoints\\baseline.pth',
+            finalized['config_snapshot']['base_1v3_cfg']['champion']['state_file'],
+        )
+        self.assertEqual(
+            [
+                'C:\\virtual\\mortal\\checkpoints\\stage0_5_latest.pth',
+                'C:\\virtual\\mortal\\checkpoints\\stage0_5_supervised_best_acc.pth',
+                'C:\\virtual\\mortal\\checkpoints\\stage0_5_supervised_best_rank.pth',
+                'C:\\virtual\\mortal\\checkpoints\\stage0_5_supervised.pth',
+                'C:\\virtual\\mortal\\checkpoints\\stage0_5_supervised_best_loss.pth',
+            ],
+            finalized['pending_canonical_alias_targets'],
+        )
+        self.assertEqual(
+            {'best_loss', 'best_acc', 'best_rank'},
+            set(finalized['candidates']),
+        )
         self.assertEqual(stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM, finalized['selected_protocol_arm'])
         self.assertEqual(
             list(stage05_formal.CURRENT_STAGE1_TOP_PROTOCOL_ARMS),
             finalized['current_stage1_top_protocol_arms'],
         )
-        self.assertEqual([{'source': 'src', 'destination': 'dst'}], finalized['published_canonical_checkpoints'])
+
+    def test_build_formal_shortlist_candidates_requires_three_formal_checkpoints(self):
+        with self.assertRaisesRegex(RuntimeError, 'missing required checkpoint types'):
+            stage05_formal.build_formal_shortlist_candidates(
+                {
+                    'candidates': {
+                        'best_loss': {'path': 'C:/virtual/source/best_loss.pth'},
+                        'best_acc': {'path': 'C:/virtual/source/best_acc.pth'},
+                    }
+                }
+            )
+
+    def test_ensure_stage1_canonical_handoff_ready_blocks_pending_formal_1v3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
+            alias_path.parent.mkdir(parents=True, exist_ok=True)
+            fidelity_root = tmpdir / 'logs' / 'stage05_fidelity'
+            run_dir = fidelity_root / 'demo_run'
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state = {
+                'formal': {
+                    'status': 'completed',
+                    'result': {
+                        'pending_canonical_alias_targets': [str(alias_path)],
+                    },
+                },
+                'final_conclusion': {
+                    'formal_status': 'pending_1v3',
+                    'formal_1v3_status': 'pending',
+                },
+            }
+            (run_dir / 'state.json').write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding='utf-8',
+            )
+
+            with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
+                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
+                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+
+    def test_ensure_stage1_canonical_handoff_ready_blocks_failed_formal_1v3_before_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
+            alias_path.parent.mkdir(parents=True, exist_ok=True)
+            fidelity_root = tmpdir / 'logs' / 'stage05_fidelity'
+            run_dir = fidelity_root / 'demo_run'
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state = {
+                'formal': {
+                    'status': 'completed',
+                    'result': {
+                        'pending_canonical_alias_targets': [str(alias_path)],
+                    },
+                },
+                'final_conclusion': {
+                    'formal_status': 'pending_1v3',
+                    'formal_1v3_status': 'failed',
+                },
+            }
+            (run_dir / 'state.json').write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding='utf-8',
+            )
+
+            with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
+                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
+                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+
+    def test_ensure_stage1_canonical_handoff_ready_blocks_completed_formal_1v3_without_publish_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
+            alias_path.parent.mkdir(parents=True, exist_ok=True)
+            fidelity_root = tmpdir / 'logs' / 'stage05_fidelity'
+            run_dir = fidelity_root / 'demo_run'
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state = {
+                'formal': {
+                    'status': 'completed',
+                    'result': {
+                        'pending_canonical_alias_targets': [str(alias_path)],
+                    },
+                },
+                'formal_1v3': {
+                    'published_canonical_checkpoints': [],
+                },
+                'final_conclusion': {
+                    'formal_status': 'completed',
+                    'formal_1v3_status': 'completed',
+                },
+            }
+            (run_dir / 'state.json').write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding='utf-8',
+            )
+
+            with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
+                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
+                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+
+    def test_ensure_stage1_canonical_handoff_ready_ignores_older_pending_after_newer_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
+            alias_path.parent.mkdir(parents=True, exist_ok=True)
+            fidelity_root = tmpdir / 'logs' / 'stage05_fidelity'
+            old_run_dir = fidelity_root / 'old_pending_run'
+            new_run_dir = fidelity_root / 'new_completed_run'
+            old_run_dir.mkdir(parents=True, exist_ok=True)
+            new_run_dir.mkdir(parents=True, exist_ok=True)
+            old_state_path = old_run_dir / 'state.json'
+            new_state_path = new_run_dir / 'state.json'
+            old_state_path.write_text(
+                json.dumps(
+                    {
+                        'formal': {
+                            'status': 'completed',
+                            'result': {
+                                'pending_canonical_alias_targets': [str(alias_path)],
+                            },
+                        },
+                        'final_conclusion': {
+                            'formal_status': 'pending_1v3',
+                            'formal_1v3_status': 'pending',
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding='utf-8',
+            )
+            new_state_path.write_text(
+                json.dumps(
+                    {
+                        'formal': {
+                            'status': 'completed',
+                            'result': {
+                                'pending_canonical_alias_targets': [str(alias_path)],
+                            },
+                        },
+                        'final_conclusion': {
+                            'formal_status': 'completed',
+                            'formal_1v3_status': 'completed',
+                        },
+                        'formal_1v3': {
+                            'published_canonical_checkpoints': [
+                                {'destination': str(alias_path), 'source': str(tmpdir / 'winner.pth')},
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding='utf-8',
+            )
+            os.utime(old_state_path, (1, 1))
+            os.utime(new_state_path, (2, 2))
+
+            with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
+                stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
 
 
 if __name__ == '__main__':

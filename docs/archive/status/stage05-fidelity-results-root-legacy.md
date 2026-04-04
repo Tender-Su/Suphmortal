@@ -1,7 +1,9 @@
 # Stage 0.5 保真版 A/B 实时结果
 
 > Historical snapshot only. This file was generated before the `2026-03-28` P1 redesign.
-> Current default P1 structure is `calibration -> protocol_decide -> winner_refine -> ablation`.
+> Current default P1 structure is `calibration -> protocol_decide -> winner_refine`; `ablation` is `backlog / manual only`.
+> Historical note: the old `P2` checkpoint-selection layer shown below has also been removed from the current mainline.
+> Current `formal` no longer reads any `P2` output.
 > Do not use the old `p1_solo / pairwise / joint_refine` layout in this snapshot as the current default.
 
 - 运行目录：`C:\Users\numbe\Desktop\MahjongAI\logs\stage05_fidelity\s05_fidelity_main`

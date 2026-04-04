@@ -216,6 +216,10 @@ def loader_uses_oracle(*, training, use_oracle, validation_use_oracle):
 
 
 def ensure_init_state_file_exists(init_state_file, *, cfg_prefix):
+    if init_state_file and cfg_prefix == 'stage1':
+        import run_stage05_formal as stage05_formal
+
+        stage05_formal.ensure_stage1_canonical_handoff_ready(init_state_file)
     if init_state_file and not path.exists(init_state_file):
         raise FileNotFoundError(f'{cfg_prefix}.init_state_file does not exist: {init_state_file}')
 

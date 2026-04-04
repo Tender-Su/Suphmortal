@@ -78,6 +78,7 @@ pub struct BoardState {
     check_four_kan: bool,
     paos: [Option<u8>; 4],
 
+    record_log: bool,
     log: Vec<EventExt>,
 
     // For oracle_obs only
@@ -122,7 +123,7 @@ impl Board {
         assert_eq!(idx, seq.len());
     }
 
-    pub fn into_state(self) -> BoardState {
+    pub fn into_state(self, record_log: bool) -> BoardState {
         let oya = self.kyoku % 4;
         let dora_indicators_full = self.dora_indicators.clone();
 
@@ -130,6 +131,7 @@ impl Board {
             board: self,
             oya,
             player_states: array::from_fn(|i| PlayerState::new(i as u8)),
+            record_log,
             dora_indicators_full,
             ..Default::default()
         }
@@ -183,17 +185,25 @@ impl BoardState {
 
     #[inline]
     pub fn take_log(&mut self) -> Vec<EventExt> {
-        mem::take(&mut self.log)
+        if self.record_log {
+            mem::take(&mut self.log)
+        } else {
+            vec![]
+        }
     }
 
     #[inline]
-    fn add_log(&mut self, ev: EventExt) {
-        self.log.push(ev);
+    fn add_log(&mut self, ev: &EventExt) {
+        if self.record_log {
+            self.log.push(ev.clone());
+        }
     }
 
     #[inline]
     fn add_log_no_meta(&mut self, ev: Event) {
-        self.log.push(EventExt::no_meta(ev));
+        if self.record_log {
+            self.log.push(EventExt::no_meta(ev));
+        }
     }
 
     #[inline]
@@ -590,7 +600,7 @@ impl BoardState {
                 }
 
                 self.broadcast(&ev.event);
-                self.add_log(ev.clone());
+                self.add_log(ev);
                 self.tsumo_actor = (actor + 1) % 4;
 
                 // 四風連打
@@ -608,7 +618,7 @@ impl BoardState {
             Event::Chi { .. } | Event::Pon { .. } => {
                 self.check_riichi_accepted();
                 self.broadcast(&ev.event);
-                self.add_log(ev.clone());
+                self.add_log(ev);
             }
 
             Event::Ankan { actor, .. } => {
@@ -618,7 +628,7 @@ impl BoardState {
                 }
 
                 self.broadcast(&ev.event);
-                self.add_log(ev.clone());
+                self.add_log(ev);
 
                 // Immediately add new dora
                 self.add_new_dora()?;
@@ -638,7 +648,7 @@ impl BoardState {
                 self.check_riichi_accepted();
 
                 self.broadcast(&ev.event);
-                self.add_log(ev.clone());
+                self.add_log(ev);
 
                 self.need_new_dora_at_discard = Some(());
 
@@ -649,7 +659,7 @@ impl BoardState {
 
             Event::Reach { actor } => {
                 self.broadcast(&ev.event);
-                self.add_log(ev.clone());
+                self.add_log(ev);
                 self.riichi_to_be_accepted = Some(actor);
             }
 
