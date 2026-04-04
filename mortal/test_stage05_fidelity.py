@@ -52,6 +52,10 @@ def make_ranking_entry(
 
 def make_current_p1_search_space(**overrides):
     payload = {
+        'p1_mainline_stages': list(fidelity.P1_MAINLINE_STAGES),
+        'p1_backlog_stages': list(fidelity.P1_BACKLOG_STAGES),
+        'p1_ablation_policy': fidelity.P1_ABLATION_POLICY,
+        'p1_ablation_note': fidelity.P1_ABLATION_NOTE,
         'calibration_protocol_arms': list(fidelity.P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS),
         'protocol_decide_coordinate_mode': fidelity.P1_PROTOCOL_DECIDE_COORDINATE_MODE,
         'protocol_decide_total_budget_ratios': list(fidelity.P1_PROTOCOL_DECIDE_TOTAL_BUDGET_RATIOS),
@@ -891,7 +895,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             [candidate.arm_name for candidate in rebuilt],
         )
 
-    def test_run_p1_fails_when_ablation_has_no_valid_candidates(self):
+    def test_run_p1_uses_winner_refine_as_mainline_final_compare(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
             protocol_arm = 'C_A2x_cosine_broad_to_recent_strong_24m_12m'
@@ -992,41 +996,34 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                                 ),
                             ],
                         },
-                        {
-                            'round_name': 'p1_ablation_round',
-                            'ranking': [
-                                make_ranking_entry(
-                                    make_candidate(
-                                        'bad_ablation',
-                                        meta={
-                                            'protocol_arm': protocol_arm,
-                                            'aux_family': 'drop_rank',
-                                        },
-                                    ),
-                                    valid=False,
-                                    full_recent_loss=0.89,
-                                ),
-                            ],
-                        },
                     ],
-                ),
+                ) as execute_round_multiseed,
                 patch.object(
                     fidelity,
                     'winner_refine_center_selection_from_search_space',
                     return_value={'keep': None, 'explicit_arm_names': (refine_winner.arm_name,)},
                 ),
+                patch.object(fidelity, 'build_p1_ablation_candidates') as build_p1_ablation_candidates,
             ):
-                with self.assertRaisesRegex(RuntimeError, 'p1_ablation_round produced no valid candidates'):
-                    fidelity.run_p1(
-                        run_dir,
-                        {'control': {'version': 4}},
-                        {'202501': ['dummy.json.gz']},
-                        123,
-                        [protocol],
-                        state,
-                    )
+                winner, finalists = fidelity.run_p1(
+                    run_dir,
+                    {'control': {'version': 4}},
+                    {'202501': ['dummy.json.gz']},
+                    123,
+                    [protocol],
+                    state,
+                )
 
+        self.assertEqual(refine_winner.arm_name, winner.arm_name)
+        self.assertEqual([refine_winner.arm_name], [candidate.arm_name for candidate in finalists])
         self.assertEqual('p1_final_compare', state['p1']['final_compare']['round_name'])
+        self.assertEqual(refine_winner.arm_name, state['p1']['winner'])
+        self.assertEqual('winner_refine_mainline', state['p1']['winner_source'])
+        self.assertEqual(refine_winner.arm_name, state['final_conclusion']['p1_winner'])
+        self.assertEqual('winner_refine_mainline', state['final_conclusion']['p1_winner_source'])
+        self.assertEqual(fidelity.P1_ABLATION_POLICY, state['final_conclusion']['p1_ablation_policy'])
+        self.assertEqual(2, execute_round_multiseed.call_count)
+        build_p1_ablation_candidates.assert_not_called()
 
     def test_build_p0_candidates_can_filter_to_cosine_only(self):
         candidates = fidelity.build_p0_candidates(scheduler_profiles={'cosine'})
@@ -2300,15 +2297,6 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             full_recent_loss=0.621,
             full_recent_metrics={'policy_loss': 0.501},
         )
-        ablation_entry = make_ranking_entry(
-            make_candidate(
-                'proto_arm__ablation',
-                meta={'stage': 'P1_ablation_round', 'protocol_arm': 'proto_arm', 'aux_family': 'all_three'},
-            ),
-            full_recent_loss=0.622,
-            full_recent_metrics={'policy_loss': 0.502},
-        )
-
         progressive_calls = []
         multiseed_calls = []
         rank_calls = []
@@ -2326,9 +2314,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             )
             if kwargs['round_name'] == 'p1_calibration':
                 return {'ranking': []}
-            if kwargs['round_name'] == 'p1_winner_refine_round':
-                return {'ranking': [refine_entry]}
-            return {'ranking': [ablation_entry]}
+            return {'ranking': [refine_entry]}
 
         def tracking_rank_round_entries(entries, weights=None, **kwargs):
             rank_calls.append(kwargs)
@@ -2370,7 +2356,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             ('p1_winner_refine_round', 'policy_quality', 'protocol_arm'),
             multiseed_calls,
         )
-        self.assertIn(
+        self.assertNotIn(
             ('p1_ablation_round', 'policy_quality', 'protocol_arm'),
             multiseed_calls,
         )

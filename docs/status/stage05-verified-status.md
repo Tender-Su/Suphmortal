@@ -4,18 +4,18 @@
 
 ## 当前结论
 
-- 核对日期：`2026-04-03`
-- 当前主线阶段：`P1 protocol_decide` 已完成
+- 核对日期：`2026-04-04`
+- 当前主线阶段：`P1 winner_refine` 进行中
 - 当前活跃主线 run：
   - `logs/stage05_fidelity/s05_fidelity_p1_top3_cali_slim_20260329_001413/`
 - 当前状态字段：
-  - `stopped_after_p1_protocol_decide`
+  - `running_p1_winner_refine`
 - 当前已验证协议 winner：
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
 - 当前已验证 winner 点位：
   - `0.12 + A2x`
 - 当前下一步只应进入：
-  - `A2x winner_refine`
+  - `完成 A2x winner_refine`
 
 ## 当前主线已经确认的事实
 
@@ -28,7 +28,10 @@
   - `opp = HYBRID_GRAD`
   - `danger = 18K_STAT`
 - `P1` 当前唯一主线结构：
-  - `calibration -> protocol_decide -> winner_refine -> ablation`
+  - `calibration -> protocol_decide -> winner_refine`
+- `P1 ablation` 当前定位：
+  - `backlog / manual only`
+  - 不作为 downstream 默认 gate
 - `P1` 当前唯一有效选模口径：
   - `docs/status/p1-selection-canonical.md`
 
@@ -66,10 +69,13 @@
 - 它不改变当前主线 winner
 - 它不恢复 `seed2`
 
-## 当前停点
+## 当前 winner_refine 状态
 
-- 当前停在主线 `protocol_decide` 收口点
-- 不自动进入 `winner_refine`
+- `2026-04-04` 已确认：
+  - `seed1 = 36 / 36 completed`
+  - `seed2 = 6 completed / 2 running / 4 pending`
+- 当前仍只在 `A2x` 内部继续
 - 不恢复 `0.18` probe 的 `seed2`
 - 不复用任何旧预算口径留下的 `winner_refine` 残留
-- 用户确认方向后，只在 `A2x` 内部继续下一阶段
+- `winner_refine` 收口后，默认直接把 front runner 当作当前 `P1 winner`
+- `ablation` 仅在需要额外边际贡献确认时，作为 backlog 手动补跑

@@ -6,6 +6,23 @@ from torch.distributions import Normal, Categorical
 from libriichi.consts import oracle_obs_shape
 from typing import *
 
+
+def coerce_batch_inputs(obs, masks, invisible_obs):
+    obs = np.ascontiguousarray(
+        obs if isinstance(obs, np.ndarray) else np.stack(obs, axis=0),
+        dtype=np.float32,
+    )
+    masks = np.ascontiguousarray(
+        masks if isinstance(masks, np.ndarray) else np.stack(masks, axis=0),
+        dtype=np.bool_,
+    )
+    if invisible_obs is not None:
+        invisible_obs = np.ascontiguousarray(
+            invisible_obs if isinstance(invisible_obs, np.ndarray) else np.stack(invisible_obs, axis=0),
+            dtype=np.float32,
+        )
+    return obs, masks, invisible_obs
+
 class MortalEngine:
     def __init__(
         self,
@@ -18,6 +35,7 @@ class MortalEngine:
         enable_amp = False,
         enable_quick_eval = True,
         enable_rule_based_agari_guard = False,
+        enable_metadata = True,
         name = 'NoName',
         explore_rate = 0,
     ):
@@ -33,6 +51,7 @@ class MortalEngine:
         self.enable_amp = enable_amp
         self.enable_quick_eval = enable_quick_eval
         self.enable_rule_based_agari_guard = enable_rule_based_agari_guard
+        self.enable_metadata = enable_metadata
         self.name = name
         self.explore_rate = explore_rate
 
@@ -46,11 +65,27 @@ class MortalEngine:
         except Exception as ex:
             raise Exception(f'{ex}\n{traceback.format_exc()}')
 
+    def react_batch_action_only(self, obs, masks, invisible_obs):
+        try:
+            with (
+                torch.autocast(self.device.type, enabled=self.enable_amp),
+                torch.inference_mode(),
+            ):
+                actions, alt_actions, _, _, _ = self._react_batch_impl(obs, masks, invisible_obs)
+                return actions.tolist(), alt_actions.tolist()
+        except Exception as ex:
+            raise Exception(f'{ex}\n{traceback.format_exc()}')
+
     def _react_batch(self, obs, masks, invisible_obs):
-        obs = torch.as_tensor(np.stack(obs, axis=0), device=self.device)
-        masks = torch.as_tensor(np.stack(masks, axis=0), device=self.device)
+        actions, _, q_out, masks, is_greedy = self._react_batch_impl(obs, masks, invisible_obs)
+        return actions.tolist(), q_out.tolist(), masks.tolist(), is_greedy.tolist()
+
+    def _react_batch_impl(self, obs, masks, invisible_obs):
+        obs, masks, invisible_obs = coerce_batch_inputs(obs, masks, invisible_obs)
+        obs = torch.as_tensor(obs, device=self.device)
+        masks = torch.as_tensor(masks, device=self.device)
         if invisible_obs is not None:
-            invisible_obs = torch.as_tensor(np.stack(invisible_obs, axis=0), device=self.device)
+            invisible_obs = torch.as_tensor(invisible_obs, device=self.device)
         batch_size = obs.shape[0]
 
         match self.version:
@@ -83,7 +118,11 @@ class MortalEngine:
             is_greedy = torch.ones(batch_size, dtype=torch.bool, device=self.device)
             actions = q_out.argmax(-1)
 
-        return actions.tolist(), q_out.tolist(), masks.tolist(), is_greedy.tolist()
+        q_out_alt = q_out.clone()
+        q_out_alt[:, 43] = float('-inf')
+        alt_actions = q_out_alt.argmax(-1)
+
+        return actions, alt_actions, q_out, masks, is_greedy
 
 class ExampleMjaiLogEngine:
     def __init__(self, name: str):

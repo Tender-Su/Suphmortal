@@ -645,6 +645,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertEqual('completed', state['status'])
         self.assertEqual('refine_winner', state['final_conclusion']['p1_refine_front_runner'])
         self.assertEqual('final_winner', state['final_conclusion']['p1_winner'])
+        self.assertEqual('ablation_backlog', state['final_conclusion']['p1_winner_source'])
 
     def test_run_p1_only_continue_mode_reuses_existing_run_configuration(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -828,6 +829,8 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertEqual('full', state['p1']['search_space']['calibration_mode'])
         self.assertEqual([resumed_calibration_arm], state['p1']['search_space']['calibration_protocol_arms'])
         self.assertEqual('resume_refine_winner', state['final_conclusion']['p1_refine_front_runner'])
+        self.assertEqual('resume_refine_winner', state['final_conclusion']['p1_winner'])
+        self.assertEqual('winner_refine_mainline', state['final_conclusion']['p1_winner_source'])
         build_eval_splits.assert_called_once_with(
             {'202501': ['dummy.json.gz']},
             resumed_seed + 55,
@@ -982,6 +985,8 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertEqual(p1_only.fidelity.P1_WINNER_REFINE_CENTER_KEEP, state['p1']['search_space']['winner_refine_center_keep'])
         self.assertEqual(4, state['p1']['search_space']['budget_ratio_digits'])
         self.assertEqual(5, state['p1']['search_space']['aux_weight_digits'])
+        self.assertEqual(refine_winner.arm_name, state['final_conclusion']['p1_winner'])
+        self.assertEqual('winner_refine_mainline', state['final_conclusion']['p1_winner_source'])
         self.assertEqual(
             (),
             select_protocol_centers.call_args.kwargs['explicit_arm_names'],
@@ -1309,6 +1314,7 @@ class Stage05P1OnlyTests(unittest.TestCase):
         self.assertEqual('completed', state['status'])
         self.assertEqual(refine_winner.arm_name, state['final_conclusion']['p1_refine_front_runner'])
         self.assertEqual(final_winner.arm_name, state['final_conclusion']['p1_winner'])
+        self.assertEqual('ablation_backlog', state['final_conclusion']['p1_winner_source'])
         execute_round_progressive_multiseed.assert_not_called()
         select_protocol_centers.assert_not_called()
         build_p1_ablation_candidates.assert_called_once()

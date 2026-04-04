@@ -2,7 +2,8 @@
 
 > Historical note: this document records the pre-`2026-03-28` auxiliary search redesign.
 > Mentions of `P1 solo`, `pairwise`, and `solo -> pairwise` propagation are preserved as history only.
-> Current default P1 mainline is `calibration -> protocol_decide -> winner_refine -> ablation`.
+> Current default P1 mainline is `calibration -> protocol_decide -> winner_refine`.
+> `P1 ablation` remains available only as a manual backlog confirmation path.
 
 ## Scope
 

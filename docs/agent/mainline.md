@@ -52,7 +52,10 @@
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
   - `C_A1x_cosine_broad_to_recent_mild_24m_12m`
 - `P1` 当前唯一主线：
-  - `calibration -> protocol_decide -> winner_refine -> ablation`
+  - `calibration -> protocol_decide -> winner_refine`
+- `P1 ablation` 当前定位：
+  - `backlog / manual only`
+  - 不作为 downstream 默认 gate
 - 当前 downstream 协议 winner：
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
 - 当前人工确认的 winner 点位：
@@ -116,6 +119,9 @@
 - 如果让笔记本参与，推荐入口：
   - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
 - 这条入口只改变调度方式，不改变候选空间和最终 winner 解释口径
+- 当前默认解释：
+  - `winner_refine` front runner 直接作为 `P1 winner`
+  - `ablation` 只保留为手动 backlog 验证
 
 ## 下游原则
 

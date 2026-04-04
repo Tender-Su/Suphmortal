@@ -10,7 +10,8 @@
 - `p1_winner_refine_round`
 - `p1_ablation_round`
 
-历史 `p1_solo_round / p1_pairwise_round / p1_joint_refine_round` 仍可作诊断证据，但已经不是当前主线结构。
+历史 `p1_solo_round / p1_pairwise_round / p1_joint_refine_round` 仍可作诊断证据，但已经不是当前主线结构。  
+`p1_ablation_round` 仍使用这套口径，但它现在是 `backlog / manual only`，不是默认主线阶段。
 
 ## 排名核心
 
@@ -44,6 +45,7 @@
   - 负责只在 winner 协议内部细调三头全开配比
 - `p1_ablation_round`
   - 负责比较 `all_three / drop_* / ce_only` 的边际贡献
+  - 当前只作为手动 backlog 诊断，不再阻塞 downstream
 
 ## 当前 protocol_decide 默认
 
@@ -88,14 +90,15 @@
 - `ce_only` 是主线里的诊断锚点
 - 它不再是旧 `family survivor` 逻辑里的强制 gate
 - 如果 `all_three` 稳定输给 `ce_only`，应解释为当前三头配比失败
-- 只有 `all_three` 稳定赢过 `drop_*` 和 `ce_only`，才说明当前三头全开成立
+- 当前默认主线不会要求先跑 `ablation` 才继续 downstream
+- 只有在手动执行 backlog `ablation` 时，才用 `all_three / drop_* / ce_only` 去补做边际贡献确认
 
 ## calibration 输出如何被读取
 
 - `protocol_decide / winner_refine` 默认读取 `triple_combo_factor`
-- `drop_rank` 读取 `opp_danger_combo_factor`
-- `drop_opp` 读取 `rank_danger_combo_factor`
-- `drop_danger` 读取 `rank_opp_combo_factor`
+- `drop_rank` 在手动 backlog `ablation` 中读取 `opp_danger_combo_factor`
+- `drop_opp` 在手动 backlog `ablation` 中读取 `rank_danger_combo_factor`
+- `drop_danger` 在手动 backlog `ablation` 中读取 `rank_opp_combo_factor`
 - 历史 `joint_combo_factor` 只作为 `opp_danger_combo_factor` 的兼容 alias
 
 ## 不该怎么用

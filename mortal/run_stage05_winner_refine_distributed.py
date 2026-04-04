@@ -334,13 +334,23 @@ def update_run_state_for_dispatch(
             p1_state['winner_refine_centers'] = list(dispatch_state['winner_refine_centers'])
         if final_round is not None:
             p1_state['winner_refine_round'] = final_round
+            p1_state['final_compare'] = {
+                'round_name': 'p1_final_compare',
+                'ranking': list(final_round.get('ranking', [])),
+            }
         if front_runner:
             p1_state['winner_refine_front_runner'] = front_runner
+            p1_state['winner'] = front_runner
+            p1_state['winner_source'] = 'winner_refine_mainline'
+            p1_state['ablation_policy'] = fidelity.P1_ABLATION_POLICY
             final_conclusion['p1_refine_front_runner'] = front_runner
+            final_conclusion['p1_winner'] = front_runner
+            final_conclusion['p1_winner_source'] = 'winner_refine_mainline'
+            final_conclusion['p1_ablation_policy'] = fidelity.P1_ABLATION_POLICY
         if status_override:
             state['status'] = status_override
         elif final_round is not None:
-            if not state.get('final_conclusion', {}).get('p1_winner'):
+            if state.get('status') != 'completed':
                 state['status'] = 'stopped_after_p1_winner_refine'
         else:
             state['status'] = 'running_p1_winner_refine'
@@ -354,7 +364,11 @@ def update_run_state_for_dispatch(
             }
         if front_runner:
             p1_state['winner'] = front_runner
+            p1_state['winner_source'] = 'ablation_backlog'
+            p1_state['ablation_policy'] = fidelity.P1_ABLATION_POLICY
             final_conclusion['p1_winner'] = front_runner
+            final_conclusion['p1_winner_source'] = 'ablation_backlog'
+            final_conclusion['p1_ablation_policy'] = fidelity.P1_ABLATION_POLICY
         if status_override:
             state['status'] = status_override
         elif final_round is not None:
@@ -1817,6 +1831,7 @@ def maybe_finalize_dispatch(
     )
     dispatch_state['final_round_summary_path'] = str(context['run_dir'] / 'p1_winner_refine_round.json')
     dispatch_state['final_front_runner'] = front_runner
+    dispatch_state['final_p1_winner'] = front_runner
     write_dispatch_state(dispatch_state_path, dispatch_state)
     update_run_state_for_dispatch(
         run_dir=context['run_dir'],
@@ -2571,6 +2586,7 @@ def print_status(args: argparse.Namespace) -> int:
     elif round_kind == ROUND_KIND_WINNER_REFINE:
         payload['seed2_selector'] = dispatch_state.get('seed2_selector')
         payload['final_front_runner'] = dispatch_state.get('final_front_runner')
+        payload['final_p1_winner'] = dispatch_state.get('final_p1_winner') or dispatch_state.get('final_front_runner')
     else:
         payload['final_p1_winner'] = dispatch_state.get('final_p1_winner') or dispatch_state.get('final_front_runner')
     print(json.dumps(fidelity.normalize_payload(payload), ensure_ascii=False, indent=2))
@@ -2626,7 +2642,7 @@ def parse_args() -> argparse.Namespace:
 
     dispatch = subparsers.add_parser(
         'dispatch',
-        help='Run distributed P1 protocol_decide, winner_refine, or ablation with a local worker and an optional SSH remote worker.',
+        help='Run distributed P1 protocol_decide or winner_refine on the mainline, or manual backlog ablation, with a local worker and an optional SSH remote worker.',
     )
     dispatch.add_argument('--round-kind', choices=ROUND_KIND_CHOICES, default=ROUND_KIND_WINNER_REFINE)
     dispatch.add_argument('--run-name', required=True)

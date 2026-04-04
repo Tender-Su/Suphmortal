@@ -9,7 +9,10 @@ run_stage05_p1_pairwise_only.py is deprecated.
 The 2026-03-28 P1 redesign replaced the old:
   calibration -> solo -> pairwise -> joint_refine
 flow with:
-  calibration -> protocol_decide -> winner_refine -> ablation
+  calibration -> protocol_decide -> winner_refine
+
+`ablation` is now a manual backlog-only confirmation path, not part of the
+default P1 mainline.
 
 Use run_stage05_p1_only.py instead:
   python run_stage05_p1_only.py --run-name <name>

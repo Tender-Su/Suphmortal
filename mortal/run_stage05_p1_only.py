@@ -764,7 +764,17 @@ def run_p1_only(
                     raise RuntimeError('p1_winner_refine_round produced no valid candidates')
                 refine_winner = fidelity.candidate_from_entry(winner_refine_valid[0])
                 p1_state['winner_refine_front_runner'] = refine_winner.arm_name
+                p1_state['final_compare'] = {
+                    'round_name': 'p1_final_compare',
+                    'ranking': list(winner_refine_round['ranking']),
+                }
+                p1_state['winner'] = refine_winner.arm_name
+                p1_state['winner_source'] = 'winner_refine_mainline'
+                p1_state['ablation_policy'] = fidelity.P1_ABLATION_POLICY
                 state['final_conclusion']['p1_refine_front_runner'] = refine_winner.arm_name
+                state['final_conclusion']['p1_winner'] = refine_winner.arm_name
+                state['final_conclusion']['p1_winner_source'] = 'winner_refine_mainline'
+                state['final_conclusion']['p1_ablation_policy'] = fidelity.P1_ABLATION_POLICY
                 fidelity.atomic_write_json(state_path, state)
                 fidelity.update_results_doc(run_dir, state)
                 if not continue_to_ablation:
@@ -819,7 +829,11 @@ def run_p1_only(
                         raise RuntimeError('p1_ablation_round produced no valid candidates')
                     final_winner = fidelity.candidate_from_entry(final_valid[0])
                     p1_state['winner'] = final_winner.arm_name
+                    p1_state['winner_source'] = 'ablation_backlog'
+                    p1_state['ablation_policy'] = fidelity.P1_ABLATION_POLICY
                     state['final_conclusion']['p1_winner'] = final_winner.arm_name
+                    state['final_conclusion']['p1_winner_source'] = 'ablation_backlog'
+                    state['final_conclusion']['p1_ablation_policy'] = fidelity.P1_ABLATION_POLICY
                     state['status'] = 'completed'
     except Exception as exc:
         if state is None:
@@ -882,7 +896,7 @@ def main() -> None:
     parser.add_argument(
         '--continue-to-ablation',
         action='store_true',
-        help='After winner_refine, continue into leave-one-head ablation compare.',
+        help='After winner_refine, continue into manual backlog leave-one-head ablation compare.',
     )
     parser.add_argument('--list-default-protocols', action='store_true')
     args = parser.parse_args()

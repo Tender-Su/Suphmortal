@@ -179,6 +179,7 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 
 ## Project Conventions (Non-obvious)
 
+- **Shell working directory discipline**: do not trust the initial PowerShell cwd, and do not assume tool-level `workdir` always takes effect for relative paths. For shell commands, explicitly prefix `Set-Location 'C:\Users\numbe\Desktop\MahjongAI'` before repo-root operations, or `Set-Location 'C:\Users\numbe\Desktop\MahjongAI\mortal'` when intentionally matching the training entry points. This avoids accidental resolution against `C:\Users\numbe` and similar parent directories.
 - **Conda env name mismatch**: `environment.yml` says `mortal`, batch scripts activate `mahjong`. Be aware when writing scripts.
 - **PowerShell file writes**: never use `Set-Content`, `Out-File`, or `>` to write `*.toml` / config files from Windows PowerShell unless you explicitly force BOM-free UTF-8. Prefer `apply_patch` for edits, or Python `Path.write_text(..., encoding='utf-8', newline='\n')`. Runtime TOML loaders are BOM-tolerant, but writers should still emit BOM-free UTF-8.
 - **CPU affinity is now opt-in**: training entry points no longer default to `p_cores`. Leave `MORTAL_CPU_AFFINITY` unset for normal Windows scheduling, or set it explicitly to values such as `p_cores`, `all`, or a CPU list/mask when you really want pinning.

@@ -7,7 +7,8 @@
 ## 当前默认前提
 
 - 当前默认主线以 `docs/agent/current-plan.md`、`docs/status/stage05-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准
-- `P1` 当前结构固定为：`calibration -> protocol_decide -> winner_refine -> ablation`
+- `P1` 当前结构固定为：`calibration -> protocol_decide -> winner_refine`
+- `P1 ablation` 当前只保留为 `backlog / manual only`
 - 当前 `P0 top3` 事实顺序固定为 `A2y / A2x / A1x`
 - 当前 downstream 默认协议固定为 `A2x`
 

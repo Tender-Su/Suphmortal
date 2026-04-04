@@ -18,7 +18,10 @@
 - 当前代码主分支：`main`
 - 当前源码真源：台式机 `main` 工作树
 - 当前 `Stage 0.5 / P1` 唯一主线：
-  - `calibration -> protocol_decide -> winner_refine -> ablation`
+  - `calibration -> protocol_decide -> winner_refine`
+- `P1 ablation` 当前定位：
+  - `backlog / manual only`
+  - 不再阻塞 downstream `P2 / formal`
 - 当前已验证协议 winner：
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
 - 当前已验证 winner 点位：
@@ -28,14 +31,11 @@
 
 - 当前活跃主线 run：
   - `logs/stage05_fidelity/s05_fidelity_p1_top3_cali_slim_20260329_001413/`
-- 当前状态字段：
-  - `stopped_after_p1_protocol_decide`
-- 当前 `protocol_decide` 已收口：
-  - 双 seed 已完成
-  - 唯一失败臂已补跑成功
-  - 当前结果为 `27 / 27` 全部有效
-  - 协议 winner 仍然是 `A2x`
-  - winner 点位固定为 `0.12 + A2x`
+- `2026-04-04` 当前分布式状态：
+  - `winner_refine seed1 = 36 / 36 completed`
+  - `winner_refine seed2 = 6 completed / 2 running / 4 pending`
+  - 当前阶段是 `running_p1_winner_refine`
+  - 本轮只在 `A2x` 内部继续
 - `2026-04-02` 的 `A2x @ 0.18` 三臂 probe：
   - 只是 `seed1-only negative probe`
   - 不改当前主线
@@ -61,11 +61,13 @@
 3. 如果让笔记本参与，使用桌面机调度入口：
    - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name s05_fidelity_p1_top3_cali_slim_20260329_001413`
 4. 这个双机入口只改变调度方式，不改变 center、局部搜索点或最终 winner 解释口径
-5. `winner_refine` 跑完后再次停下，再决定是否进入 `ablation`
+5. `winner_refine` 跑完后，默认直接把 front runner 当作当前 `P1 winner` 进入 downstream
+6. `ablation` 不再属于默认主线；只有在需要确认边际贡献或评估删头时，才作为 backlog 手动启动
 
 ## 不要这样做
 
 - 不要把 `docs/status/stage05-fidelity-results.md` 当成当前默认入口
 - 不要把 `0.18` probe 重新当作当前主线，或恢复它的 `seed2`
 - 不要把旧 `solo / pairwise / joint refine` 结构重新当当前主线
+- 不要默认把 `ablation` 再插回 `P1` 主线
 - 不要在没有人工确认的情况下把多个阶段一键串到底

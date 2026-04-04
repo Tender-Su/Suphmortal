@@ -3,7 +3,8 @@
 > Historical context note: this document freezes the internal shapes only.
 > References to later `P1 solo / pairwise / joint refine` are historical wording from before the `2026-03-28` redesign.
 > The current mainline keeps these frozen shapes but now uses:
-> `calibration -> protocol_decide -> winner_refine -> ablation`.
+> `calibration -> protocol_decide -> winner_refine`.
+> `P1 ablation` is now a manual backlog confirmation path rather than a default mainline stage.
 
 ## Scope
 

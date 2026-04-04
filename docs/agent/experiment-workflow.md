@@ -29,15 +29,16 @@
    - 当前只允许在 `A2x` 内部继续
    - 当前 center 与局部搜索规则看 `docs/agent/mainline.md`
 5. `P1 ablation`
-   - 目标：验证 `all_three / drop_* / ce_only` 的边际贡献
-   - 必须等 `winner_refine` 结束并人工确认后再启动
+   - 当前不属于默认主线
+   - 目标仍然是验证 `all_three / drop_* / ce_only` 的边际贡献
+   - 只作为 `backlog / manual only` 保留
 
 ## 当前人工停点
 
 - 当前停在 `protocol_decide` 收口点
 - 不自动进入 `winner_refine`
 - `winner_refine` 跑完后再次停下
-- `ablation` 跑完后再决定是否写入更下游默认
+- 默认不再把 `ablation` 当成写入下游默认的前置条件
 
 ## winner_refine 当前推荐跑法
 
@@ -101,7 +102,7 @@ python mortal/run_stage05_winner_refine_distributed.py resume-worker `
 - 是否入围、谁是 winner、谁只是诊断信息，一律按 `docs/status/p1-selection-canonical.md`
 - `protocol_decide` 只回答“哪个协议继续往下走”
 - `winner_refine` 只回答“winner 协议下三头该怎么配”
-- `ablation` 只回答“三个头是否都还有边际贡献”
+- `ablation` 只回答“三个头是否都还有边际贡献”，而且当前只作 backlog 诊断
 
 ## 不再使用的旧流程
 

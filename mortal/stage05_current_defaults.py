@@ -88,3 +88,19 @@ CURRENT_P1_WINNER_REFINE_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
 CURRENT_P1_WINNER_REFINE_CENTER_MODE = 'top_ranked_keep'
 CURRENT_P1_WINNER_REFINE_CENTER_KEEP = 4
 CURRENT_P1_WINNER_REFINE_CENTER_ARMS = ()
+
+# Current P1 mainline now stops after winner_refine. Keep ablation available as
+# a manual backlog-only confirmation path, but do not let it gate downstream
+# Stage 0.5 progression.
+CURRENT_P1_MAINLINE_STAGES = (
+    'calibration',
+    'protocol_decide',
+    'winner_refine',
+)
+CURRENT_P1_BACKLOG_STAGES = ('ablation',)
+CURRENT_P1_ABLATION_POLICY = 'backlog_manual_only'
+CURRENT_P1_ABLATION_NOTE = (
+    'P1 ablation is no longer part of the default mainline; treat it as a '
+    'manual backlog check only when recipe simplification or marginal-gain '
+    'uncertainty needs confirmation.'
+)

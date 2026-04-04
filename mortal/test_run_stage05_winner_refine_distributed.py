@@ -594,7 +594,11 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             persisted = json.loads(state_path.read_text(encoding='utf-8'))
             self.assertEqual('stopped_after_p1_winner_refine', persisted['status'])
             self.assertEqual('arm_a', persisted['final_conclusion']['p1_refine_front_runner'])
+            self.assertEqual('arm_a', persisted['final_conclusion']['p1_winner'])
+            self.assertEqual('winner_refine_mainline', persisted['final_conclusion']['p1_winner_source'])
             self.assertEqual(final_round, persisted['p1']['winner_refine_round'])
+            self.assertEqual('p1_final_compare', persisted['p1']['final_compare']['round_name'])
+            self.assertEqual('arm_a', persisted['p1']['winner'])
             self.assertEqual(['center_a'], persisted['p1']['winner_refine_centers'])
 
     def test_update_run_state_for_dispatch_accepts_seed2_not_initialized_yet(self):
@@ -803,7 +807,9 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             self.assertEqual(final_round, persisted['p1']['ablation_round'])
             self.assertEqual('p1_final_compare', persisted['p1']['final_compare']['round_name'])
             self.assertEqual('all_three_winner', persisted['p1']['winner'])
+            self.assertEqual('ablation_backlog', persisted['p1']['winner_source'])
             self.assertEqual('all_three_winner', persisted['final_conclusion']['p1_winner'])
+            self.assertEqual('ablation_backlog', persisted['final_conclusion']['p1_winner_source'])
 
     def test_load_refine_context_recovers_seed_from_round_payload_when_top_level_seed_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

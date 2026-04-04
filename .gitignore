@@ -3,9 +3,7 @@
 *.py[cod]
 
 /checkpoints/
-/logs/**
-!/logs/
-!/logs/*.ps1
+/logs/
 /mortal/logs/
 /mortal/tb_log*/
 /mortal/tmp_*.toml

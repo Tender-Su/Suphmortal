@@ -106,6 +106,18 @@ P1_WINNER_REFINE_CENTER_ARM_NAMES = tuple(
 )
 P1_WINNER_REFINE_TOTAL_SCALE_FACTORS = [0.85, 1.0, 1.15]
 P1_WINNER_REFINE_TRANSFER_DELTA = 0.01
+P1_MAINLINE_STAGES = tuple(
+    getattr(stage05_defaults, 'CURRENT_P1_MAINLINE_STAGES', ('calibration', 'protocol_decide', 'winner_refine'))
+)
+P1_BACKLOG_STAGES = tuple(getattr(stage05_defaults, 'CURRENT_P1_BACKLOG_STAGES', ('ablation',)))
+P1_ABLATION_POLICY = str(getattr(stage05_defaults, 'CURRENT_P1_ABLATION_POLICY', 'backlog_manual_only'))
+P1_ABLATION_NOTE = str(
+    getattr(
+        stage05_defaults,
+        'CURRENT_P1_ABLATION_NOTE',
+        'P1 ablation is no longer part of the default mainline; treat it as a manual backlog check only.',
+    )
+)
 P1_ABLATION_STEP_SCALE = 1.5
 P1_ABLATION_SEED_OFFSETS = [0, 1009]
 P1_SOLO_PROBE_KEEP_PER_FAMILY = 2
@@ -230,12 +242,19 @@ def p1_selection_policy_metadata() -> dict[str, Any]:
             'p1_winner_refine_round',
             'p1_ablation_round',
         ],
+        'mainline_rounds': [
+            'p1_protocol_decide_round',
+            'p1_winner_refine_round',
+        ],
+        'backlog_rounds': ['p1_ablation_round'],
         'calibration_note': (
             'p1_calibration is a mapping step for single-head units plus pairwise/triple combo factors; it must not be used to declare family winners'
         ),
         'ce_only_anchor_note': (
             'ce_only is kept as a diagnostic anchor; mainline P1 no longer uses family survivors as the protocol gate'
         ),
+        'ablation_policy': P1_ABLATION_POLICY,
+        'ablation_note': P1_ABLATION_NOTE,
     }
 
 
@@ -4520,6 +4539,10 @@ def current_p1_winner_refine_center_arm_payload() -> list[str]:
 
 def current_p1_winner_refine_search_space_payload() -> dict[str, Any]:
     return {
+        'p1_mainline_stages': list(P1_MAINLINE_STAGES),
+        'p1_backlog_stages': list(P1_BACKLOG_STAGES),
+        'p1_ablation_policy': P1_ABLATION_POLICY,
+        'p1_ablation_note': P1_ABLATION_NOTE,
         'winner_refine_center_mode': P1_WINNER_REFINE_CENTER_MODE,
         'winner_refine_center_keep': P1_WINNER_REFINE_CENTER_KEEP,
         'winner_refine_center_arm_names': current_p1_winner_refine_center_arm_payload(),
@@ -4596,6 +4619,14 @@ def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
     search_space = p1.get('search_space') or {}
     if not search_space:
         return True
+    if list(search_space.get('p1_mainline_stages', list(P1_MAINLINE_STAGES))) != list(P1_MAINLINE_STAGES):
+        return False
+    if list(search_space.get('p1_backlog_stages', list(P1_BACKLOG_STAGES))) != list(P1_BACKLOG_STAGES):
+        return False
+    if str(search_space.get('p1_ablation_policy', P1_ABLATION_POLICY)) != str(P1_ABLATION_POLICY):
+        return False
+    if str(search_space.get('p1_ablation_note', P1_ABLATION_NOTE)) != str(P1_ABLATION_NOTE):
+        return False
     if list(search_space.get('calibration_protocol_arms', list(P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS))) != list(
         P1_CALIBRATION_DEFAULT_PROTOCOL_ARMS
     ):
@@ -4708,6 +4739,8 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
             f'- P0 round3 winner：`{final.get("p0_winner", "TBD")}`',
             f'- P1 协议 winner：`{final.get("p1_protocol_winner", "TBD")}`',
             f'- P1 最终总胜者：`{final.get("p1_winner", "TBD")}`',
+            f'- P1 winner 来源：`{final.get("p1_winner_source", "TBD")}`',
+            f'- P1 ablation 策略：`{final.get("p1_ablation_policy", P1_ABLATION_POLICY)}`',
             f'- P2 默认 checkpoint：`{final.get("p2_default_checkpoint", "TBD")}`',
             f'- 正式训练：`{final.get("formal_status", "pending")}`',
             '',
@@ -4728,6 +4761,8 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
     if p1:
         lines.extend(['## P1', ''])
         policy = p1.get('selection_policy') or p1_selection_policy_metadata()
+        mainline_rounds = list(policy.get('mainline_rounds') or ['p1_protocol_decide_round', 'p1_winner_refine_round'])
+        backlog_rounds = list(policy.get('backlog_rounds') or ['p1_ablation_round'])
         lines.extend([
             '### canonical_selection',
             '',
@@ -4764,6 +4799,12 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
             ),
             (
                 f"- `calibration note = {policy.get('calibration_note', 'p1_calibration is mapping-only')}`"
+            ),
+            f"- `mainline rounds = {' / '.join(mainline_rounds)}`",
+            f"- `backlog rounds = {' / '.join(backlog_rounds)}`",
+            (
+                f"- `ablation policy = {policy.get('ablation_policy', P1_ABLATION_POLICY)}`；"
+                f"`{policy.get('ablation_note', P1_ABLATION_NOTE)}`"
             ),
             '',
         ])
@@ -4854,6 +4895,10 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
                 'opp_danger_combo_factor',
                 'triple_combo_factor',
                 'protocol_decide_probe_keep_per_protocol',
+                'p1_mainline_stages',
+                'p1_backlog_stages',
+                'p1_ablation_policy',
+                'p1_ablation_note',
                 'winner_refine_center_mode',
                 'winner_refine_center_keep',
                 'winner_refine_center_arm_names',
@@ -4971,8 +5016,8 @@ def find_arm_result_path(run_dir: Path, candidate: CandidateSpec) -> Path:
         if path.exists():
             return path
     for stage_name in (
-        'p1_ablation',
         'p1_winner_refine',
+        'p1_ablation',
         'p1_protocol_decide',
         'p1_joint_refine',
         'p1_pairwise',
@@ -5533,45 +5578,19 @@ def run_p1(
     if not winner_refine_valid:
         raise RuntimeError('p1_winner_refine_round produced no valid candidates')
     refine_winner = candidate_from_entry(winner_refine_valid[0])
+    final_ranked = list(winner_refine_round['ranking'])
     p1_state['winner_refine_front_runner'] = refine_winner.arm_name
-    state.setdefault('final_conclusion', {})['p1_refine_front_runner'] = refine_winner.arm_name
-    atomic_write_json(run_dir / 'state.json', state)
-    update_results_doc(run_dir, state)
-    if stop_after_winner_refine:
-        return refine_winner, [candidate_from_entry(entry) for entry in winner_refine_valid]
-
-    ablation_round = execute_round_multiseed(
-        run_dir=run_dir,
-        round_name='p1_ablation_round',
-        ab_name=f'{run_dir.name}_p1_ablation',
-        base_cfg=base_cfg,
-        grouped=grouped,
-        eval_splits=eval_splits,
-        candidates=build_p1_ablation_candidates(
-            protocols,
-            calibration,
-            refine_winner,
-            search_space=p1_state.get('search_space'),
-        ),
-        seed=seed + 707,
-        seed_offsets=P1_ABLATION_SEED_OFFSETS,
-        step_scale=P1_ABLATION_STEP_SCALE,
-        ranking_mode=P1_RANKING_MODE,
-        eligibility_group_key=P1_PROTOCOL_ELIGIBILITY_GROUP_KEY,
-    )
-    p1_state['ablation_round'] = ablation_round
-    update_results_doc(run_dir, state)
-    final_ranked = list(ablation_round['ranking'])
     p1_state['final_compare'] = {'round_name': 'p1_final_compare', 'ranking': final_ranked}
-    final_valid = [entry for entry in final_ranked if entry.get('valid')]
-    if not final_valid:
-        raise RuntimeError('p1_ablation_round produced no valid candidates')
-    winner = candidate_from_entry(final_valid[0])
-    p1_state['winner'] = winner.arm_name
-    state.setdefault('final_conclusion', {})['p1_winner'] = winner.arm_name
+    p1_state['winner'] = refine_winner.arm_name
+    p1_state['winner_source'] = 'winner_refine_mainline'
+    p1_state['ablation_policy'] = P1_ABLATION_POLICY
+    state.setdefault('final_conclusion', {})['p1_refine_front_runner'] = refine_winner.arm_name
+    state['final_conclusion']['p1_winner'] = refine_winner.arm_name
+    state['final_conclusion']['p1_winner_source'] = 'winner_refine_mainline'
+    state['final_conclusion']['p1_ablation_policy'] = P1_ABLATION_POLICY
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
-    return winner, [candidate_from_entry(entry) for entry in final_valid]
+    return refine_winner, [candidate_from_entry(entry) for entry in winner_refine_valid]
 
 
 def checkpoint_selector_winner(candidates: dict[str, dict[str, Any]], action_weights: dict[str, float]) -> tuple[str, list[str]]:

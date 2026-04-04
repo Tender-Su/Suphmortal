@@ -2,7 +2,8 @@
 
 > 更新说明：本文里的多 seed 噪声证据最初来自历史 `p1_solo_round`。
 > 这些统计仍可作为 selector 噪声量级参考，但不再代表当前主线 round 结构。
-> 当前默认 P1 主线 round 是 `p1_protocol_decide_round / p1_winner_refine_round / p1_ablation_round`。
+> 当前默认 P1 主线 round 是 `p1_protocol_decide_round / p1_winner_refine_round`。
+> `p1_ablation_round` 现在只保留为手动 backlog 诊断。
 
 这份文档记录 `2026-03-26` 对当前 selector 口径做的一次“哪些可以统计化、哪些仍需保留启发式”的核对结果。对应脚本是：
 
