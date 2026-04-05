@@ -7,6 +7,7 @@
 ## 当前默认前提
 
 - 当前默认主线以 `docs/agent/current-plan.md`、`docs/status/stage05-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准
+- 当前 downstream manual `formal` 口径再额外看 `docs/status/formal-triplet-playoff-canonical.md`
 - `P1` 当前结构固定为：`calibration -> protocol_decide -> winner_refine`
 - `P1 ablation` 当前只保留为 `backlog / manual only`
 - 当前 `P0 top3` 事实顺序固定为 `A2y / A2x / A1x`
@@ -43,7 +44,7 @@
 ### 5. 先保证公平，再谈 winner
 
 - selector、摘要字段、重验逻辑一旦改了，历史 `arm_result.json` 必须支持重算或被明确标成历史快照
-- `P1` 的 winner 解释必须统一走 `docs/status/p1-selection-canonical.md`
+- `P1` 的排序、第一梯队与 downstream 入口解释必须统一走 `docs/status/p1-selection-canonical.md`
 - 自动摘要只能做辅助，不代替人工核对
 
 ### 6. invalid arm 不补跑，会系统性扭曲证据
@@ -66,6 +67,18 @@
 - 当前验证默认：`8 / 5`
 - 验证出问题时，优先修 worker 生命周期和共享映射释放
 - 不要因为一时资源错误就把验证永久降级成单进程慢路径
+
+### 9. 当前 `winner_refine` 只保留第一梯队；官方 `P1 winner` 由 triplet playoff 收口
+
+- `winner_refine` 现在只负责保留 pre-formal 第一梯队和内部排序证据
+- 当前历史内部 `top1` 是 `opp_lean*0.85`
+- 当前官方 `P1 winner` 已固定为 `anchor*1.0`
+- 当前第一替补已固定为 `opp_lean*0.85`
+- 当前 downstream manual `formal` 候选集不是单点直送，而是固定的 `triplet playoff`
+- 写文档和解释时必须把这两个角色拆开：
+  - `winner_refine` 负责 pre-formal 第一梯队与内部 front runner
+  - `formal triplet playoff` 负责下游长预算 formal 候选集与最终 winner / 第一替补收口
+  - 当前 canonical 文档不再手写原始 `W_r...` 名字，而统一用 `lean / *0.85 / rank-- / danger++` 这类结构别名
 
 ## 当前推荐阅读顺序
 

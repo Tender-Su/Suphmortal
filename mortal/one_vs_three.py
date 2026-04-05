@@ -271,6 +271,13 @@ def normalize_child_env():
     return env
 
 
+def keep_shard_runtime_artifacts():
+    return _coerce_bool(
+        os.environ.get('MORTAL_1V3_KEEP_SHARD_RUNTIME', '0'),
+        field_name='MORTAL_1V3_KEEP_SHARD_RUNTIME',
+    )
+
+
 def build_worker_loop_command(*, shard_index, disable_progress_bar):
     command = [
         sys.executable,
@@ -445,7 +452,9 @@ def _start_process_shard_workers(*, cfg, shard_count, disable_progress_bar):
     }
 
 
-def start_persistent_shard_workers(*, cfg, shard_count, disable_progress_bar):
+def start_persistent_shard_workers(*, cfg, shard_count, disable_progress_bar, execution_mode='process'):
+    if execution_mode != 'process':
+        raise ValueError(f'unsupported shard execution_mode: {execution_mode!r}')
     return _start_process_shard_workers(
         cfg=cfg,
         shard_count=shard_count,
@@ -462,7 +471,8 @@ def _run_process_sharded_iteration_with_workers(
     log_dir,
     shard_worker_pool,
 ):
-    runtime_root = Path(tempfile.mkdtemp(prefix=f'mahjongai_1v3_iter_{iter_index:04d}_'))
+    keep_runtime = keep_shard_runtime_artifacts()
+    runtime_root = Path(tempfile.mkdtemp(prefix=f'mahjongai_1v3_iter_{iter_index:04d}_')) if keep_runtime else None
     workers = shard_worker_pool['workers']
     if len(workers) != len(shard_seed_counts):
         raise ValueError(
@@ -495,6 +505,8 @@ def _run_process_sharded_iteration_with_workers(
             raise RuntimeError(f'unexpected shard worker iter index: {message}')
         shard_index = int(message['shard_index'])
         if kind == 'task_error':
+            if runtime_root is None:
+                runtime_root = Path(tempfile.mkdtemp(prefix=f'mahjongai_1v3_iter_{iter_index:04d}_'))
             log_path = runtime_root / f'shard_{shard_index:02d}.log'
             log_path.write_text(str(message.get('traceback') or message.get('error') or ''), encoding='utf-8')
             raise RuntimeError(
@@ -507,8 +519,9 @@ def _run_process_sharded_iteration_with_workers(
             'avg_rank': float(message['avg_rank']),
             'avg_pt': float(message['avg_pt']),
         }
-        result_path = runtime_root / f'shard_{shard_index:02d}.json'
-        result_path.write_text(json.dumps(shard_payloads[shard_index], ensure_ascii=False, indent=2), encoding='utf-8')
+        if runtime_root is not None:
+            result_path = runtime_root / f'shard_{shard_index:02d}.json'
+            result_path.write_text(json.dumps(shard_payloads[shard_index], ensure_ascii=False, indent=2), encoding='utf-8')
 
     total_rankings = np.zeros(4, dtype=np.int64)
     for shard_index in range(len(workers)):
@@ -693,7 +706,8 @@ def run_main(args):
                     log_dir=log_dir,
                     shard_worker_pool=shard_worker_pool,
                 )
-                print(f'shard runtime: {runtime_root}')
+                if runtime_root is not None:
+                    print(f'shard runtime: {runtime_root}')
             print(f'challenger rankings: {rankings} ({avg_rank}, {avg_pt}pt)')
     finally:
         stop_persistent_shard_workers(shard_worker_pool)

@@ -1,4 +1,8 @@
+import atexit
 import json
+import logging
+import os
+import time
 import traceback
 import torch
 import numpy as np
@@ -22,6 +26,18 @@ def coerce_batch_inputs(obs, masks, invisible_obs):
             dtype=np.float32,
         )
     return obs, masks, invisible_obs
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip().lower()
+    if value in {'1', 'true', 'yes', 'on'}:
+        return True
+    if value in {'0', 'false', 'no', 'off'}:
+        return False
+    return default
 
 class MortalEngine:
     def __init__(
@@ -54,6 +70,17 @@ class MortalEngine:
         self.enable_metadata = enable_metadata
         self.name = name
         self.explore_rate = explore_rate
+        self.profile_enabled = _env_flag('MORTAL_ENGINE_PROFILE', False)
+        self._profile_stats = {
+            'calls': 0,
+            'batch_items': 0,
+            'max_batch_size': 0,
+            'prepare_elapsed': 0.0,
+            'forward_elapsed': 0.0,
+            'select_elapsed': 0.0,
+        }
+        if self.profile_enabled:
+            atexit.register(self._log_profile)
 
     def react_batch(self, obs, masks, invisible_obs):
         try:
@@ -80,14 +107,41 @@ class MortalEngine:
         actions, _, q_out, masks, is_greedy = self._react_batch_impl(obs, masks, invisible_obs)
         return actions.tolist(), q_out.tolist(), masks.tolist(), is_greedy.tolist()
 
+    def _prepare_batch_tensors(self, obs, masks, invisible_obs):
+        if not (
+            isinstance(obs, torch.Tensor)
+            and isinstance(masks, torch.Tensor)
+            and (invisible_obs is None or isinstance(invisible_obs, torch.Tensor))
+        ):
+            obs, masks, invisible_obs = coerce_batch_inputs(obs, masks, invisible_obs)
+
+        def _to_tensor(value, *, dtype):
+            if value is None:
+                return None
+            tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+            if tensor.dtype != dtype:
+                tensor = tensor.to(dtype=dtype)
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            if tensor.device != self.device:
+                tensor = tensor.to(
+                    device=self.device,
+                    non_blocking=self.device.type == 'cuda' and tensor.device.type == 'cpu',
+                )
+            return tensor
+
+        obs = _to_tensor(obs, dtype=torch.float32)
+        masks = _to_tensor(masks, dtype=torch.bool)
+        invisible_obs = _to_tensor(invisible_obs, dtype=torch.float32)
+        return obs, masks, invisible_obs
+
     def _react_batch_impl(self, obs, masks, invisible_obs):
-        obs, masks, invisible_obs = coerce_batch_inputs(obs, masks, invisible_obs)
-        obs = torch.as_tensor(obs, device=self.device)
-        masks = torch.as_tensor(masks, device=self.device)
-        if invisible_obs is not None:
-            invisible_obs = torch.as_tensor(invisible_obs, device=self.device)
+        prepare_started = time.perf_counter()
+        obs, masks, invisible_obs = self._prepare_batch_tensors(obs, masks, invisible_obs)
+        prepare_elapsed = time.perf_counter() - prepare_started
         batch_size = obs.shape[0]
 
+        forward_started = time.perf_counter()
         match self.version:
             case 1:
                 mu, logsig = self.brain(obs, invisible_obs)
@@ -110,7 +164,9 @@ class MortalEngine:
                 else:
                     phi = self.brain(obs)
                 q_out = self.dqn(phi, masks)
-    
+        forward_elapsed = time.perf_counter() - forward_started
+
+        select_started = time.perf_counter()
         if self.explore_rate > 0:
             is_greedy = torch.full((batch_size,), 1-self.explore_rate, device=self.device).bernoulli().to(torch.bool)
             actions = torch.where(is_greedy, q_out.argmax(-1), Categorical(probs=q_out).sample())
@@ -121,8 +177,36 @@ class MortalEngine:
         q_out_alt = q_out.clone()
         q_out_alt[:, 43] = float('-inf')
         alt_actions = q_out_alt.argmax(-1)
+        select_elapsed = time.perf_counter() - select_started
+
+        if self.profile_enabled:
+            stats = self._profile_stats
+            stats['calls'] += 1
+            stats['batch_items'] += int(batch_size)
+            stats['max_batch_size'] = max(stats['max_batch_size'], int(batch_size))
+            stats['prepare_elapsed'] += prepare_elapsed
+            stats['forward_elapsed'] += forward_elapsed
+            stats['select_elapsed'] += select_elapsed
 
         return actions, alt_actions, q_out, masks, is_greedy
+
+    def _log_profile(self):
+        stats = self._profile_stats
+        calls = int(stats['calls'])
+        if calls <= 0:
+            return
+        avg_batch_size = stats['batch_items'] / calls
+        logging.info(
+            'mortal engine profile: name=%s device=%s calls=%d avg_batch_size=%.1f max_batch_size=%d prepare=%.3fs forward=%.3fs select=%.3fs',
+            self.name,
+            self.device,
+            calls,
+            avg_batch_size,
+            int(stats['max_batch_size']),
+            stats['prepare_elapsed'],
+            stats['forward_elapsed'],
+            stats['select_elapsed'],
+        )
 
 class ExampleMjaiLogEngine:
     def __init__(self, name: str):

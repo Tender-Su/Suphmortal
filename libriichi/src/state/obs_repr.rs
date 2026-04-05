@@ -15,10 +15,114 @@ const SELF_KAWA_ITEM_CHANNELS: usize = 4;
 const KAWA_ITEM_CHANNELS: usize = 8;
 const MAX_NUM_TURNS: usize = 17; // aka the actual practical `MAX_TSUMOS_LEFT`
 
-struct ObsEncoderContext<'a> {
+trait ObsArray {
+    fn rows(&self) -> usize;
+    fn as_slice(&self) -> &[f32];
+    fn get(&self, row: usize, col: usize) -> f32;
+    fn fill(&mut self, row: usize, value: f32);
+    fn fill_rows(&mut self, row: usize, n_rows: usize, value: f32);
+    fn assign(&mut self, row: usize, col: usize, value: f32);
+    fn assign_rows(&mut self, row: usize, col: usize, n_rows: usize, value: f32);
+}
+
+impl ObsArray for Simple2DArray<34, f32> {
+    #[inline]
+    fn rows(&self) -> usize {
+        Simple2DArray::rows(self)
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[f32] {
+        Simple2DArray::as_slice(self)
+    }
+
+    #[inline]
+    fn get(&self, row: usize, col: usize) -> f32 {
+        Simple2DArray::get(self, row, col)
+    }
+
+    #[inline]
+    fn fill(&mut self, row: usize, value: f32) {
+        Simple2DArray::fill(self, row, value);
+    }
+
+    #[inline]
+    fn fill_rows(&mut self, row: usize, n_rows: usize, value: f32) {
+        Simple2DArray::fill_rows(self, row, n_rows, value);
+    }
+
+    #[inline]
+    fn assign(&mut self, row: usize, col: usize, value: f32) {
+        Simple2DArray::assign(self, row, col, value);
+    }
+
+    #[inline]
+    fn assign_rows(&mut self, row: usize, col: usize, n_rows: usize, value: f32) {
+        Simple2DArray::assign_rows(self, row, col, n_rows, value);
+    }
+}
+
+struct ObsSlice2DMut<'a> {
+    rows: usize,
+    data: &'a mut [f32],
+}
+
+impl<'a> ObsSlice2DMut<'a> {
+    fn new(rows: usize, data: &'a mut [f32]) -> Self {
+        assert_eq!(data.len(), rows * 34);
+        Self { rows, data }
+    }
+
+    #[inline]
+    fn offset(&self, row: usize, col: usize) -> usize {
+        row * 34 + col
+    }
+}
+
+impl ObsArray for ObsSlice2DMut<'_> {
+    #[inline]
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[f32] {
+        self.data
+    }
+
+    #[inline]
+    fn get(&self, row: usize, col: usize) -> f32 {
+        self.data[self.offset(row, col)]
+    }
+
+    #[inline]
+    fn fill(&mut self, row: usize, value: f32) {
+        self.fill_rows(row, 1, value);
+    }
+
+    #[inline]
+    fn fill_rows(&mut self, row: usize, n_rows: usize, value: f32) {
+        self.data[row * 34..(row + n_rows) * 34].fill(value);
+    }
+
+    #[inline]
+    fn assign(&mut self, row: usize, col: usize, value: f32) {
+        let offset = self.offset(row, col);
+        self.data[offset] = value;
+    }
+
+    #[inline]
+    fn assign_rows(&mut self, row: usize, col: usize, n_rows: usize, value: f32) {
+        for n in 0..n_rows {
+            self.data[self.offset(row + n, col)] = value;
+        }
+    }
+}
+
+struct ObsEncoderContext<'a, A: ObsArray> {
     state: &'a PlayerState,
-    arr: &'a mut Simple2DArray<34, f32>,
-    mask: &'a mut [bool; ACTION_SPACE],
+    arr: &'a mut A,
+    mask: &'a mut [bool],
     idx: usize,
     at_kan_select: bool,
     version: u32,
@@ -56,7 +160,7 @@ impl IntegerEncoder {
         self
     }
 
-    fn encode(self, ctx: &mut ObsEncoderContext<'_>) {
+    fn encode<A: ObsArray>(self, ctx: &mut ObsEncoderContext<'_, A>) {
         let n = self.n.min(self.cap);
         match ctx.version {
             1 => {
@@ -107,13 +211,13 @@ impl IntegerEncoder {
     }
 }
 
-impl<'a> ObsEncoderContext<'a> {
+impl<'a, A: ObsArray> ObsEncoderContext<'a, A> {
     fn new(
         state: &'a PlayerState,
         version: u32,
         at_kan_select: bool,
-        arr: &'a mut Simple2DArray<34, f32>,
-        mask: &'a mut [bool; ACTION_SPACE],
+        arr: &'a mut A,
+        mask: &'a mut [bool],
     ) -> Self {
         assert!(version <= MAX_VERSION);
         Self {
@@ -797,9 +901,20 @@ impl PlayerState {
         version: u32,
         at_kan_select: bool,
         arr: &mut Simple2DArray<34, f32>,
-        mask: &mut [bool; ACTION_SPACE],
+        mask: &mut [bool],
     ) {
-        ObsEncoderContext::new(self, version, at_kan_select, arr, mask).encode_obs();
+        self.encode_obs_with(version, at_kan_select, arr, mask);
+    }
+
+    pub fn encode_obs_row_major_into(
+        &self,
+        version: u32,
+        at_kan_select: bool,
+        arr: &mut [f32],
+        mask: &mut [bool],
+    ) {
+        let mut arr = ObsSlice2DMut::new(obs_shape(version).0, arr);
+        self.encode_obs_with(version, at_kan_select, &mut arr, mask);
     }
 
     /// Returns `(obs, mask)`
@@ -810,5 +925,37 @@ impl PlayerState {
         let mut mask = [false; ACTION_SPACE];
         self.encode_obs_into(version, at_kan_select, &mut arr, &mut mask);
         (arr.build(), Array1::from_vec(mask.to_vec()))
+    }
+
+    fn encode_obs_with<A: ObsArray>(
+        &self,
+        version: u32,
+        at_kan_select: bool,
+        arr: &mut A,
+        mask: &mut [bool],
+    ) {
+        assert_eq!(mask.len(), ACTION_SPACE);
+        ObsEncoderContext::new(self, version, at_kan_select, arr, mask).encode_obs();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn encode_obs_row_major_matches_simple_array() {
+        let state = PlayerState::new(0);
+        let rows = obs_shape(4).0;
+        let mut simple = Simple2DArray::new(rows);
+        let mut simple_mask = [false; ACTION_SPACE];
+        state.encode_obs_into(4, false, &mut simple, &mut simple_mask);
+
+        let mut row_major = vec![0.0; rows * 34];
+        let mut row_major_mask = [false; ACTION_SPACE];
+        state.encode_obs_row_major_into(4, false, &mut row_major, &mut row_major_mask);
+
+        assert_eq!(simple.as_slice(), row_major.as_slice());
+        assert_eq!(simple_mask, row_major_mask);
     }
 }

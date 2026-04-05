@@ -1,5 +1,10 @@
 # 最强麻将 AI 当前计划
 
+> Archive note (`2026-04-04`)：
+> 本文档只保留 `2026-03-29` 当时的阶段判断，不能当当前主线入口。
+> 其中 `Stage 0.5 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后，不读取任何 `P2` 输出。
+> 当前默认以 `docs/agent/current-plan.md`、`docs/agent/mainline.md`、`docs/status/stage05-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准。
+
 本文档是 agent 的续工入口，只保留当前主线、已证实结论和待验证项，不再重复 `AGENTS.md` 的基础规范。
 
 ## 文档分工

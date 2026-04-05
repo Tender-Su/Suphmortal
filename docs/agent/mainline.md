@@ -3,7 +3,8 @@
 这份文档只保留仍然有效、会直接影响后续判断的稳定默认。  
 实时停点看 `docs/agent/current-plan.md`。  
 当前核对状态看 `docs/status/stage05-verified-status.md`。  
-运行顺序看 `docs/agent/experiment-workflow.md`。
+运行顺序看 `docs/agent/experiment-workflow.md`。  
+当前 `formal triplet playoff` 口径看 `docs/status/formal-triplet-playoff-canonical.md`。
 
 ## 总目标
 
@@ -45,6 +46,44 @@
 - `best_acc` 只作受控对照
 - `latest` 只用于续训
 
+## Stage 0.5 formal 当前冻结默认
+
+- `formal_train` 不再直接做 canonical checkpoint 落位
+- `formal_train` 只保留：
+  - `best_loss`
+  - `best_acc`
+  - `best_rank`
+- `latest` 在进入 `formal_1v3` 前直接丢弃
+- 当前正式发布结构固定为：
+  - `formal_train -> checkpoint pack(best_loss / best_acc / best_rank) -> formal_1v3 -> canonical alias落位`
+- 当前 `formal` 长度已经上调到旧口径的 `1.5x`
+  - 基础 `phase_steps = 9000 / 6000 / 3000`
+  - 默认 `formal_step_scale = 5.0`
+  - 当前有效 `phase_a / phase_b / phase_c = 45000 / 30000 / 15000`
+- `formal_1v3` 当前判定口径：
+  - 先跑 `1 iter` 粗筛
+  - 若 `top2` 的 `avg_pt` 仍在估计噪声带内，则换新 `seed_key` 继续加赛
+  - 默认先补 `3` 轮；若仍 close，再补到最多 `5` 轮
+  - 最终按 `avg_pt` 为主、`avg_rank` 为辅决定 winner
+
+### 当前 manual triplet playoff
+
+- 当前已固定官方 `P1 winner`：
+  - `anchor*1.0`
+- 当前已固定第一替补：
+  - `opp_lean*0.85`
+- 当前下游 manual 方案不是“只送单一 front runner 进 formal”
+- 当前固定做法是：
+  - 先把 `winner_refine` 第一梯队里的 `3` 个候选送进 `formal_train`
+  - 再对每个 child run 继续复用现有 `formal_1v3`
+  - 最后比较这 `3` 条 child run 的 `formal_1v3` 统计
+- 当前固定 triplet 用结构别名写为：
+  - `opp_lean*0.85`
+  - `anchor*1.0`
+  - `opp_lean(rank--/danger++)`
+- 当前固定 triplet 看：
+  - `docs/status/formal-triplet-playoff-canonical.md`
+
 ## Stage 0.5 / P1 当前冻结默认
 
 - `P0` 事实 `top3` 顺序固定为：
@@ -60,6 +99,10 @@
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
 - 当前人工确认的 winner 点位：
   - `0.12 + A2x`
+- 当前 downstream 正式 winner：
+  - `anchor*1.0`
+- 当前 downstream 第一替补：
+  - `opp_lean*0.85`
 - 当前瘦版 `calibration` 固定为：
   - `A2y-only + combo_only`
 - 当前三类辅助头内部 shape 已冻结：
@@ -69,7 +112,7 @@
 
 ## P1 选模与搜索默认
 
-- `P1` winner 解释只看：
+- `P1` 排序与第一梯队解释只看：
   - `docs/status/p1-selection-canonical.md`
 - 当前排序核心：
   - `selection_quality_score = action_quality_score + 0.20 * scenario_quality_score`
@@ -103,10 +146,10 @@
   - `center_mode = top_ranked_keep`
   - `center_keep = 4`
 - 当前四个 center：
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00516_o000135_d000804`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00456_o000199_d000692`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00636_o000103_d000692`
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00456_o000103_d001027`
+  - `anchor`
+  - `opp_lean`
+  - `rank_lean`
+  - `danger_lean`
 - 当前局部细搜规则：
   - `total_scale_factors = [0.85, 1.0, 1.15]`
   - `transfer_delta = 0.01`
@@ -118,12 +161,41 @@
   - 每个 center 至少保 `1` 个有效点，再按全局竞争带补齐
 - 如果让笔记本参与，推荐入口：
   - `python mortal/run_stage05_winner_refine_distributed.py dispatch --run-name <run_name>`
-- 这条入口只改变调度方式，不改变候选空间和最终 winner 解释口径
+- 这条入口只改变调度方式，不改变候选空间和内部排序口径
 - 当前默认解释：
-  - `winner_refine` front runner 直接作为 `P1 winner`
+  - `winner_refine` 只保留 pre-formal 第一梯队与内部排序证据
+  - 当前历史内部 `top1` 是 `opp_lean*0.85`
+  - 当前正式发布的 downstream winner 已固定为 `anchor*1.0`
+  - 当前 `opp_lean*0.85` 固定为第一替补与争 `1` 型预备队
+  - 当前 downstream manual `formal` 候选集按 `formal triplet playoff` 文档执行
   - `ablation` 只保留为手动 backlog 验证
 
 ## 下游原则
 
 - `Stage 1` 默认主线：`Oracle Dropout Supervised Refinement`
+- `Stage 1` 只读取 `formal_1v3` 决胜并完成 canonical alias落位后的 Stage `0.5` checkpoint
 - `Stage 2` 只在新的 `Stage 1` 稳定后再推进
+
+## Stage 1 当前冻结默认
+
+- `Stage 1` 不再筛 `recipe`
+- `Stage 0.5` 已经回答了三头是否保留的问题；当前 `Stage 1` 固定使用：
+  - `CE + rank aux + opponent_state aux + danger aux`
+- 当前固定 full-aux recipe 直接继承 canonical `Stage 0.5` winner `anchor*1.0`
+- `Stage 1` 现在只回答两个问题：
+  - `oracle-dropout` 的 oracle 保留预算该占总步数多少
+  - 从 `1 -> 0` 的衰减曲线该用 `linear` 还是 `cosine`
+- 当前结构按 `Suphx` 的 oracle guiding 改写为：
+  - `oracle-dropout transition phase -> gamma=0 normal continuation phase`
+  - continuation 默认把学习率降到 transition 的 `0.1x`
+- 当前 screening 默认 profile shortlist：
+  - `linear_075`
+  - `cosine_075`
+  - `linear_050`
+  - `cosine_050`
+- 当前 control profiles：
+  - `linear_100`
+  - `cosine_100`
+- 当前单配置 baseline：
+  - `linear`
+  - `decay_steps = 0.75 * max_steps`

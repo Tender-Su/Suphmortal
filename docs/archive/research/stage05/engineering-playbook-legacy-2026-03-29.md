@@ -3,7 +3,9 @@
 > 历史说明：本文保留大量 `2026-03-28` 之前的工程与实验记录。
 > 凡是把 `P1` 主线写成 `SoloAuxGate -> Pairwise -> JointRefine` 的段落，都只能当历史设计与排错背景，不能当当前默认。
 > 当前默认 P1 结构以 `docs/agent/current-plan.md` 与 `docs/status/p1-selection-canonical.md` 为准，即：
-> `calibration -> protocol_decide -> winner_refine -> ablation`。
+> `calibration -> protocol_decide -> winner_refine`；`ablation` 当前是 `backlog / manual only`。
+> 另：本文中出现的 `Stage 0.5 / P2` checkpoint 去重层也已从当前主线删除。
+> 当前 `formal` 直接接在 `P1 winner_refine` 之后；凡是把 `P2` 写成默认必经阶段的段落，都只能当历史设计背景。
 
 本文档只记录 `Stage 0.5` 的工程经验和排障结论，不重复 `AGENTS.md` 的通用规范，也不重复 `docs/agent/current-plan.md` 的长期路线。
 

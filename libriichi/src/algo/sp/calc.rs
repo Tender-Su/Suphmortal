@@ -1,6 +1,6 @@
 use super::candidate::RawCandidate;
 use super::state::{InitState, State};
-use super::tile::{DiscardTile, DrawTile};
+use super::tile::{DiscardTile, DrawTile, DrawTileScan};
 use super::{Candidate, CandidateColumn, MAX_TSUMOS_LEFT};
 use crate::algo::agari::{Agari, AgariCalculator};
 use crate::tile::Tile;
@@ -210,8 +210,21 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
         for DiscardTile { tile, shanten_diff } in discard_tiles {
             if shanten_diff == 0 {
                 self.state.discard(tile);
-                let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
-                let values = self.draw(shanten);
+                let cached_values = self.draw_cache[shanten as usize].get(&self.state).cloned();
+                let (values, required_tiles) = if let Some(values) = cached_values {
+                    (
+                        values,
+                        self.state.get_required_tiles(self.sup.tehai_len_div3),
+                    )
+                } else {
+                    let required_draw_scan = self
+                        .state
+                        .scan_draw_tiles_with_required(shanten, self.sup.tehai_len_div3);
+                    (
+                        self.draw_with_scan(shanten, Some(&required_draw_scan.draw_scan)),
+                        required_draw_scan.required_tiles,
+                    )
+                };
                 self.state.undo_discard(tile);
 
                 let mut tenpai_probs = values.tenpai_probs;
@@ -233,9 +246,24 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
                 candidates.push(candidate);
             } else if self.sup.calc_shanten_down && shanten_diff == 1 && shanten < SHANTEN_THRES {
                 self.state.discard(tile);
-                let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
+                let cached_values = self.draw_cache[shanten as usize + 1]
+                    .get(&self.state)
+                    .cloned();
                 self.state.n_extra_tsumo += 1;
-                let values = self.draw(shanten + 1);
+                let (values, required_tiles) = if let Some(values) = cached_values {
+                    (
+                        values,
+                        self.state.get_required_tiles(self.sup.tehai_len_div3),
+                    )
+                } else {
+                    let required_draw_scan = self
+                        .state
+                        .scan_draw_tiles_with_required(shanten + 1, self.sup.tehai_len_div3);
+                    (
+                        self.draw_with_scan(shanten + 1, Some(&required_draw_scan.draw_scan)),
+                        required_draw_scan.required_tiles,
+                    )
+                };
                 self.state.n_extra_tsumo -= 1;
                 self.state.undo_discard(tile);
 
@@ -256,8 +284,21 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
     }
 
     fn analyze_draw(&mut self, shanten: i8) -> Vec<Candidate> {
-        let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
-        let values = self.draw(shanten);
+        let cached_values = self.draw_cache[shanten as usize].get(&self.state).cloned();
+        let (values, required_tiles) = if let Some(values) = cached_values {
+            (
+                values,
+                self.state.get_required_tiles(self.sup.tehai_len_div3),
+            )
+        } else {
+            let required_draw_scan = self
+                .state
+                .scan_draw_tiles_with_required(shanten, self.sup.tehai_len_div3);
+            (
+                self.draw_with_scan(shanten, Some(&required_draw_scan.draw_scan)),
+                required_draw_scan.required_tiles,
+            )
+        };
 
         let mut tenpai_probs = values.tenpai_probs;
         if shanten == 0 {
@@ -311,37 +352,54 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
         vec![candidate]
     }
 
-    fn draw(&mut self, shanten: i8) -> Rc<Values<MAX_TSUMO>> {
+    fn draw_with_scan(
+        &mut self,
+        shanten: i8,
+        draw_scan: Option<&DrawTileScan>,
+    ) -> Rc<Values<MAX_TSUMO>> {
         if self.sup.calc_tegawari && self.state.n_extra_tsumo == 0 {
-            self.draw_with_tegawari(shanten)
+            self.draw_with_tegawari(shanten, draw_scan)
         } else {
-            self.draw_without_tegawari(shanten)
+            self.draw_without_tegawari(shanten, draw_scan)
         }
     }
 
-    fn draw_with_tegawari(&mut self, shanten: i8) -> Rc<Values<MAX_TSUMO>> {
-        self.draw_cache[shanten as usize]
-            .get(&self.state)
-            .cloned()
-            .unwrap_or_else(|| self.draw_with_tegawari_slow(shanten))
+    fn draw_with_tegawari(
+        &mut self,
+        shanten: i8,
+        draw_scan: Option<&DrawTileScan>,
+    ) -> Rc<Values<MAX_TSUMO>> {
+        if let Some(values) = self.draw_cache[shanten as usize].get(&self.state) {
+            Rc::clone(values)
+        } else {
+            self.draw_with_tegawari_slow(shanten, draw_scan)
+        }
     }
 
-    fn draw_with_tegawari_slow(&mut self, shanten: i8) -> Rc<Values<MAX_TSUMO>> {
+    fn draw_with_tegawari_slow(
+        &mut self,
+        shanten: i8,
+        draw_scan: Option<&DrawTileScan>,
+    ) -> Rc<Values<MAX_TSUMO>> {
         let mut tenpai_probs = [0.; MAX_TSUMO];
         let mut win_probs = [0.; MAX_TSUMO];
         let mut exp_values = [0.; MAX_TSUMO];
 
-        // 自摸候補を取得する。
-        let draw_tiles = self.state.get_draw_tiles(shanten, self.sup.tehai_len_div3);
-
-        // 有効牌の合計枚数を計算する。【暫定対応】
-        let sum_left_tiles = self.state.sum_left_tiles();
+        let owned_scan;
+        let draw_scan = if let Some(draw_scan) = draw_scan {
+            draw_scan
+        } else {
+            owned_scan = self.state.scan_draw_tiles(shanten, self.sup.tehai_len_div3);
+            &owned_scan
+        };
+        let draw_tiles = &draw_scan.draw_tiles;
+        let sum_left_tiles = draw_scan.sum_left_tiles;
 
         for &DrawTile {
             tile,
             count,
             shanten_diff,
-        } in &draw_tiles
+        } in draw_tiles
         {
             if shanten_diff != -1 {
                 // 有効牌以外の場合
@@ -406,7 +464,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
             }
         }
 
-        for DrawTile {
+        for &DrawTile {
             tile,
             count,
             shanten_diff,
@@ -444,30 +502,38 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
         values
     }
 
-    fn draw_without_tegawari(&mut self, shanten: i8) -> Rc<Values<MAX_TSUMO>> {
-        self.draw_cache[shanten as usize]
-            .get(&self.state)
-            .cloned()
-            .unwrap_or_else(|| self.draw_without_tegawari_slow(shanten))
+    fn draw_without_tegawari(
+        &mut self,
+        shanten: i8,
+        draw_scan: Option<&DrawTileScan>,
+    ) -> Rc<Values<MAX_TSUMO>> {
+        if let Some(values) = self.draw_cache[shanten as usize].get(&self.state) {
+            Rc::clone(values)
+        } else {
+            self.draw_without_tegawari_slow(shanten, draw_scan)
+        }
     }
 
-    fn draw_without_tegawari_slow(&mut self, shanten: i8) -> Rc<Values<MAX_TSUMO>> {
+    fn draw_without_tegawari_slow(
+        &mut self,
+        shanten: i8,
+        draw_scan: Option<&DrawTileScan>,
+    ) -> Rc<Values<MAX_TSUMO>> {
         let mut tenpai_probs = [0.; MAX_TSUMO];
         let mut win_probs = [0.; MAX_TSUMO];
         let mut exp_values = [0.; MAX_TSUMO];
 
-        // 自摸候補を取得する。
-        let draw_tiles = self.state.get_draw_tiles(shanten, self.sup.tehai_len_div3);
+        let owned_scan;
+        let draw_scan = if let Some(draw_scan) = draw_scan {
+            draw_scan
+        } else {
+            owned_scan = self.state.scan_draw_tiles(shanten, self.sup.tehai_len_div3);
+            &owned_scan
+        };
+        let draw_tiles = &draw_scan.draw_tiles;
+        let not_tsumo_probs = &self.not_tsumo_prob_table[draw_scan.sum_required_tiles as usize];
 
-        // 有効牌の合計枚数を計算する。
-        let sum_required_tiles: u8 = draw_tiles
-            .iter()
-            .filter(|d| d.shanten_diff == -1)
-            .map(|d| d.count)
-            .sum();
-        let not_tsumo_probs = &self.not_tsumo_prob_table[sum_required_tiles as usize];
-
-        for DrawTile {
+        for &DrawTile {
             tile,
             count,
             shanten_diff,
@@ -585,7 +651,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
             if shanten_diff == 0 {
                 // 向聴数が変化しない打牌
                 self.state.discard(tile);
-                values = self.draw(shanten);
+                values = self.draw_with_scan(shanten, None);
                 self.state.undo_discard(tile);
             } else if self.sup.calc_shanten_down
                 && self.state.n_extra_tsumo == 0
@@ -595,7 +661,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, MAX_TSUMO> {
                 // 向聴戻しになる打牌
                 self.state.discard(tile);
                 self.state.n_extra_tsumo += 1;
-                values = self.draw(shanten + 1);
+                values = self.draw_with_scan(shanten + 1, None);
                 self.state.n_extra_tsumo -= 1;
                 self.state.undo_discard(tile);
             } else {

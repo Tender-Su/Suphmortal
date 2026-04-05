@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -78,6 +80,20 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
                 r'X:\missing\stage0_5_seed.pth',
                 cfg_prefix='stage1',
             )
+
+    def test_stage1_init_state_is_blocked_by_pending_formal_1v3(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            init_state_file = Path(tmp_dir) / 'stage0_5_supervised.pth'
+            init_state_file.write_text('checkpoint', encoding='utf-8')
+            with patch(
+                'run_stage05_formal.ensure_stage1_canonical_handoff_ready',
+                side_effect=RuntimeError('pending formal_1v3 handoff'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'pending formal_1v3 handoff'):
+                    train_supervised.ensure_init_state_file_exists(
+                        str(init_state_file),
+                        cfg_prefix='stage1',
+                    )
 
     def test_full_validation_zero_disables_monitor_checks(self):
         self.assertFalse(

@@ -1,5 +1,5 @@
 @echo off
-REM Stage 1 Block C A/B: recipe skeleton + gamma schedule
+REM Stage 1 oracle-dropout profile A/B: fixed full-aux recipe + dropout schedule sweep
 
 echo Starting Stage 1 A/B runner...
 cd /d "%~dp0..\mortal"

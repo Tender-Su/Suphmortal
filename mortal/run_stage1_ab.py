@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -14,6 +12,7 @@ from typing import Any
 import torch
 
 import run_stage05_ab as s05
+import run_stage05_formal as stage05_formal
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,73 +42,66 @@ STAGE1_AB_DEFAULTS = {
     'seed': 20260319,
 }
 
-STAGE1_RECIPE_DEFAULT_OPP_WEIGHT = 0.064
-STAGE1_RECIPE_DEFAULT_DANGER_WEIGHT = 0.144
-
 
 @dataclass(frozen=True)
-class RecipeArm:
+class DropoutProfile:
     arm_name: str
     description: str
-    use_oracle: bool
-    enable_rank: bool
-    enable_opp: bool
-    enable_danger: bool
+    schedule: str
+    decay_ratio: float
+    continue_lr_scale: float = 0.1
 
 
-RECIPE_ARMS = {
-    'S1-A': RecipeArm(
-        arm_name='S1-A',
-        description='visible-only CE',
-        use_oracle=False,
-        enable_rank=False,
-        enable_opp=False,
-        enable_danger=False,
+PROFILE_ARMS = {
+    'linear_075': DropoutProfile(
+        arm_name='linear_075',
+        description='linear 1->0 over 75% budget, then normal continuation',
+        schedule='linear',
+        decay_ratio=0.75,
     ),
-    'S1-B': RecipeArm(
-        arm_name='S1-B',
-        description='oracle-dropout CE + rank aux',
-        use_oracle=True,
-        enable_rank=True,
-        enable_opp=False,
-        enable_danger=False,
+    'cosine_075': DropoutProfile(
+        arm_name='cosine_075',
+        description='cosine 1->0 over 75% budget, then normal continuation',
+        schedule='cosine',
+        decay_ratio=0.75,
     ),
-    'S1-C': RecipeArm(
-        arm_name='S1-C',
-        description='oracle-dropout CE + rank aux + opponent_state aux',
-        use_oracle=True,
-        enable_rank=True,
-        enable_opp=True,
-        enable_danger=False,
+    'linear_050': DropoutProfile(
+        arm_name='linear_050',
+        description='linear 1->0 over 50% budget, then longer normal continuation',
+        schedule='linear',
+        decay_ratio=0.50,
     ),
-    'S1-D': RecipeArm(
-        arm_name='S1-D',
-        description='oracle-dropout CE + rank aux + opponent_state aux + danger aux',
-        use_oracle=True,
-        enable_rank=True,
-        enable_opp=True,
-        enable_danger=True,
+    'cosine_050': DropoutProfile(
+        arm_name='cosine_050',
+        description='cosine 1->0 over 50% budget, then longer normal continuation',
+        schedule='cosine',
+        decay_ratio=0.50,
+    ),
+    'linear_100': DropoutProfile(
+        arm_name='linear_100',
+        description='linear 1->0 over full budget, no continuation control',
+        schedule='linear',
+        decay_ratio=1.0,
+    ),
+    'cosine_100': DropoutProfile(
+        arm_name='cosine_100',
+        description='cosine 1->0 over full budget, no continuation control',
+        schedule='cosine',
+        decay_ratio=1.0,
     ),
 }
 
+DEFAULT_PROFILE_ARMS = (
+    'linear_075',
+    'cosine_075',
+    'linear_050',
+    'cosine_050',
+)
 
-GAMMA_PROFILES = {
-    'G0': {
-        'label': 'no dropout',
-        'enabled': False,
-        'schedule': 'none',
-    },
-    'G1': {
-        'label': 'linear 1->0',
-        'enabled': True,
-        'schedule': 'linear',
-    },
-    'G2': {
-        'label': 'cosine-like 1->0',
-        'enabled': True,
-        'schedule': 'cosine',
-    },
-}
+CONTROL_PROFILE_ARMS = (
+    'linear_100',
+    'cosine_100',
+)
 
 
 def ensure_stage1_section(base_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +116,10 @@ def ensure_stage1_section(base_cfg: dict[str, Any]) -> dict[str, Any]:
     oracle_cfg = cfg.get('oracle', {})
     if not isinstance(oracle_cfg, dict):
         oracle_cfg = {}
+    optim_scheduler_cfg = cfg.get('optim', {}).get('scheduler', {})
+    if not isinstance(optim_scheduler_cfg, dict):
+        optim_scheduler_cfg = {}
+
     fallback_init_state_file = (
         oracle_cfg.get('init_state_file')
         or supervised_cfg.get('best_loss_state_file')
@@ -133,6 +129,7 @@ def ensure_stage1_section(base_cfg: dict[str, Any]) -> dict[str, Any]:
     if fallback_init_state_file and not stage1_cfg.get('init_state_file'):
         stage1_cfg['init_state_file'] = fallback_init_state_file
 
+    stage1_cfg.setdefault('publish_stage2_handoff', False)
     stage1_cfg.setdefault('enable_oracle', True)
     stage1_cfg.setdefault('validation_use_oracle', False)
     stage1_cfg.setdefault('save_every', STAGE1_AB_DEFAULTS['save_every'])
@@ -142,24 +139,120 @@ def ensure_stage1_section(base_cfg: dict[str, Any]) -> dict[str, Any]:
     stage1_cfg.setdefault('old_regression_every_checks', STAGE1_AB_DEFAULTS['old_regression_every_checks'])
     stage1_cfg.setdefault('max_steps', STAGE1_AB_DEFAULTS['max_steps'])
     stage1_cfg.setdefault('max_epochs', STAGE1_AB_DEFAULTS['max_epochs'])
+    stage1_cfg.setdefault(
+        'lr',
+        supervised_cfg.get('lr', optim_scheduler_cfg.get('peak', 3e-4)),
+    )
 
     rank_aux_cfg = deepcopy(stage1_cfg.get('rank_aux', supervised_cfg.get('rank_aux', {})))
     stage1_cfg['rank_aux'] = rank_aux_cfg
 
     aux_cfg = deepcopy(cfg.get('aux', {}))
     aux_cfg.update(deepcopy(stage1_cfg.get('aux', {})))
+    if aux_cfg.get('danger_weight', 0.0):
+        aux_cfg.setdefault('danger_enabled', True)
     stage1_cfg['aux'] = aux_cfg
 
+    scheduler_cfg = deepcopy(stage1_cfg.get('scheduler', supervised_cfg.get('scheduler', {})))
+    if not scheduler_cfg:
+        scheduler_cfg = deepcopy(optim_scheduler_cfg)
+    scheduler_cfg.setdefault('type', 'cosine')
+    scheduler_cfg.setdefault('warm_up_steps', 0)
+    scheduler_cfg.setdefault('init', 1e-8)
+    scheduler_cfg.setdefault('max_steps', int(stage1_cfg['max_steps']))
+    if scheduler_cfg.get('type') == 'cosine':
+        scheduler_cfg.setdefault('final', optim_scheduler_cfg.get('final', 1e-5))
+    else:
+        scheduler_cfg.setdefault('min_lr', 1e-6)
+    stage1_cfg['scheduler'] = scheduler_cfg
+
     oracle_dropout_cfg = deepcopy(stage1_cfg.get('oracle_dropout', {}))
+    default_max_steps = int(stage1_cfg.get('max_steps', STAGE1_AB_DEFAULTS['max_steps']) or STAGE1_AB_DEFAULTS['max_steps'])
     oracle_dropout_cfg.setdefault('enabled', True)
     oracle_dropout_cfg.setdefault('schedule', 'linear')
     oracle_dropout_cfg.setdefault('gamma_start', 1.0)
     oracle_dropout_cfg.setdefault('gamma_end', 0.0)
     oracle_dropout_cfg.setdefault('hold_steps', 0)
+    oracle_dropout_cfg.setdefault('decay_steps', max(1, int(round(default_max_steps * 0.75))))
     stage1_cfg['oracle_dropout'] = oracle_dropout_cfg
 
     cfg['stage1'] = stage1_cfg
     return cfg
+
+
+def stage1_recipe_snapshot(base_cfg: dict[str, Any]) -> dict[str, Any]:
+    stage1_cfg = base_cfg.get('stage1', {})
+    return {
+        'rank_aux': deepcopy(stage1_cfg.get('rank_aux', {})),
+        'aux': deepcopy(stage1_cfg.get('aux', {})),
+    }
+
+
+def stage1_recipe_problems(base_cfg: dict[str, Any]) -> list[str]:
+    stage1_cfg = base_cfg.get('stage1', {})
+    aux_cfg = stage1_cfg.get('aux', {})
+    rank_aux_cfg = stage1_cfg.get('rank_aux', {})
+    problems = []
+
+    rank_base = float(rank_aux_cfg.get('base_weight', aux_cfg.get('next_rank_weight', 0.0)) or 0.0)
+    if rank_base <= 0:
+        problems.append('rank aux base weight <= 0')
+
+    opp_weight = float(aux_cfg.get('opponent_state_weight', 0.0) or 0.0)
+    if opp_weight <= 0:
+        problems.append('opponent_state_weight <= 0')
+
+    danger_weight = float(aux_cfg.get('danger_weight', 0.0) or 0.0)
+    danger_enabled = bool(aux_cfg.get('danger_enabled', False) or danger_weight > 0)
+    if not danger_enabled or danger_weight <= 0:
+        problems.append('danger aux disabled or danger_weight <= 0')
+
+    return problems
+
+
+def ensure_stage1_recipe_fixed(base_cfg: dict[str, Any]) -> None:
+    problems = stage1_recipe_problems(base_cfg)
+    if problems:
+        raise RuntimeError(
+            'Stage 1 fixed full-aux recipe is invalid: ' + '; '.join(problems)
+        )
+
+
+def resolve_stage1_peak_lr(base_cfg: dict[str, Any]) -> float:
+    stage1_cfg = base_cfg.get('stage1', {})
+    optim_scheduler_cfg = base_cfg.get('optim', {}).get('scheduler', {})
+    return float(stage1_cfg.get('lr', optim_scheduler_cfg.get('peak', 3e-4)))
+
+
+def build_scaled_scheduler(
+    base_cfg: dict[str, Any],
+    *,
+    max_steps: int,
+    lr_scale: float,
+    warm_up_steps_override: int | None = None,
+) -> dict[str, Any]:
+    scheduler_cfg = deepcopy(base_cfg.get('stage1', {}).get('scheduler', {}))
+    optim_scheduler_cfg = base_cfg.get('optim', {}).get('scheduler', {})
+    if not scheduler_cfg:
+        scheduler_cfg = deepcopy(optim_scheduler_cfg)
+    scheduler_cfg.setdefault('type', 'cosine')
+    scheduler_cfg.setdefault('init', 1e-8)
+    scheduler_cfg.setdefault('warm_up_steps', 0)
+    scheduler_cfg['max_steps'] = int(max_steps)
+    warm_up_steps = int(
+        warm_up_steps_override
+        if warm_up_steps_override is not None
+        else scheduler_cfg.get('warm_up_steps', 0) or 0
+    )
+    scheduler_cfg['warm_up_steps'] = min(max(warm_up_steps, 0), int(max_steps))
+    scheduler_cfg['init'] = float(scheduler_cfg.get('init', 1e-8)) * lr_scale
+    if scheduler_cfg.get('type') == 'cosine':
+        scheduler_cfg['final'] = float(
+            scheduler_cfg.get('final', optim_scheduler_cfg.get('final', 1e-5))
+        ) * lr_scale
+    else:
+        scheduler_cfg['min_lr'] = float(scheduler_cfg.get('min_lr', 1e-6)) * lr_scale
+    return scheduler_cfg
 
 
 def stage1_checkpoint_paths(exp_dir: Path) -> dict[str, Path]:
@@ -184,14 +277,23 @@ def stage1_checkpoint_paths(exp_dir: Path) -> dict[str, Path]:
 def stage1_arm_exp_dir(
     *,
     ab_name: str,
-    recipe_arm_name: str,
-    gamma_arm: str,
-    isolate_gamma_artifacts: bool,
+    profile_arm_name: str | None = None,
+    phase_name: str | None = None,
+    recipe_arm_name: str | None = None,
+    gamma_arm: str | None = None,
+    isolate_gamma_artifacts: bool = False,
 ) -> Path:
-    exp_dir = STAGE1_AB_ROOT / ab_name / recipe_arm_name
-    if isolate_gamma_artifacts:
-        exp_dir = exp_dir / gamma_arm
-    return exp_dir
+    if profile_arm_name is not None:
+        exp_dir = STAGE1_AB_ROOT / ab_name / profile_arm_name
+        if phase_name:
+            exp_dir = exp_dir / phase_name
+        return exp_dir
+    if recipe_arm_name is not None:
+        exp_dir = STAGE1_AB_ROOT / ab_name / recipe_arm_name
+        if isolate_gamma_artifacts:
+            exp_dir = exp_dir / str(gamma_arm)
+        return exp_dir
+    raise TypeError('missing profile_arm_name')
 
 
 def run_stage1_training(cfg_path: Path, log_path: Path) -> None:
@@ -261,90 +363,36 @@ def resolve_stage1_splits(base_cfg: dict[str, Any], seed: int) -> tuple[list[str
     return train_files, eval_splits, grouped
 
 
-def recipe_aux_weight(base_cfg: dict[str, Any], key: str, *, fallback: float) -> float:
-    stage1_aux = base_cfg.get('stage1', {}).get('aux', {})
-    weight = float(stage1_aux.get(key, 0.0) or 0.0)
-    if weight > 0:
-        return weight
-    return fallback
-
-
-def apply_recipe_feature_overrides(
-    base_cfg: dict[str, Any],
-    recipe_arm: RecipeArm,
-    *,
-    aux_overrides: dict[str, Any],
-    rank_aux_overrides: dict[str, Any],
-) -> None:
-    if not recipe_arm.enable_rank:
-        rank_aux_overrides['base_weight'] = 0.0
-        aux_overrides['next_rank_weight'] = 0.0
-
-    if recipe_arm.enable_opp:
-        aux_overrides['opponent_state_weight'] = recipe_aux_weight(
-            base_cfg,
-            'opponent_state_weight',
-            fallback=STAGE1_RECIPE_DEFAULT_OPP_WEIGHT,
-        )
-    else:
-        aux_overrides['opponent_state_weight'] = 0.0
-
-    if recipe_arm.enable_danger:
-        aux_overrides['danger_enabled'] = True
-        aux_overrides['danger_weight'] = recipe_aux_weight(
-            base_cfg,
-            'danger_weight',
-            fallback=STAGE1_RECIPE_DEFAULT_DANGER_WEIGHT,
-        )
-    else:
-        aux_overrides['danger_enabled'] = False
-        aux_overrides['danger_weight'] = 0.0
-
-
-def effective_recipe_sections(base_cfg: dict[str, Any], recipe_arm: RecipeArm) -> tuple[dict[str, Any], dict[str, Any]]:
-    stage1_cfg = base_cfg.get('stage1', {})
-    aux_cfg = deepcopy(stage1_cfg.get('aux', {}))
-    rank_aux_cfg = deepcopy(stage1_cfg.get('rank_aux', {}))
-    apply_recipe_feature_overrides(
-        base_cfg,
-        recipe_arm,
-        aux_overrides=aux_cfg,
-        rank_aux_overrides=rank_aux_cfg,
-    )
-    return aux_cfg, rank_aux_cfg
-
-
-def gamma_overrides(gamma_arm: str, max_steps: int) -> dict[str, Any]:
-    profile = GAMMA_PROFILES[gamma_arm]
-    if not profile['enabled']:
-        return {
-            'enabled': False,
-            'schedule': 'none',
-            'gamma_start': 1.0,
-            'gamma_end': 1.0,
-            'hold_steps': 0,
-            'decay_steps': 0,
-        }
+def disabled_oracle_dropout() -> dict[str, Any]:
     return {
-        'enabled': True,
-        'schedule': profile['schedule'],
+        'enabled': False,
+        'schedule': 'none',
         'gamma_start': 1.0,
-        'gamma_end': 0.0,
+        'gamma_end': 1.0,
         'hold_steps': 0,
-        'decay_steps': max_steps,
+        'decay_steps': 0,
     }
 
 
-def build_recipe_overrides(
+def split_profile_steps(total_steps: int, profile: DropoutProfile) -> tuple[int, int]:
+    decay_steps = min(total_steps, max(1, int(round(total_steps * profile.decay_ratio))))
+    continuation_steps = max(total_steps - decay_steps, 0)
+    return decay_steps, continuation_steps
+
+
+def build_phase_overrides(
     base_cfg: dict[str, Any],
-    recipe_arm: RecipeArm,
     *,
-    gamma_arm: str,
-    max_steps: int,
-    init_state_file: str,
     ckpts: dict[str, Path],
     seed: int,
+    max_steps: int,
+    init_state_file: str,
+    enable_oracle: bool,
+    oracle_dropout: dict[str, Any],
+    lr_scale: float,
+    warm_up_steps_override: int | None = None,
 ) -> dict[str, Any]:
+    stage1_cfg = base_cfg.get('stage1', {})
     stage1_overrides: dict[str, Any] = {
         'state_file': str(ckpts['state_file']),
         'best_state_file': str(ckpts['best_state_file']),
@@ -372,74 +420,46 @@ def build_recipe_overrides(
         'monitor_val_batches': STAGE1_AB_DEFAULTS['monitor_val_batches'],
         'full_val_every_checks': STAGE1_AB_DEFAULTS['full_val_every_checks'],
         'old_regression_every_checks': STAGE1_AB_DEFAULTS['old_regression_every_checks'],
-        'max_epochs': STAGE1_AB_DEFAULTS['max_epochs'],
-        'max_steps': max_steps,
-        'enable_oracle': recipe_arm.use_oracle,
+        'max_epochs': int(stage1_cfg.get('max_epochs', STAGE1_AB_DEFAULTS['max_epochs']) or STAGE1_AB_DEFAULTS['max_epochs']),
+        'max_steps': int(max_steps),
+        'enable_oracle': enable_oracle,
         'validation_use_oracle': False,
-        'oracle_dropout': gamma_overrides(gamma_arm, max_steps),
-        'aux': {},
-        'rank_aux': {},
+        'lr': resolve_stage1_peak_lr(base_cfg) * lr_scale,
+        'scheduler': build_scaled_scheduler(
+            base_cfg,
+            max_steps=max_steps,
+            lr_scale=lr_scale,
+            warm_up_steps_override=warm_up_steps_override,
+        ),
+        'oracle_dropout': deepcopy(oracle_dropout),
+        'aux': deepcopy(stage1_cfg.get('aux', {})),
+        'rank_aux': deepcopy(stage1_cfg.get('rank_aux', {})),
     }
-
-    aux_overrides = stage1_overrides['aux']
-    rank_aux_overrides = stage1_overrides['rank_aux']
-
-    apply_recipe_feature_overrides(
-        base_cfg,
-        recipe_arm,
-        aux_overrides=aux_overrides,
-        rank_aux_overrides=rank_aux_overrides,
-    )
-
-    if not recipe_arm.use_oracle:
-        stage1_overrides['validation_use_oracle'] = False
-        stage1_overrides['oracle_dropout'] = gamma_overrides('G0', max_steps)
-
     return {'stage1': stage1_overrides}
 
 
-def ineffective_reason(base_cfg: dict[str, Any], recipe_arm: RecipeArm) -> str | None:
-    stage1_aux, stage1_rank = effective_recipe_sections(base_cfg, recipe_arm)
-
-    if recipe_arm.enable_rank:
-        rank_base = float(stage1_rank.get('base_weight', stage1_aux.get('next_rank_weight', 0.0)) or 0.0)
-        if rank_base <= 0:
-            return 'rank aux base weight <= 0'
-    if recipe_arm.enable_opp:
-        opp_weight = float(stage1_aux.get('opponent_state_weight', 0.0) or 0.0)
-        if opp_weight <= 0:
-            return 'opponent_state_weight <= 0'
-    if recipe_arm.enable_danger:
-        danger_weight = float(stage1_aux.get('danger_weight', 0.0) or 0.0)
-        danger_enabled = bool(stage1_aux.get('danger_enabled', False) or danger_weight > 0)
-        if not danger_enabled or danger_weight <= 0:
-            return 'danger aux disabled or danger_weight <= 0'
-    return None
+def load_phase_summaries(ckpts: dict[str, Path]) -> dict[str, Any]:
+    return {
+        'best_loss': s05.load_state_summary(ckpts['best_loss_state_file']),
+        'best_acc': s05.load_state_summary(ckpts['best_acc_state_file']),
+        'best_rank': s05.load_state_summary(ckpts['best_rank_state_file']),
+        'latest': s05.load_state_summary(ckpts['state_file']),
+    }
 
 
-def run_recipe_arm(
+def run_training_phase(
     base_cfg: dict[str, Any],
     *,
     ab_name: str,
-    recipe_arm: RecipeArm,
-    gamma_arm: str,
-    isolate_gamma_artifacts: bool = False,
+    profile: DropoutProfile,
+    phase_name: str,
+    phase_description: str,
+    phase_dir: Path,
     train_files: list[str],
     eval_splits: dict[str, list[str]],
-    init_state_file: str,
-    seed: int,
-    step_scale: float,
+    cfg_overrides: dict[str, Any],
 ) -> dict[str, Any]:
-    exp_dir = stage1_arm_exp_dir(
-        ab_name=ab_name,
-        recipe_arm_name=recipe_arm.arm_name,
-        gamma_arm=gamma_arm,
-        isolate_gamma_artifacts=isolate_gamma_artifacts,
-    )
-    ckpts = stage1_checkpoint_paths(exp_dir)
-    base_max_steps = int(base_cfg['stage1'].get('max_steps', STAGE1_AB_DEFAULTS['max_steps']) or STAGE1_AB_DEFAULTS['max_steps'])
-    max_steps = max(1, int(round(base_max_steps * step_scale)))
-
+    ckpts = stage1_checkpoint_paths(phase_dir)
     s05.write_index(
         ckpts['file_index'],
         train_files=train_files,
@@ -448,57 +468,140 @@ def run_recipe_arm(
         old_regression_files=eval_splits['old_regression_files'],
         meta={
             'ab_name': ab_name,
-            'arm_name': recipe_arm.arm_name,
-            'description': recipe_arm.description,
-            'gamma_arm': gamma_arm,
+            'arm_name': profile.arm_name,
+            'description': profile.description,
+            'phase_name': phase_name,
+            'phase_description': phase_description,
             'train_files': len(train_files),
         },
     )
 
-    cfg = s05.merge_dict(
-        base_cfg,
-        build_recipe_overrides(
-            base_cfg,
-            recipe_arm,
-            gamma_arm=gamma_arm,
-            max_steps=max_steps,
-            init_state_file=init_state_file,
-            ckpts=ckpts,
-            seed=seed,
-        ),
-    )
-    cfg_path = exp_dir / 'config.toml'
-    log_path = exp_dir / 'train.log'
+    cfg = s05.merge_dict(base_cfg, cfg_overrides)
+    cfg_path = phase_dir / 'config.toml'
+    log_path = phase_dir / 'train.log'
     s05.write_toml(cfg_path, cfg)
     run_stage1_training(cfg_path, log_path)
 
-    final_best_loss = s05.load_state_summary(ckpts['best_loss_state_file'])
-    final_best_acc = s05.load_state_summary(ckpts['best_acc_state_file'])
-    final_best_rank = s05.load_state_summary(ckpts['best_rank_state_file'])
-    latest = s05.load_state_summary(ckpts['state_file'])
-
     return {
-        'arm_name': recipe_arm.arm_name,
-        'description': recipe_arm.description,
-        'gamma_arm': gamma_arm,
-        'ineffective_reason': ineffective_reason(base_cfg, recipe_arm),
-        'use_oracle': recipe_arm.use_oracle,
-        'enable_rank': recipe_arm.enable_rank,
-        'enable_opp': recipe_arm.enable_opp,
-        'enable_danger': recipe_arm.enable_danger,
-        'final': {
-            'best_loss': final_best_loss,
-            'best_acc': final_best_acc,
-            'best_rank': final_best_rank,
-            'latest': latest,
-        },
+        'phase_name': phase_name,
+        'description': phase_description,
+        'final': load_phase_summaries(ckpts),
         'paths': {
             name: str(path) for name, path in ckpts.items()
         } | {
             'config_path': str(cfg_path),
             'log_path': str(log_path),
         },
-        'score': s05.score_summary(final_best_loss),
+    }
+
+
+def run_profile_arm(
+    base_cfg: dict[str, Any],
+    *,
+    ab_name: str,
+    profile: DropoutProfile,
+    train_files: list[str],
+    eval_splits: dict[str, list[str]],
+    init_state_file: str,
+    seed: int,
+    step_scale: float,
+) -> dict[str, Any]:
+    base_max_steps = int(base_cfg['stage1'].get('max_steps', STAGE1_AB_DEFAULTS['max_steps']) or STAGE1_AB_DEFAULTS['max_steps'])
+    total_steps = max(1, int(round(base_max_steps * step_scale)))
+    decay_steps, continuation_steps = split_profile_steps(total_steps, profile)
+
+    transition_dir = stage1_arm_exp_dir(
+        ab_name=ab_name,
+        profile_arm_name=profile.arm_name,
+        phase_name='oracle_transition',
+    )
+    transition_ckpts = stage1_checkpoint_paths(transition_dir)
+    transition_result = run_training_phase(
+        base_cfg,
+        ab_name=ab_name,
+        profile=profile,
+        phase_name='oracle_transition',
+        phase_description=f'{profile.schedule} oracle-dropout transition',
+        phase_dir=transition_dir,
+        train_files=train_files,
+        eval_splits=eval_splits,
+        cfg_overrides=build_phase_overrides(
+            base_cfg,
+            ckpts=transition_ckpts,
+            seed=seed,
+            max_steps=decay_steps,
+            init_state_file=init_state_file,
+            enable_oracle=True,
+            oracle_dropout={
+                'enabled': True,
+                'schedule': profile.schedule,
+                'gamma_start': 1.0,
+                'gamma_end': 0.0,
+                'hold_steps': 0,
+                'decay_steps': decay_steps,
+            },
+            lr_scale=1.0,
+        ),
+    )
+
+    phases = {
+        'oracle_transition': transition_result,
+    }
+    final_result = transition_result
+
+    if continuation_steps > 0:
+        continuation_init_state = transition_result['paths']['state_file']
+        if not Path(continuation_init_state).exists():
+            raise RuntimeError(
+                'missing Stage 1 normal continuation init checkpoint: '
+                f'{continuation_init_state}'
+            )
+        continuation_dir = stage1_arm_exp_dir(
+            ab_name=ab_name,
+            profile_arm_name=profile.arm_name,
+            phase_name='normal_continue',
+        )
+        continuation_ckpts = stage1_checkpoint_paths(continuation_dir)
+        continuation_result = run_training_phase(
+            base_cfg,
+            ab_name=ab_name,
+            profile=profile,
+            phase_name='normal_continue',
+            phase_description='normal continuation after gamma=0',
+            phase_dir=continuation_dir,
+            train_files=train_files,
+            eval_splits=eval_splits,
+            cfg_overrides=build_phase_overrides(
+                base_cfg,
+                ckpts=continuation_ckpts,
+                seed=seed + 1,
+                max_steps=continuation_steps,
+                init_state_file=continuation_init_state,
+                enable_oracle=False,
+                oracle_dropout=disabled_oracle_dropout(),
+                lr_scale=profile.continue_lr_scale,
+                warm_up_steps_override=0,
+            ),
+        )
+        phases['normal_continue'] = continuation_result
+        final_result = continuation_result
+
+    return {
+        'arm_name': profile.arm_name,
+        'description': profile.description,
+        'schedule': profile.schedule,
+        'decay_ratio': profile.decay_ratio,
+        'continuation_ratio': continuation_steps / total_steps,
+        'continue_lr_scale': profile.continue_lr_scale,
+        'phase_steps': {
+            'total_steps': total_steps,
+            'oracle_transition_steps': decay_steps,
+            'normal_continue_steps': continuation_steps,
+        },
+        'final': final_result['final'],
+        'phases': phases,
+        'paths': final_result['paths'],
+        'score': s05.score_summary(final_result['final']['best_loss']),
     }
 
 
@@ -515,7 +618,9 @@ def rank_results(results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 'arm_name': name,
                 'description': result.get('description'),
-                'gamma_arm': result.get('gamma_arm'),
+                'schedule': result.get('schedule'),
+                'decay_ratio': result.get('decay_ratio'),
+                'continuation_ratio': result.get('continuation_ratio'),
                 'eligible': recent_loss <= best_loss + s05.LOSS_EPSILON,
                 'winner': name == winner_name,
                 'full_recent_loss': recent_loss,
@@ -545,34 +650,36 @@ def save_results(ab_name: str, payload: dict[str, Any]) -> Path:
     return out_path
 
 
-def collect_effectiveness_warnings(base_cfg: dict[str, Any], recipe_arm_names: list[str]) -> list[str]:
-    warnings = []
-    for arm_name in recipe_arm_names:
-        recipe_arm = RECIPE_ARMS[arm_name]
-        reason = ineffective_reason(base_cfg, recipe_arm)
-        if reason is not None:
-            warnings.append(f'{arm_name}: {reason}')
-    return warnings
+def normalize_profile_arm_names(profile_arm_names: list[str] | None) -> list[str]:
+    if not profile_arm_names:
+        return list(DEFAULT_PROFILE_ARMS)
+    normalized = []
+    for arm_name in profile_arm_names:
+        if arm_name not in PROFILE_ARMS:
+            raise ValueError(f'unknown Stage 1 profile arm: {arm_name}')
+        if arm_name not in normalized:
+            normalized.append(arm_name)
+    return normalized
 
 
-def run_recipe_ab(
+def run_profile_ab(
     base_cfg: dict[str, Any],
     *,
     ab_name: str,
     seed: int,
     step_scale: float,
-    gamma_arm: str,
+    profile_arm_names: list[str],
     init_state_file: str,
 ) -> dict[str, Any]:
+    selected_profiles = normalize_profile_arm_names(profile_arm_names)
     train_files, eval_splits, _ = resolve_stage1_splits(base_cfg, seed)
     results = {}
-    for recipe_arm in RECIPE_ARMS.values():
-        results[recipe_arm.arm_name] = run_recipe_arm(
+    for arm_name in selected_profiles:
+        profile = PROFILE_ARMS[arm_name]
+        results[arm_name] = run_profile_arm(
             base_cfg,
             ab_name=ab_name,
-            recipe_arm=recipe_arm,
-            gamma_arm=gamma_arm,
-            isolate_gamma_artifacts=False,
+            profile=profile,
             train_files=train_files,
             eval_splits=eval_splits,
             init_state_file=init_state_file,
@@ -581,16 +688,16 @@ def run_recipe_ab(
         )
     winner_name, selection = s05.select_winner_by_policy(results)
     payload = {
-        'mode': 'recipe',
+        'mode': 'profile',
         'seed': seed,
         'step_scale': step_scale,
-        'gamma_arm': gamma_arm,
+        'profile_arms': selected_profiles,
         'init_state_file': init_state_file,
-        'warnings': collect_effectiveness_warnings(base_cfg, list(RECIPE_ARMS)),
         'train_files': len(train_files),
         'eval_split_counts': {
             key: len(value) for key, value in eval_splits.items()
         },
+        'recipe': stage1_recipe_snapshot(base_cfg),
         'winner': winner_name,
         'winner_metrics': results[winner_name]['final']['best_loss'],
         'selection': selection,
@@ -601,174 +708,68 @@ def run_recipe_ab(
     return payload
 
 
-def run_gamma_ab(
-    base_cfg: dict[str, Any],
-    *,
-    ab_name: str,
-    seed: int,
-    step_scale: float,
-    recipe_arm_name: str,
-    init_state_file: str,
-) -> dict[str, Any]:
-    if recipe_arm_name not in RECIPE_ARMS:
-        raise ValueError(f'unknown recipe arm: {recipe_arm_name}')
-    recipe_arm = RECIPE_ARMS[recipe_arm_name]
-    train_files, eval_splits, _ = resolve_stage1_splits(base_cfg, seed)
-    results = {}
-    for gamma_arm in GAMMA_PROFILES:
-        arm_name = f'{recipe_arm_name}_{gamma_arm}'
-        result = run_recipe_arm(
-            base_cfg,
-            ab_name=ab_name,
-            recipe_arm=recipe_arm,
-            gamma_arm=gamma_arm,
-            isolate_gamma_artifacts=True,
-            train_files=train_files,
-            eval_splits=eval_splits,
-            init_state_file=init_state_file,
-            seed=seed,
-            step_scale=step_scale,
-        )
-        result['arm_name'] = arm_name
-        results[arm_name] = result
-    winner_name, selection = s05.select_winner_by_policy(results)
+def list_arms_payload(base_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
-        'mode': 'gamma',
-        'seed': seed,
-        'step_scale': step_scale,
-        'recipe_arm': recipe_arm_name,
-        'init_state_file': init_state_file,
-        'warnings': collect_effectiveness_warnings(base_cfg, [recipe_arm_name]),
-        'train_files': len(train_files),
-        'eval_split_counts': {
-            key: len(value) for key, value in eval_splits.items()
+        'profile_arms': {
+            name: {
+                'description': arm.description,
+                'schedule': arm.schedule,
+                'decay_ratio': arm.decay_ratio,
+                'continue_lr_scale': arm.continue_lr_scale,
+                'continuation_ratio': 1.0 - arm.decay_ratio,
+            }
+            for name, arm in PROFILE_ARMS.items()
         },
-        'winner': winner_name,
-        'winner_metrics': results[winner_name]['final']['best_loss'],
-        'selection': selection,
-        'ranking': rank_results(results),
-        'results': results,
+        'default_shortlist': list(DEFAULT_PROFILE_ARMS),
+        'control_profiles': list(CONTROL_PROFILE_ARMS),
     }
-    payload['summary_path'] = str(save_results(ab_name, payload))
-    return payload
-
-
-def run_block_c(
-    base_cfg: dict[str, Any],
-    *,
-    ab_name: str,
-    seed: int,
-    step_scale: float,
-    recipe_gamma_arm: str,
-    gamma_recipe_arm: str,
-    init_state_file: str,
-) -> dict[str, Any]:
-    recipe_ab_name = f'{ab_name}_recipe'
-    recipe_payload = run_recipe_ab(
-        base_cfg,
-        ab_name=recipe_ab_name,
-        seed=seed,
-        step_scale=step_scale,
-        gamma_arm=recipe_gamma_arm,
-        init_state_file=init_state_file,
-    )
-    gamma_recipe = recipe_payload['winner']
-    if gamma_recipe == 'S1-A':
-        gamma_recipe = gamma_recipe_arm
-    gamma_ab_name = f'{ab_name}_gamma'
-    gamma_payload = run_gamma_ab(
-        base_cfg,
-        ab_name=gamma_ab_name,
-        seed=seed + 1000,
-        step_scale=step_scale,
-        recipe_arm_name=gamma_recipe,
-        init_state_file=init_state_file,
-    )
-    payload = {
-        'mode': 'block_c',
-        'seed': seed,
-        'step_scale': step_scale,
-        'init_state_file': init_state_file,
-        'recipe_gamma_arm': recipe_gamma_arm,
-        'gamma_recipe_arm': gamma_recipe,
-        'recipe': recipe_payload,
-        'gamma': gamma_payload,
-    }
-    payload['summary_path'] = str(save_results(ab_name, payload))
+    if base_cfg is not None:
+        payload['recipe'] = stage1_recipe_snapshot(base_cfg)
+        payload['recipe_problems'] = stage1_recipe_problems(base_cfg)
     return payload
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('recipe', 'gamma', 'block_c'), default='block_c')
     parser.add_argument('--ab-name')
     parser.add_argument('--seed', type=int, default=STAGE1_AB_DEFAULTS['seed'])
     parser.add_argument('--step-scale', type=float, default=1.0)
-    parser.add_argument('--gamma-arm', choices=sorted(GAMMA_PROFILES), default='G1')
-    parser.add_argument('--recipe-arm', choices=sorted(RECIPE_ARMS), default='S1-B')
+    parser.add_argument('--profile-arm', action='append', dest='profile_arms')
+    parser.add_argument('--include-controls', action='store_true')
     parser.add_argument('--init-state')
     parser.add_argument('--list-arms', action='store_true')
     args = parser.parse_args()
 
+    base_cfg = ensure_stage1_section(s05.build_base_config())
+
     if args.list_arms:
-        print(json.dumps(
-            {
-                'recipe_arms': {
-                    name: {
-                        'description': arm.description,
-                        'use_oracle': arm.use_oracle,
-                        'enable_rank': arm.enable_rank,
-                        'enable_opp': arm.enable_opp,
-                        'enable_danger': arm.enable_danger,
-                    }
-                    for name, arm in RECIPE_ARMS.items()
-                },
-                'gamma_profiles': GAMMA_PROFILES,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ))
+        print(json.dumps(list_arms_payload(base_cfg), ensure_ascii=False, indent=2))
         return
 
-    base_cfg = ensure_stage1_section(s05.build_base_config())
+    ensure_stage1_recipe_fixed(base_cfg)
+
     init_state_file = args.init_state or base_cfg['stage1'].get('init_state_file', '')
     if not init_state_file:
         raise RuntimeError('missing Stage 1 init checkpoint; pass --init-state or set stage1.init_state_file')
+    stage05_formal.ensure_stage1_canonical_handoff_ready(init_state_file)
     if not Path(init_state_file).exists():
         raise RuntimeError(f'Stage 1 init checkpoint does not exist: {init_state_file}')
 
-    if args.mode == 'recipe':
-        ab_name = args.ab_name or f'stage1_recipe_{args.gamma_arm.lower()}'
-        payload = run_recipe_ab(
-            base_cfg,
-            ab_name=ab_name,
-            seed=args.seed,
-            step_scale=args.step_scale,
-            gamma_arm=args.gamma_arm,
-            init_state_file=init_state_file,
-        )
-    elif args.mode == 'gamma':
-        ab_name = args.ab_name or f'stage1_gamma_{args.recipe_arm.lower()}'
-        payload = run_gamma_ab(
-            base_cfg,
-            ab_name=ab_name,
-            seed=args.seed,
-            step_scale=args.step_scale,
-            recipe_arm_name=args.recipe_arm,
-            init_state_file=init_state_file,
-        )
-    else:
-        ab_name = args.ab_name or 'stage1_block_c'
-        payload = run_block_c(
-            base_cfg,
-            ab_name=ab_name,
-            seed=args.seed,
-            step_scale=args.step_scale,
-            recipe_gamma_arm=args.gamma_arm,
-            gamma_recipe_arm=args.recipe_arm,
-            init_state_file=init_state_file,
+    profile_arm_names = normalize_profile_arm_names(args.profile_arms)
+    if args.include_controls:
+        profile_arm_names = normalize_profile_arm_names(
+            profile_arm_names + list(CONTROL_PROFILE_ARMS)
         )
 
+    ab_name = args.ab_name or 'stage1_profile_screen'
+    payload = run_profile_ab(
+        base_cfg,
+        ab_name=ab_name,
+        seed=args.seed,
+        step_scale=args.step_scale,
+        profile_arm_names=profile_arm_names,
+        init_state_file=init_state_file,
+    )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

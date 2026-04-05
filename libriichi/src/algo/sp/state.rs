@@ -1,5 +1,5 @@
 use super::CALC_SHANTEN_FN;
-use super::tile::{DiscardTile, DrawTile, RequiredTile};
+use super::tile::{DiscardTile, DrawTile, DrawTileScan, RequiredDrawTileScan, RequiredTile};
 use crate::tile::Tile;
 use crate::{must_tile, t, tu8};
 
@@ -128,14 +128,15 @@ impl State {
         discard_tiles
     }
 
-    pub(super) fn get_draw_tiles(
-        &self,
-        shanten: i8,
-        tehai_len_div3: u8,
-    ) -> ArrayVec<[DrawTile; 37]> {
-        let mut draw_tiles = ArrayVec::default();
+    pub(super) fn scan_draw_tiles(&self, shanten: i8, tehai_len_div3: u8) -> DrawTileScan {
+        self.scan_draw_tiles_inner(shanten, tehai_len_div3, None)
+    }
 
+    pub(super) fn get_required_tiles(&self, tehai_len_div3: u8) -> ArrayVec<[RequiredTile; 34]> {
         let mut tehai = self.tehai;
+        let shanten = CALC_SHANTEN_FN(&tehai, tehai_len_div3);
+        let mut required_tiles = ArrayVec::default();
+
         for (tid, &count) in self.tiles_in_wall.iter().enumerate() {
             if count == 0 {
                 continue;
@@ -145,7 +146,62 @@ impl State {
             let shanten_after = CALC_SHANTEN_FN(&tehai, tehai_len_div3);
             tehai[tid] -= 1;
 
+            if shanten_after < shanten {
+                required_tiles.push(RequiredTile {
+                    tile: must_tile!(tid),
+                    count,
+                });
+            }
+        }
+
+        required_tiles
+    }
+
+    pub(super) fn scan_draw_tiles_with_required(
+        &self,
+        shanten: i8,
+        tehai_len_div3: u8,
+    ) -> RequiredDrawTileScan {
+        let mut required_tiles = ArrayVec::default();
+        let draw_scan =
+            self.scan_draw_tiles_inner(shanten, tehai_len_div3, Some(&mut required_tiles));
+        RequiredDrawTileScan {
+            draw_scan,
+            required_tiles,
+        }
+    }
+
+    fn scan_draw_tiles_inner(
+        &self,
+        shanten: i8,
+        tehai_len_div3: u8,
+        mut required_tiles: Option<&mut ArrayVec<[RequiredTile; 34]>>,
+    ) -> DrawTileScan {
+        let mut draw_tiles = ArrayVec::default();
+        let mut sum_required_tiles = 0;
+        let mut sum_left_tiles = 0;
+
+        let mut tehai = self.tehai;
+        for (tid, &count) in self.tiles_in_wall.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            sum_left_tiles += count;
+
+            tehai[tid] += 1;
+            let shanten_after = CALC_SHANTEN_FN(&tehai, tehai_len_div3);
+            tehai[tid] -= 1;
+
             let shanten_diff = shanten_after - shanten;
+            if shanten_diff < 0 {
+                if let Some(required_tiles) = required_tiles.as_deref_mut() {
+                    required_tiles.push(RequiredTile {
+                        tile: must_tile!(tid),
+                        count,
+                    });
+                }
+                sum_required_tiles += count;
+            }
 
             let tile = must_tile!(tid);
             match (tid as u8, self.akas_in_wall) {
@@ -171,33 +227,11 @@ impl State {
             }
         }
 
-        draw_tiles
-    }
-
-    pub(super) fn get_required_tiles(&self, tehai_len_div3: u8) -> ArrayVec<[RequiredTile; 34]> {
-        let mut tehai = self.tehai;
-
-        let shanten = CALC_SHANTEN_FN(&tehai, tehai_len_div3);
-        let mut required_tiles = ArrayVec::default();
-
-        for (tid, &count) in self.tiles_in_wall.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
-
-            tehai[tid] += 1;
-            let shanten_after = CALC_SHANTEN_FN(&tehai, tehai_len_div3);
-            tehai[tid] -= 1;
-
-            if shanten_after < shanten {
-                required_tiles.push(RequiredTile {
-                    tile: must_tile!(tid),
-                    count,
-                });
-            }
+        DrawTileScan {
+            draw_tiles,
+            sum_required_tiles,
+            sum_left_tiles,
         }
-
-        required_tiles
     }
 
     pub(super) fn sum_left_tiles(&self) -> u8 {

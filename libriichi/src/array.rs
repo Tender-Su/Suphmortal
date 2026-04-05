@@ -28,6 +28,11 @@ where
     }
 
     #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.arr
+    }
+
+    #[inline]
     pub fn reset(&mut self) {
         self.arr.fill(Default::default());
     }

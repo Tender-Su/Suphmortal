@@ -79,6 +79,56 @@ python mortal/run_stage05_winner_refine_distributed.py dispatch `
 
 缺任何一个，远端 `winner_refine` 都可能直接失败。
 
+## 当前双机 formal_1v3 口径
+
+- 同样不要让两台机器各自独立写同一个 `run_dir`
+- 当前推荐仍由桌面机统一调度：
+
+```powershell
+python mortal/run_stage05_formal_1v3_distributed.py dispatch `
+  --run-name <run_name>
+```
+
+- 当前 `formal_1v3` 与 `winner_refine` 的远端依赖基本一致：
+  - `mortal/config.toml`
+  - `logs/stage05_fidelity/<run_name>/state.json`
+- 但它额外依赖当前 run 已经存在 `formal` checkpoint pack；没有 `formal.status = completed` 时不要启动
+
+## 当前双机 formal_train triplet 口径
+
+- 当前已固定官方 `P1 winner = anchor*1.0`
+- 当前已固定第一替补 = `opp_lean*0.85`
+- 当前 formal triplet 仍由桌面机统一调度：
+
+```powershell
+python mortal/run_stage05_formal_distributed.py dispatch `
+  --run-name s05_formal_triplet_20260405 `
+  --source-run-name s05_fidelity_p1_top3_cali_slim_20260329_001413 `
+  --candidate-arm 'opp_lean*0.85' `
+  --candidate-arm 'anchor*1.0' `
+  --candidate-arm 'opp_lean(rank--/danger++)'
+```
+
+- `run_stage05_formal_distributed.py` 会根据 source run 的 `winner_refine_round` 把这些 alias 解析回实际 arm id
+- 当前远端默认：
+  - 远端仓库：`C:\Users\numbe\Desktop\MahjongAI`
+  - 远端 Python：`C:\Users\numbe\miniconda3\envs\mortal\python.exe`
+  - 远端启动方式：笔记本交互会话里的可见窗口
+  - remote formal train 默认：`4 / 10 / 4`
+  - remote formal val 默认：`7 / 5`
+
+### 远端必备资产
+
+- 当前代码与脚本必须已经同步到笔记本 Git 工作树
+- `mortal/config.toml`
+- `mortal/checkpoints/file_index_supervised_json.pth`
+
+与当前 `winner_refine` / `formal_1v3` 的一个关键区别是：
+
+- `run_stage05_formal_distributed.py` 会主动把 dispatch 状态同步到远端
+- 远端 formal 完成后，也会把 child run 与 `stage05_ab/<child_run_name>_formal` 产物拉回台式机
+- 所以后续继续跑 child run 的 `formal_1v3` 时，默认直接在台式机本地 child run 上继续即可
+
 ## 最稳的远程操作方式
 
 ### 短命令
@@ -127,7 +177,7 @@ scp -i "$HOME\.ssh\mahjong_laptop_ed25519" local.ps1 `
 ### 远端上下文恢复依赖文件索引
 
 - `run_stage05_ab.load_all_files()` 会先读 `file_index_supervised_json.pth`
-- 所以后续 agent 启动双机 `winner_refine` 前，不能只查代码和 `state.json`
+- 所以后续 agent 启动双机 `winner_refine` 或 `formal triplet` 前，不能只查代码和 `state.json`
 
 ## 后续 agent 的起手检查
 

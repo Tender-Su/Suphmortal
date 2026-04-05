@@ -140,7 +140,7 @@ impl OneVsThree {
             })
             .collect();
 
-        let results = batch_game.run(&mut agents, &indexes, &seeds)?;
+        let results = batch_game.run(&mut agents, &indexes, &seeds, self.log_dir.is_some())?;
 
         if let Some(dir) = &self.log_dir {
             log::info!("dumping game logs");

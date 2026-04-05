@@ -79,6 +79,8 @@ git push origin HEAD:main
 - 当前建议把下面这些文件正式纳入 Git，并通过 `main -> laptop-sync` 同步：
   - `mortal/distributed_dispatch.py`
   - `mortal/run_stage05_winner_refine_distributed.py`
+  - `mortal/run_stage05_formal_distributed.py`
+  - `mortal/run_stage05_formal_1v3_distributed.py`
   - 对应测试与文档
 - 不要继续长期依赖“代码只在桌面机本地、再手工 `scp` 到笔记本”这种方式
 - 手工 `scp` 只适合：

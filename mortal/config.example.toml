@@ -147,10 +147,11 @@ max_val_files = 0
 seed = 20260318
 enable_oracle = true
 validation_use_oracle = false
+lr = 3e-4
 
 [stage1.scheduler]
 type = 'cosine' # plateau | cosine
-warm_up_steps = 5000
+warm_up_steps = 1000
 init = 1e-8
 factor = 0.5
 patience = 2
@@ -161,12 +162,12 @@ final = 1e-5
 max_steps = 30000
 
 [stage1.rank_aux]
-base_weight = 0.03
+base_weight = 0.001548
 south_factor = 1.59
 all_last_factor = 1.617
 gap_focus_points = 4000
 gap_close_bonus = 0.0
-max_weight = 0.10
+max_weight = 0.00516
 
 [stage1.rank_aux.turn_weighting]
 early_factor = 1.00
@@ -177,16 +178,16 @@ late_min_turn = 12
 
 [stage1.aux]
 next_rank_weight = 0.2
-opponent_state_weight = 0.0
+opponent_state_weight = 0.00135
 opponent_shanten_weight = 0.8506568408072642
 opponent_tenpai_weight = 1.1493431591927359
-danger_enabled = false
-danger_weight = 0.0
+danger_enabled = true
+danger_weight = 0.00804
 danger_any_weight = 0.09042179466099699
 danger_value_weight = 0.8180402859274302
 danger_player_weight = 0.09153791941157279
 danger_focal_gamma = 0.0
-danger_ramp_steps = 0
+danger_ramp_steps = 1000
 danger_value_cap = 96000.0
 
 [stage1.aux.opponent_turn_weighting]
@@ -205,11 +206,11 @@ late_min_turn = 12
 
 [stage1.oracle_dropout]
 enabled = true
-schedule = 'linear' # none | linear | cosine
+schedule = 'linear' # screening only compares dropout curve/ratio, not auxiliary-head recipe
 gamma_start = 1.0
 gamma_end = 0.0
 hold_steps = 0
-decay_steps = 20000
+decay_steps = 22500
 
 [dataset]
 globs = ['/path/to/dataset_json/**/*.json']
@@ -269,7 +270,7 @@ late_factor = 2.50
 early_max_turn = 4
 late_min_turn = 12
 
-[oracle]
+[oracle] # legacy Stage 1 fallback only; canonical Stage 1 reads [stage1]
 enable = true
 init_state_file = '/path/to/stage0_5_supervised.pth'
 gamma_start = 1.0

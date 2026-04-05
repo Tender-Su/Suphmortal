@@ -16,6 +16,9 @@ pub trait Agent {
     fn oracle_obs_version(&self) -> Option<u32> {
         None
     }
+    fn uses_event_log(&self) -> bool {
+        false
+    }
 
     fn react(
         &mut self,
@@ -40,6 +43,9 @@ pub trait BatchAgent {
     fn name(&self) -> String;
     fn oracle_obs_version(&self) -> Option<u32> {
         None
+    }
+    fn uses_event_log(&self) -> bool {
+        false
     }
 
     fn set_scene(

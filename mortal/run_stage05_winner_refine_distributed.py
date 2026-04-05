@@ -30,6 +30,7 @@ DEFAULT_LOCAL_LABEL = 'desktop'
 DEFAULT_REMOTE_LABEL = 'laptop'
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_MAX_ATTEMPTS = 2
+INTERRUPT_COMMAND_TIMEOUT_SECONDS = 10.0
 DEFAULT_SEED2_MIN_KEEP = 4
 DEFAULT_SEED2_SELECTION_GAP = 0.001
 DEFAULT_SEED2_MAX_KEEP = 12
@@ -1347,12 +1348,16 @@ def load_task_result(path: Path) -> dict[str, Any]:
 def interrupt_local_active_task(active: ActiveTask) -> None:
     if active.process.poll() is not None:
         return
-    subprocess.run(
-        ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=INTERRUPT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def interrupt_remote_active_task(active: ActiveTask) -> None:
@@ -1390,19 +1395,27 @@ def interrupt_remote_active_task(active: ActiveTask) -> None:
         command.extend(['-i', active.worker.ssh_key])
     command.append(active.worker.host or DEFAULT_REMOTE_HOST)
     command.append(kill_command)
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if active.process.poll() is None:
+    try:
         subprocess.run(
-            ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=INTERRUPT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        pass
+    if active.process.poll() is None:
+        try:
+            subprocess.run(
+                ['taskkill', '/PID', str(active.process.pid), '/T', '/F'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=INTERRUPT_COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def interrupt_active_task(active: ActiveTask) -> None:

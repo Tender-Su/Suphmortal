@@ -2,11 +2,14 @@ use super::{BatchAgent, InvisibleState};
 use crate::array::Simple2DArray;
 use crate::consts::ACTION_SPACE;
 use crate::consts::obs_shape;
+use crate::consts::oracle_obs_shape;
 use crate::mjai::{Event, EventExt, Metadata};
 use crate::state::PlayerState;
 use crate::{must_tile, tu8};
+use std::cell::UnsafeCell;
 use std::mem;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -24,6 +27,8 @@ pub struct MortalBatchAgent {
     enable_quick_eval: bool,
     enable_rule_based_agari_guard: bool,
     enable_metadata: bool,
+    use_obs_encode_into: bool,
+    profile_enabled: bool,
     name: String,
     player_ids: Vec<u8>,
 
@@ -37,65 +42,238 @@ pub struct MortalBatchAgent {
 
     evaluated: bool,
     quick_eval_reactions: Vec<Option<Event>>,
+    perf: AgentPerfStats,
+    state_batch: Arc<DirectStateBatch>,
+    mask_batch: Arc<DirectMaskBatch>,
+    batch_input_owner: Py<BatchInputOwner>,
 
     wg: WaitGroup,
     sync_fields: Arc<Mutex<SyncFields>>,
 }
 
+#[pyclass]
+struct BatchInputOwner {
+    _state_batch_owner: Arc<DirectStateBatch>,
+    _mask_batch_owner: Arc<DirectMaskBatch>,
+    invisible_state_batch: Option<Array3<f32>>,
+}
+
+struct DirectStateBatch {
+    rows: usize,
+    capacity: usize,
+    data: UnsafeCell<Box<[f32]>>,
+}
+
+struct DirectMaskBatch {
+    capacity: usize,
+    data: UnsafeCell<Box<[[bool; ACTION_SPACE]]>>,
+}
+
+// SAFETY: The backing storage is fixed-size and never reallocated after
+// construction. Callers only mutate disjoint slot ranges reserved under
+// `SyncFields`, and `evaluate()` waits for all encoding workers before reading.
+unsafe impl Send for DirectStateBatch {}
+// SAFETY: See the `Send` justification above.
+unsafe impl Sync for DirectStateBatch {}
+// SAFETY: The backing storage is fixed-size and workers only write to disjoint
+// slot indices reserved under `SyncFields`.
+unsafe impl Send for DirectMaskBatch {}
+// SAFETY: See the `Send` justification above.
+unsafe impl Sync for DirectMaskBatch {}
+
 struct SyncFields {
-    states: Vec<Simple2DArray<34, f32>>,
-    invisible_states: Vec<Array2<f32>>,
-    masks: Vec<[bool; ACTION_SPACE]>,
+    invisible_states: Vec<Option<Array2<f32>>>,
     action_idxs: Vec<usize>,
     kan_action_idxs: Vec<Option<usize>>,
+    next_slot: usize,
 }
 
-fn stack_state_batch(states: Vec<Simple2DArray<34, f32>>, field_name: &str) -> Result<Array3<f32>> {
-    ensure!(!states.is_empty(), "empty {field_name} batch");
-    let batch_size = states.len();
-    let first_rows = states[0].rows();
-    let mut stacked = Array3::<f32>::zeros((batch_size, first_rows, 34));
-    for (index, state) in states.into_iter().enumerate() {
-        ensure!(
-            state.rows() == first_rows,
-            "mismatched {field_name} shape at batch index {index}",
-        );
-        let mut view = stacked.slice_mut(s![index, .., ..]);
-        let buf = view
-            .as_slice_mut()
-            .context("stack_state_batch expected contiguous output slice")?;
-        buf.copy_from_slice(state.as_slice());
-    }
-    Ok(stacked)
+#[derive(Default)]
+struct AgentPerfStats {
+    evaluate_calls: usize,
+    total_batch_items: usize,
+    max_batch_size: usize,
+    wait_encode_elapsed: Duration,
+    batch_pack_elapsed: Duration,
+    py_call_elapsed: Duration,
+    py_extract_elapsed: Duration,
+    post_eval_elapsed: Duration,
+    reaction_decode_elapsed: Duration,
 }
 
-fn stack_array2_state_batch(states: Vec<Array2<f32>>, field_name: &str) -> Result<Array3<f32>> {
+fn fill_invisible_state_batch(
+    owner: &mut BatchInputOwner,
+    states: &[Option<Array2<f32>>],
+    field_name: &str,
+) -> Result<()> {
     ensure!(!states.is_empty(), "empty {field_name} batch");
-    let batch_size = states.len();
-    let first_dim = states[0].raw_dim();
-    let mut stacked = Array3::<f32>::zeros((batch_size, first_dim[0], first_dim[1]));
-    for (index, state) in states.into_iter().enumerate() {
+    let first_dim = states[0]
+        .as_ref()
+        .context("missing invisible state for batch slot 0")?
+        .raw_dim();
+    let batch = owner
+        .invisible_state_batch
+        .as_mut()
+        .context("missing invisible_state_batch allocation")?;
+    ensure!(
+        batch.dim().0 >= states.len()
+            && batch.dim().1 == first_dim[0]
+            && batch.dim().2 == first_dim[1],
+        "insufficient preallocated invisible_state_batch capacity",
+    );
+    for (index, state) in states.iter().enumerate() {
+        let state = state
+            .as_ref()
+            .with_context(|| format!("missing {field_name} at batch index {index}"))?;
         ensure!(
             state.raw_dim() == first_dim,
             "mismatched {field_name} shape at batch index {index}",
         );
-        stacked.slice_mut(s![index, .., ..]).assign(&state);
+        let mut dst = batch.slice_mut(s![index, .., ..]);
+        dst.as_slice_mut()
+            .context("fill_invisible_state_batch expected contiguous output slice")?
+            .copy_from_slice(
+                state
+                    .as_slice()
+                    .context("fill_invisible_state_batch expected contiguous input slice")?,
+            );
     }
-    Ok(stacked)
+    Ok(())
 }
 
-fn stack_mask_batch(masks: Vec<[bool; ACTION_SPACE]>) -> Result<Array2<bool>> {
-    ensure!(!masks.is_empty(), "empty mask batch");
-    let batch_size = masks.len();
-    let mut stacked = Array2::<bool>::default((batch_size, ACTION_SPACE));
-    for (index, mask) in masks.into_iter().enumerate() {
-        let mut view = stacked.slice_mut(s![index, ..]);
-        let buf = view
-            .as_slice_mut()
-            .context("stack_mask_batch expected contiguous output slice")?;
-        buf.copy_from_slice(&mask);
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
     }
-    Ok(stacked)
+}
+
+fn agent_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag("MORTAL_AGENT_PROFILE", false))
+}
+
+fn encode_obs_legacy(
+    state: &PlayerState,
+    version: u32,
+    at_kan_select: bool,
+) -> (Simple2DArray<34, f32>, [bool; ACTION_SPACE]) {
+    let (feature, mask) = state.encode_obs(version, at_kan_select);
+    let mut feature_simple = Simple2DArray::new(feature.nrows());
+    feature_simple.as_mut_slice().copy_from_slice(
+        feature
+            .as_slice()
+            .expect("encode_obs produced a non-contiguous array"),
+    );
+    let mask = mask
+        .to_vec()
+        .try_into()
+        .expect("encode_obs produced an unexpected mask length");
+    (feature_simple, mask)
+}
+
+impl DirectStateBatch {
+    fn new(capacity: usize, rows: usize) -> Self {
+        Self {
+            rows,
+            capacity,
+            data: UnsafeCell::new(vec![0.0; capacity * rows * 34].into_boxed_slice()),
+        }
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    #[inline]
+    fn slot_len(&self) -> usize {
+        self.rows * 34
+    }
+
+    fn write_slot(
+        &self,
+        slot: usize,
+        state: &PlayerState,
+        version: u32,
+        at_kan_select: bool,
+        use_obs_encode_into: bool,
+    ) -> [bool; ACTION_SPACE] {
+        let slot_slice = self.slot_slice_mut(slot);
+        slot_slice.fill(0.0);
+        let mut mask = [false; ACTION_SPACE];
+        if use_obs_encode_into {
+            state.encode_obs_row_major_into(version, at_kan_select, slot_slice, &mut mask);
+            mask
+        } else {
+            let (feature, mask) = encode_obs_legacy(state, version, at_kan_select);
+            slot_slice.copy_from_slice(feature.as_slice());
+            mask
+        }
+    }
+
+    fn view(&self, batch_size: usize) -> Result<ArrayView3<'_, f32>> {
+        ensure!(
+            batch_size <= self.capacity,
+            "state batch view exceeds capacity"
+        );
+        let len = batch_size * self.slot_len();
+        let data = self.data_slice(len);
+        ArrayView3::from_shape((batch_size, self.rows, 34), data)
+            .context("failed to build contiguous state batch view")
+    }
+
+    fn slot_slice_mut(&self, slot: usize) -> &mut [f32] {
+        assert!(slot < self.capacity, "state batch slot out of range");
+        let start = slot * self.slot_len();
+        let end = start + self.slot_len();
+        // SAFETY: The boxed slice is allocated once in `new()` and never
+        // reallocated. Each slot is reserved exactly once per batch under
+        // `SyncFields`, so concurrent workers only write to disjoint ranges.
+        unsafe { &mut (&mut *self.data.get())[start..end] }
+    }
+
+    fn data_slice(&self, len: usize) -> &[f32] {
+        // SAFETY: `evaluate()` calls this only after waiting for all encoding
+        // workers to finish, so there are no concurrent writers. The backing
+        // storage is fixed-size and valid for the lifetime of `self`.
+        unsafe { &(&*self.data.get())[..len] }
+    }
+}
+
+impl DirectMaskBatch {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            data: UnsafeCell::new(vec![[false; ACTION_SPACE]; capacity].into_boxed_slice()),
+        }
+    }
+
+    fn write_slot(&self, slot: usize, mask: [bool; ACTION_SPACE]) {
+        assert!(slot < self.capacity, "mask batch slot out of range");
+        // SAFETY: The boxed slice is fixed-size and each slot is reserved once
+        // per batch under `SyncFields`, so concurrent workers only write to
+        // disjoint indices.
+        unsafe {
+            (&mut *self.data.get())[slot] = mask;
+        }
+    }
+
+    fn view(&self, batch_size: usize) -> Result<ArrayView2<'_, bool>> {
+        ensure!(
+            batch_size <= self.capacity,
+            "mask batch view exceeds capacity"
+        );
+        // SAFETY: `evaluate()` calls this only after waiting for all encoding
+        // workers to finish, so there are no concurrent writers.
+        let rows = unsafe { &(&*self.data.get())[..batch_size] };
+        ArrayView2::from_shape((batch_size, ACTION_SPACE), rows.as_flattened())
+            .context("failed to build contiguous mask batch view")
+    }
 }
 
 impl MortalBatchAgent {
@@ -117,7 +295,7 @@ impl MortalBatchAgent {
             );
 
             let name = obj.getattr("name")?.extract()?;
-            let is_oracle = obj.getattr("is_oracle")?.extract()?;
+            let is_oracle: bool = obj.getattr("is_oracle")?.extract()?;
             let version = obj.getattr("version")?.extract()?;
             let enable_quick_eval = obj.getattr("enable_quick_eval")?.extract()?;
             let enable_rule_based_agari_guard =
@@ -134,17 +312,32 @@ impl MortalBatchAgent {
         })?;
 
         let size = player_ids.len();
+        let state_rows = obs_shape(version).0;
+        let invisible_state_rows = is_oracle.then(|| oracle_obs_shape(version).0);
+        let max_pending_slots = size * 2;
         let quick_eval_reactions = if enable_quick_eval {
             vec![None; size]
         } else {
             vec![]
         };
+        let state_batch = Arc::new(DirectStateBatch::new(max_pending_slots, state_rows));
+        let mask_batch = Arc::new(DirectMaskBatch::new(max_pending_slots));
+        let batch_input_owner = Python::with_gil(|py| {
+            Py::new(
+                py,
+                BatchInputOwner {
+                    _state_batch_owner: Arc::clone(&state_batch),
+                    _mask_batch_owner: Arc::clone(&mask_batch),
+                    invisible_state_batch: invisible_state_rows
+                        .map(|rows| Array3::<f32>::zeros((max_pending_slots, rows, 34))),
+                },
+            )
+        })?;
         let sync_fields = Arc::new(Mutex::new(SyncFields {
-            states: vec![],
-            invisible_states: vec![],
-            masks: vec![],
+            invisible_states: Vec::with_capacity(max_pending_slots),
             action_idxs: vec![0; size],
             kan_action_idxs: vec![None; size],
+            next_slot: 0,
         }));
 
         Ok(Self {
@@ -154,6 +347,8 @@ impl MortalBatchAgent {
             enable_quick_eval,
             enable_rule_based_agari_guard,
             enable_metadata,
+            use_obs_encode_into: env_flag("MORTAL_1V3_ENABLE_ENCODE_INTO", true),
+            profile_enabled: agent_profile_enabled(),
             name,
             player_ids: player_ids.to_vec(),
 
@@ -167,6 +362,10 @@ impl MortalBatchAgent {
 
             evaluated: false,
             quick_eval_reactions,
+            perf: AgentPerfStats::default(),
+            state_batch,
+            mask_batch,
+            batch_input_owner,
 
             wg: WaitGroup::new(),
             sync_fields,
@@ -174,40 +373,79 @@ impl MortalBatchAgent {
     }
 
     fn evaluate(&mut self) -> Result<()> {
-        // Wait for all feature encodings to complete.
+        let wait_started = self.profile_enabled.then(Instant::now);
         mem::take(&mut self.wg).wait();
+        if let Some(started) = wait_started {
+            self.perf.wait_encode_elapsed += started.elapsed();
+        }
         let mut sync_fields = self.sync_fields.lock();
 
-        if sync_fields.states.is_empty() {
+        if sync_fields.next_slot == 0 {
             return Ok(());
         }
 
         let start = Instant::now();
-        self.last_batch_size = sync_fields.states.len();
-        let states = mem::take(&mut sync_fields.states);
-        let masks = mem::take(&mut sync_fields.masks);
+        self.last_batch_size = sync_fields.next_slot;
+        self.perf.evaluate_calls += 1;
+        self.perf.total_batch_items += self.last_batch_size;
+        self.perf.max_batch_size = self.perf.max_batch_size.max(self.last_batch_size);
+        let invisible_capacity = sync_fields.invisible_states.capacity();
         let invisible_states = self
             .is_oracle
             .then(|| mem::take(&mut sync_fields.invisible_states));
+        if self.is_oracle {
+            sync_fields.invisible_states = Vec::with_capacity(invisible_capacity);
+        }
+        sync_fields.next_slot = 0;
         drop(sync_fields);
 
+        let state_view = self.state_batch.view(self.last_batch_size)?;
+        let mask_view = self.mask_batch.view(self.last_batch_size)?;
         let states = Python::with_gil(|py| -> Result<_> {
-            let states = PyArray3::from_owned_array(py, stack_state_batch(states, "state")?);
-            let masks = PyArray2::from_owned_array(py, stack_mask_batch(masks)?);
-            let invisible_states = invisible_states
-                .map(|batch| stack_array2_state_batch(batch, "invisible_state"))
-                .transpose()?
-                .map(|batch| PyArray3::from_owned_array(py, batch));
-
+            let pack_started = self.profile_enabled.then(Instant::now);
+            let owner_bound = self.batch_input_owner.clone_ref(py).into_bound(py);
+            {
+                let mut owner = owner_bound.borrow_mut();
+                if let Some(ref batch) = invisible_states {
+                    fill_invisible_state_batch(&mut owner, batch, "invisible_state")?;
+                }
+            }
+            if let Some(started) = pack_started {
+                self.perf.batch_pack_elapsed += started.elapsed();
+            }
+            let owner = owner_bound.borrow();
+            let states =
+                unsafe { PyArray3::borrow_from_array(&state_view, owner_bound.clone().into_any()) };
+            let masks =
+                unsafe { PyArray2::borrow_from_array(&mask_view, owner_bound.clone().into_any()) };
+            let invisible_states = owner
+                .invisible_state_batch
+                .as_ref()
+                .filter(|_| invisible_states.is_some())
+                .map(|batch| unsafe {
+                    PyArray3::borrow_from_array(
+                        &batch.slice(s![..self.last_batch_size, .., ..]),
+                        owner_bound.clone().into_any(),
+                    )
+                });
             let args = (states, masks, invisible_states);
             if self.enable_metadata {
-                let (actions, q_values, masks_recv, is_greedy) = self
+                let py_call_started = self.profile_enabled.then(Instant::now);
+                let response = self
                     .engine
                     .bind_borrowed(py)
                     .call_method1(intern!(py, "react_batch"), args)
-                    .context("failed to execute `react_batch` on Python engine")?
+                    .context("failed to execute `react_batch` on Python engine")?;
+                if let Some(started) = py_call_started {
+                    self.perf.py_call_elapsed += started.elapsed();
+                }
+                let py_extract_started = self.profile_enabled.then(Instant::now);
+                let (actions, q_values, masks_recv, is_greedy) = response
                     .extract()
                     .context("failed to extract to Rust type")?;
+                if let Some(started) = py_extract_started {
+                    self.perf.py_extract_elapsed += started.elapsed();
+                }
                 Ok((
                     actions,
                     Some(q_values),
@@ -216,21 +454,34 @@ impl MortalBatchAgent {
                     None,
                 ))
             } else {
-                let (actions, alt_actions) = self
+                let py_call_started = self.profile_enabled.then(Instant::now);
+                let response = self
                     .engine
                     .bind_borrowed(py)
                     .call_method1(intern!(py, "react_batch_action_only"), args)
-                    .context("failed to execute `react_batch_action_only` on Python engine")?
+                    .context("failed to execute `react_batch_action_only` on Python engine")?;
+                if let Some(started) = py_call_started {
+                    self.perf.py_call_elapsed += started.elapsed();
+                }
+                let py_extract_started = self.profile_enabled.then(Instant::now);
+                let (actions, alt_actions) = response
                     .extract()
                     .context("failed to extract action-only response to Rust type")?;
+                if let Some(started) = py_extract_started {
+                    self.perf.py_extract_elapsed += started.elapsed();
+                }
                 Ok((actions, None, None, None, Some(alt_actions)))
             }
         })?;
+        let post_eval_started = self.profile_enabled.then(Instant::now);
         self.actions = states.0;
         self.q_values = states.1.unwrap_or_default();
         self.masks_recv = states.2.unwrap_or_default();
         self.is_greedy = states.3.unwrap_or_default();
         self.alt_actions = states.4.unwrap_or_default();
+        if let Some(started) = post_eval_started {
+            self.perf.post_eval_elapsed += started.elapsed();
+        }
 
         self.last_eval_elapsed = Instant::now()
             .checked_duration_since(start)
@@ -276,6 +527,11 @@ impl BatchAgent for MortalBatchAgent {
     #[inline]
     fn oracle_obs_version(&self) -> Option<u32> {
         self.is_oracle.then_some(self.version)
+    }
+
+    #[inline]
+    fn uses_event_log(&self) -> bool {
+        false
     }
 
     fn set_scene(
@@ -331,6 +587,33 @@ impl BatchAgent for MortalBatchAgent {
         };
 
         let version = self.version;
+        let use_obs_encode_into = self.use_obs_encode_into;
+        let is_oracle = self.is_oracle;
+        let state_batch = Arc::clone(&self.state_batch);
+        let mask_batch = Arc::clone(&self.mask_batch);
+        let (action_slot, kan_slot) = {
+            let mut sync_fields = self.sync_fields.lock();
+            let reserve_slot = |sync_fields: &mut SyncFields| -> Result<usize> {
+                ensure!(
+                    sync_fields.next_slot < state_batch.capacity(),
+                    "exceeded preallocated state batch slots",
+                );
+                let slot = sync_fields.next_slot;
+                sync_fields.next_slot += 1;
+                if is_oracle {
+                    sync_fields.invisible_states.push(None);
+                }
+                Ok(slot)
+            };
+
+            let kan_slot = need_kan_select
+                .then(|| reserve_slot(&mut sync_fields))
+                .transpose()?;
+            let action_slot = reserve_slot(&mut sync_fields)?;
+            sync_fields.action_idxs[index] = action_slot;
+            sync_fields.kan_action_idxs[index] = kan_slot;
+            (action_slot, kan_slot)
+        };
         let state = state.clone();
         let sync_fields = Arc::clone(&self.sync_fields);
         let wg = self.wg.clone();
@@ -340,38 +623,22 @@ impl BatchAgent for MortalBatchAgent {
             // Encode features in parallel within the game batch to utilize
             // multiple cores, as this can be very CPU-intensive, especially for
             // the sp feature (since v4).
-            let state_rows = obs_shape(version).0;
-            let kan = need_kan_select.then(|| {
-                let mut kan_feature = Simple2DArray::new(state_rows);
-                let mut kan_mask = [false; ACTION_SPACE];
-                state.encode_obs_into(version, true, &mut kan_feature, &mut kan_mask);
-                (kan_feature, kan_mask)
-            });
-            let mut feature = Simple2DArray::new(state_rows);
-            let mut mask = [false; ACTION_SPACE];
-            state.encode_obs_into(version, false, &mut feature, &mut mask);
-
-            let SyncFields {
-                states,
-                invisible_states,
-                masks,
-                action_idxs,
-                kan_action_idxs,
-            } = &mut *sync_fields.lock();
-            if let Some((kan_feature, kan_mask)) = kan {
-                kan_action_idxs[index] = Some(states.len());
-                states.push(kan_feature);
-                masks.push(kan_mask);
-                if let Some(invisible_state) = invisible_state.clone() {
-                    invisible_states.push(invisible_state);
+            if let Some(kan_slot) = kan_slot {
+                let kan_mask =
+                    state_batch.write_slot(kan_slot, &state, version, true, use_obs_encode_into);
+                mask_batch.write_slot(kan_slot, kan_mask);
+                if is_oracle {
+                    let mut sync_fields = sync_fields.lock();
+                    sync_fields.invisible_states[kan_slot] = invisible_state.clone();
                 }
             }
 
-            action_idxs[index] = states.len();
-            states.push(feature);
-            masks.push(mask);
-            if let Some(invisible_state) = invisible_state {
-                invisible_states.push(invisible_state);
+            let mask =
+                state_batch.write_slot(action_slot, &state, version, false, use_obs_encode_into);
+            mask_batch.write_slot(action_slot, mask);
+            if is_oracle {
+                let mut sync_fields = sync_fields.lock();
+                sync_fields.invisible_states[action_slot] = invisible_state;
             }
         });
 
@@ -396,6 +663,7 @@ impl BatchAgent for MortalBatchAgent {
             self.evaluated = true;
         }
         let start = Instant::now();
+        let decode_started = self.profile_enabled.then_some(start);
 
         let mut sync_fields = self.sync_fields.lock();
         let action_idx = sync_fields.action_idxs[index];
@@ -666,6 +934,9 @@ impl BatchAgent for MortalBatchAgent {
         };
 
         if !self.enable_metadata {
+            if let Some(started) = decode_started {
+                self.perf.reaction_decode_elapsed += started.elapsed();
+            }
             return Ok(EventExt::no_meta(event));
         }
 
@@ -682,6 +953,10 @@ impl BatchAgent for MortalBatchAgent {
         meta.batch_size = Some(self.last_batch_size);
         meta.kan_select = kan_select_idx.map(|kan_idx| Box::new(self.gen_meta(state, kan_idx)));
 
+        if let Some(started) = decode_started {
+            self.perf.reaction_decode_elapsed += started.elapsed();
+        }
+
         Ok(EventExt {
             event,
             meta: Some(meta),
@@ -689,43 +964,64 @@ impl BatchAgent for MortalBatchAgent {
     }
 }
 
+impl Drop for MortalBatchAgent {
+    fn drop(&mut self) {
+        if !self.profile_enabled || self.perf.evaluate_calls == 0 {
+            return;
+        }
+
+        let avg_batch_size = self.perf.total_batch_items as f64 / self.perf.evaluate_calls as f64;
+        log::info!(
+            "mortal agent profile: name={} players={} eval_calls={} avg_batch_size={:.1} max_batch_size={} wait_encode={:.3}s batch_pack={:.3}s py_call={:.3}s py_extract={:.3}s post_eval={:.3}s reaction_decode={:.3}s",
+            self.name,
+            self.player_ids.len(),
+            self.perf.evaluate_calls,
+            avg_batch_size,
+            self.perf.max_batch_size,
+            self.perf.wait_encode_elapsed.as_secs_f64(),
+            self.perf.batch_pack_elapsed.as_secs_f64(),
+            self.perf.py_call_elapsed.as_secs_f64(),
+            self.perf.py_extract_elapsed.as_secs_f64(),
+            self.perf.post_eval_elapsed.as_secs_f64(),
+            self.perf.reaction_decode_elapsed.as_secs_f64(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use super::{stack_mask_batch, stack_state_batch};
-    use crate::array::Simple2DArray;
+    use super::{DirectMaskBatch, DirectStateBatch};
     use crate::consts::ACTION_SPACE;
 
     #[test]
-    fn stack_state_batch_preserves_order() {
-        let mut first = Simple2DArray::new(2);
-        first.assign(0, 0, 1.0);
-        first.assign(0, 1, 2.0);
-        first.assign(1, 0, 3.0);
-        first.assign(1, 1, 4.0);
-        let mut second = Simple2DArray::new(2);
-        second.assign(0, 0, 5.0);
-        second.assign(0, 1, 6.0);
-        second.assign(1, 0, 7.0);
-        second.assign(1, 1, 8.0);
-        let stacked = stack_state_batch(vec![first, second], "state").unwrap();
-
-        assert_eq!(stacked.shape(), &[2, 2, 34]);
-        assert_eq!(stacked[[0, 1, 0]], 3.0);
-        assert_eq!(stacked[[1, 0, 1]], 6.0);
-    }
-
-    #[test]
-    fn stack_mask_batch_preserves_order() {
+    fn direct_mask_batch_view_preserves_order() {
         let mut first = [false; ACTION_SPACE];
         first[0] = true;
         first[2] = true;
         let mut second = [false; ACTION_SPACE];
         second[1] = true;
-        let stacked = stack_mask_batch(vec![first, second]).unwrap();
+        let batch = DirectMaskBatch::new(2);
+        batch.write_slot(0, first);
+        batch.write_slot(1, second);
 
-        assert_eq!(stacked.shape(), &[2, ACTION_SPACE]);
-        assert!(stacked[[0, 2]]);
-        assert!(stacked[[1, 1]]);
-        assert!(!stacked[[1, 2]]);
+        let view = batch.view(2).unwrap();
+        assert!(view[[0, 2]]);
+        assert!(view[[1, 1]]);
+        assert!(!view[[1, 2]]);
+    }
+
+    #[test]
+    fn direct_state_batch_view_preserves_order() {
+        let batch = DirectStateBatch::new(2, 2);
+        batch.slot_slice_mut(0)[0] = 1.0;
+        batch.slot_slice_mut(0)[34] = 2.0;
+        batch.slot_slice_mut(1)[1] = 3.0;
+        batch.slot_slice_mut(1)[35] = 4.0;
+
+        let view = batch.view(2).unwrap();
+        assert_eq!(view[[0, 0, 0]], 1.0);
+        assert_eq!(view[[0, 1, 0]], 2.0);
+        assert_eq!(view[[1, 0, 1]], 3.0);
+        assert_eq!(view[[1, 1, 1]], 4.0);
     }
 }
