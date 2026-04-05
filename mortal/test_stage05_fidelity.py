@@ -176,7 +176,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / 'fidelity_run'
             run_dir.mkdir()
-            results_path = Path(tmp_dir) / 'stage05-fidelity-results.md'
+            results_path = Path(tmp_dir) / 'supervised-fidelity-results.md'
             state = {
                 'status': 'stopped_after_p1_protocol_decide',
                 'p1': {},
@@ -2427,7 +2427,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
 
         self.assertNotEqual(sig_v1, sig_v2)
 
-    def test_load_cached_p0_stage1_top4_rejects_stale_round2_signature(self):
+    def test_load_cached_p0_supervised_top4_rejects_stale_round2_signature(self):
         stored_json = {}
 
         def fake_exists(path_obj):
@@ -2484,7 +2484,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             patch.object(fidelity, 'build_p0_candidates', return_value=candidates),
             patch.object(fidelity.ab, 'build_eval_splits', side_effect=fake_eval_splits),
         ):
-            stage1_top4 = fidelity.load_cached_p0_stage1_top4(
+            supervised_top4 = fidelity.load_cached_p0_supervised_top4(
                 run_dir,
                 {},
                 base_cfg=base_cfg,
@@ -2492,9 +2492,9 @@ class Stage05FidelityCacheTests(unittest.TestCase):
                 seed=seed,
             )
 
-        self.assertIsNone(stage1_top4)
+        self.assertIsNone(supervised_top4)
 
-    def test_select_p0_stage1_top4_uses_round2_order(self):
+    def test_select_p0_supervised_top4_uses_round2_order(self):
         candidates = [
             make_candidate(f'arm_{idx}', meta={'stage': 'P0'})
             for idx in range(6)
@@ -2504,7 +2504,7 @@ class Stage05FidelityCacheTests(unittest.TestCase):
             for idx, candidate in enumerate(candidates)
         ]
 
-        selected = fidelity.select_p0_stage1_top4(ranking)
+        selected = fidelity.select_p0_supervised_top4(ranking)
 
         self.assertEqual(
             ['arm_0', 'arm_1', 'arm_2', 'arm_3'],

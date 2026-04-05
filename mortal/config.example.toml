@@ -78,6 +78,7 @@ max_train_files = 0
 max_val_files = 0
 seed = 20260308
 enable_oracle = false
+validation_use_oracle = false
 
 [supervised.scheduler]
 type = 'plateau' # plateau | cosine
@@ -105,112 +106,6 @@ mid_factor = 1.05
 late_factor = 1.15
 early_max_turn = 4
 late_min_turn = 12
-
-[stage1]
-state_file = '/path/to/stage1_latest_oracle.pth'
-best_state_file = '/path/to/stage1_best_loss_oracle.pth'
-best_loss_state_file = '/path/to/stage1_best_loss_oracle.pth'
-best_acc_state_file = '/path/to/stage1_best_acc_oracle.pth'
-best_rank_state_file = '/path/to/stage1_best_rank_oracle.pth'
-best_loss_normal_state_file = '/path/to/stage1_best_loss_normal.pth'
-best_acc_normal_state_file = '/path/to/stage1_best_acc_normal.pth'
-best_rank_normal_state_file = '/path/to/stage1_best_rank_normal.pth'
-publish_stage2_handoff = true
-init_state_file = '/path/to/stage0_5_supervised_best_loss.pth'
-tensorboard_dir = '/path/to/tb_log_stage1'
-file_index = '/path/to/file_index_stage1_json.pth'
-batch_size = 1024
-save_every = 2000
-num_workers = 4
-file_batch_size = 10
-val_file_batch_size = 8
-prefetch_factor = 3
-val_prefetch_factor = 5
-log_every = 1000
-max_epochs = 99
-max_steps = 30000
-min_epochs = 2
-val_every_steps = 20000
-monitor_val_batches = 512
-full_val_every_checks = 0
-old_regression_every_checks = 0
-force_safe_training = false
-min_validation_checks = 2
-early_stopping_patience = 8
-early_stopping_patience_checks = 8
-early_stopping_min_delta = 0.0005
-early_stopping_min_lr_reductions = 2
-val_ratio = 0.02
-min_val_files = 64
-max_train_files = 0
-max_val_files = 0
-seed = 20260318
-enable_oracle = true
-validation_use_oracle = false
-lr = 3e-4
-
-[stage1.scheduler]
-type = 'cosine' # plateau | cosine
-warm_up_steps = 1000
-init = 1e-8
-factor = 0.5
-patience = 2
-threshold = 0.0005
-cooldown = 0
-min_lr = 1e-6
-final = 1e-5
-max_steps = 30000
-
-[stage1.rank_aux]
-base_weight = 0.001548
-south_factor = 1.59
-all_last_factor = 1.617
-gap_focus_points = 4000
-gap_close_bonus = 0.0
-max_weight = 0.00516
-
-[stage1.rank_aux.turn_weighting]
-early_factor = 1.00
-mid_factor = 1.05
-late_factor = 1.15
-early_max_turn = 4
-late_min_turn = 12
-
-[stage1.aux]
-next_rank_weight = 0.2
-opponent_state_weight = 0.00135
-opponent_shanten_weight = 0.8506568408072642
-opponent_tenpai_weight = 1.1493431591927359
-danger_enabled = true
-danger_weight = 0.00804
-danger_any_weight = 0.09042179466099699
-danger_value_weight = 0.8180402859274302
-danger_player_weight = 0.09153791941157279
-danger_focal_gamma = 0.0
-danger_ramp_steps = 1000
-danger_value_cap = 96000.0
-
-[stage1.aux.opponent_turn_weighting]
-early_factor = 0.20
-mid_factor = 1.0
-late_factor = 1.60
-early_max_turn = 4
-late_min_turn = 12
-
-[stage1.aux.danger_turn_weighting]
-early_factor = 0.05
-mid_factor = 1.0
-late_factor = 2.50
-early_max_turn = 4
-late_min_turn = 12
-
-[stage1.oracle_dropout]
-enabled = true
-schedule = 'linear' # screening only compares dropout curve/ratio, not auxiliary-head recipe
-gamma_start = 1.0
-gamma_end = 0.0
-hold_steps = 0
-decay_steps = 22500
 
 [dataset]
 globs = ['/path/to/dataset_json/**/*.json']
@@ -270,17 +165,6 @@ late_factor = 2.50
 early_max_turn = 4
 late_min_turn = 12
 
-[oracle] # legacy Stage 1 fallback only; canonical Stage 1 reads [stage1]
-enable = true
-init_state_file = '/path/to/stage0_5_supervised.pth'
-gamma_start = 1.0
-gamma_end = 0.0
-beta_warmup = 0.01
-beta_final = 1.0
-phase_a_steps = 50000
-phase_b_steps = 300000
-phase_c_steps = 400000
-
 [optim]
 eps = 1e-8
 betas = [0.9, 0.999]
@@ -306,6 +190,7 @@ state_file = '/path/to/baseline.pth'
 [online]
 history_window = 50
 enable_compile = false
+init_state_file = '/path/to/stage0_5_supervised.pth'
 
 [online.remote]
 host = '127.0.0.1'

@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -13,6 +14,8 @@ def make_config(*, online, version=4, next_rank_weight=0.0):
             'online': online,
             'version': version,
         },
+        'online': {},
+        'supervised': {},
         'resnet': {
             'channels': 192,
             'num_blocks': 40,
@@ -42,6 +45,41 @@ class DummyOptimizer:
 
 
 class TrainOnlineCheckpointTests(unittest.TestCase):
+    def test_resolve_online_init_state_file_prefers_online_override(self):
+        config = make_config(online=True)
+        config['online']['init_state_file'] = './checkpoints/custom_supervised_winner.pth'
+        config['supervised']['best_loss_state_file'] = './checkpoints/stage0_5_supervised.pth'
+
+        self.assertEqual(
+            './checkpoints/custom_supervised_winner.pth',
+            train_online.resolve_online_init_state_file(config),
+        )
+
+    def test_resolve_online_init_state_file_falls_back_to_supervised_best_loss(self):
+        config = make_config(online=True)
+        config['supervised']['best_loss_state_file'] = './checkpoints/stage0_5_supervised.pth'
+
+        self.assertEqual(
+            './checkpoints/stage0_5_supervised.pth',
+            train_online.resolve_online_init_state_file(config),
+        )
+
+    def test_resolve_online_init_state_file_returns_empty_when_missing(self):
+        self.assertEqual('', train_online.resolve_online_init_state_file(make_config(online=True)))
+
+    def test_ensure_online_init_state_file_ready_checks_canonical_handoff(self):
+        with patch(
+            'run_stage05_formal.ensure_supervised_canonical_handoff_ready',
+            side_effect=RuntimeError('pending formal_1v3 handoff'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'pending formal_1v3 handoff'):
+                train_online.ensure_online_init_state_file_ready('./checkpoints/stage0_5_supervised.pth')
+
+    def test_ensure_online_init_state_file_ready_requires_existing_file_after_handoff_check(self):
+        with patch('run_stage05_formal.ensure_supervised_canonical_handoff_ready'):
+            with self.assertRaisesRegex(FileNotFoundError, r'online\.init_state_file does not exist'):
+                train_online.ensure_online_init_state_file_ready(r'X:\missing\stage0_5_supervised.pth')
+
     def test_checkpoint_supports_online_resume_requires_online_training_state(self):
         state = {
             'config': make_config(online=True),
@@ -132,7 +170,7 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
             )
         )
 
-    def test_checkpoint_supports_online_resume_rejects_stage1_handoff_exports(self):
+    def test_checkpoint_supports_online_resume_rejects_non_resumable_handoff_exports(self):
         state = {
             'resume_supported': False,
             'config': make_config(online=False),

@@ -69,6 +69,39 @@ def checkpoint_supports_online_resume(state, *, current_config, optimizer):
     return optimizer_state_matches_current_layout(state['optimizer'], optimizer)
 
 
+def resolve_online_init_state_file(config):
+    if not isinstance(config, dict):
+        return ''
+
+    online_cfg = config.get('online', {})
+    if isinstance(online_cfg, dict):
+        init_state_file = str(online_cfg.get('init_state_file', '') or '').strip()
+        if init_state_file:
+            return init_state_file
+
+    supervised_cfg = config.get('supervised', {})
+    if not isinstance(supervised_cfg, dict):
+        return ''
+
+    return str(
+        supervised_cfg.get('best_loss_state_file', '')
+        or supervised_cfg.get('best_state_file', '')
+        or ''
+    ).strip()
+
+
+def ensure_online_init_state_file_ready(init_state_file):
+    if not init_state_file:
+        return
+
+    from os import path
+    import run_stage05_formal as stage05_formal
+
+    stage05_formal.ensure_supervised_canonical_handoff_ready(init_state_file)
+    if not path.exists(init_state_file):
+        raise FileNotFoundError(f'online.init_state_file does not exist: {init_state_file}')
+
+
 def train():
     import prelude
     import logging
@@ -98,6 +131,7 @@ def train():
     from model import Brain, CategoricalPolicy, AuxNet
     from libriichi.consts import obs_shape
     from config import config
+    from checkpoint_utils import load_brain_state_with_input_bridge
     from copy import deepcopy
     from multiprocessing import Manager
     
@@ -188,6 +222,7 @@ def train():
 
     steps = 0
     state_file = config['control']['state_file']
+    init_state_file = resolve_online_init_state_file(config)
     best_state_file = config['control']['best_state_file']
     manager = Manager()
     shared_stats = {
@@ -224,7 +259,25 @@ def train():
                 'initialized training from checkpoint weights only; '
                 'optimizer/scheduler/scaler/best_perf were reset'
             )
-       
+    elif init_state_file:
+        ensure_online_init_state_file_ready(init_state_file)
+        state = torch.load(init_state_file, weights_only=False, map_location=device)
+        bridge_info = load_brain_state_with_input_bridge(mortal, state['mortal'])
+        Old_mortal.load_state_dict(mortal.state_dict())
+        policy_net.load_state_dict(state['policy_net'])
+        Old_policy_net.load_state_dict(state['policy_net'])
+        if aux_net is not None and state.get('aux_net') is not None:
+            aux_net.load_state_dict(state['aux_net'])
+        timestamp = datetime.fromtimestamp(state['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        logging.info(
+            'initialized online weights from supervised checkpoint: %s (%s); '
+            'brain bridge loaded=%s skipped=%s',
+            init_state_file,
+            timestamp,
+            len(bridge_info['loaded_keys']),
+            len(bridge_info['skipped_keys']),
+        )
+
     optimizer.zero_grad(set_to_none=True)
 
     if device.type == 'cuda':

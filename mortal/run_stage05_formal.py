@@ -10,9 +10,8 @@ import run_stage05_ab as ab
 import stage05_current_defaults as stage05_defaults
 
 CURRENT_PRIMARY_PROTOCOL_ARM = stage05_defaults.CURRENT_PRIMARY_PROTOCOL_ARM
-CURRENT_STAGE1_TOP_PROTOCOL_ARMS = stage05_defaults.CURRENT_STAGE1_TOP_PROTOCOL_ARMS
-# Compatibility alias for older callers that still expect the historical name.
-CURRENT_STAGE1_TOP4 = CURRENT_STAGE1_TOP_PROTOCOL_ARMS
+CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS = stage05_defaults.CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS
+CURRENT_SUPERVISED_TOP4 = CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS
 
 STAGE05_FIDELITY_ROOT = ab.REPO_ROOT / 'logs' / 'stage05_fidelity'
 FORMAL_CONFIG_SNAPSHOT_SCHEMA_VERSION = 1
@@ -145,7 +144,7 @@ def stage05_publish_plan(
     candidates = payload.get('candidates', {})
     winner = payload.get('winner')
     if winner not in candidates:
-        raise KeyError(f'missing selected Stage 0.5 winner in payload: {winner!r}')
+        raise KeyError(f'missing selected supervised winner in payload: {winner!r}')
 
     plan: dict[Path, tuple[int, Path]] = {}
     secondary_target_priority = 10
@@ -154,7 +153,7 @@ def stage05_publish_plan(
     def candidate_path(name: str) -> Path:
         candidate = candidates.get(name)
         if not isinstance(candidate, dict) or not candidate.get('path'):
-            raise KeyError(f'missing Stage 0.5 candidate path for {name!r}')
+            raise KeyError(f'missing supervised candidate path for {name!r}')
         return Path(candidate['path']).resolve()
 
     def add_target(destination: str, source: Path, *, priority: int) -> None:
@@ -168,7 +167,7 @@ def stage05_publish_plan(
     winner_source = candidate_path(winner)
     # `latest` is intentionally discarded once formal enters the 1v3 handoff
     # flow. Keep the canonical exact-resume alias on the selected winner so the
-    # final Stage 0.5 package stays self-consistent.
+    # final supervised package stays self-consistent.
     add_target(
         supervised_cfg.get('state_file', ''),
         winner_source,
@@ -187,8 +186,8 @@ def stage05_publish_plan(
 
     best_state_file = supervised_cfg.get('best_state_file', '')
     best_loss_state_file = supervised_cfg.get('best_loss_state_file', best_state_file)
-    # Keep both supervised seed aliases on the formal winner so Stage 1 fallback
-    # paths do not silently boot from an unselected checkpoint.
+    # Keep both supervised seed aliases on the formal winner so downstream
+    # consumers do not silently boot from an unselected checkpoint.
     for canonical_seed_file in dict.fromkeys((best_state_file, best_loss_state_file)):
         add_target(
             canonical_seed_file,
@@ -250,7 +249,7 @@ def publish_stage05_canonical_checkpoints(
         if destination not in allowed_targets:
             continue
         if not source.exists():
-            raise FileNotFoundError(f'Stage 0.5 canonical-alias source does not exist: {source}')
+            raise FileNotFoundError(f'supervised canonical-alias source does not exist: {source}')
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source != destination:
             shutil.copy2(source, destination)
@@ -364,8 +363,8 @@ def finalize_formal_result(
     ]
     result['selected_protocol_arm'] = protocol_arm
     result['current_primary_protocol_arm'] = CURRENT_PRIMARY_PROTOCOL_ARM
-    result['current_stage1_top4'] = list(CURRENT_STAGE1_TOP4)
-    result['current_stage1_top_protocol_arms'] = list(CURRENT_STAGE1_TOP_PROTOCOL_ARMS)
+    result['current_supervised_top4'] = list(CURRENT_SUPERVISED_TOP4)
+    result['current_supervised_top_protocol_arms'] = list(CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS)
     return result
 
 
@@ -495,21 +494,25 @@ def find_pending_stage05_handoff_for_init_state(init_state_file: str) -> dict | 
     return None
 
 
-def ensure_stage1_canonical_handoff_ready(init_state_file: str) -> None:
+def ensure_supervised_canonical_handoff_ready(init_state_file: str) -> None:
     if not init_state_file:
         return
     blocker = find_pending_stage05_handoff_for_init_state(init_state_file)
     if blocker is None:
         return
     raise RuntimeError(
-        'Stage 1 canonical init checkpoint is blocked by a pending Stage 0.5 formal_1v3 handoff: '
+        'canonical supervised init checkpoint is blocked by a pending supervised formal_1v3 handoff: '
         f'init_state_file={blocker["init_state_file"]}, '
         f'run={blocker["run_name"]}, '
         f'formal_status={blocker["formal_status"]}, '
         f'formal_1v3_status={blocker["formal_1v3_status"]}, '
         f'state={blocker["state_path"]}. '
-        'Finish formal_1v3 before starting Stage 1, or pass a non-canonical explicit init checkpoint.'
+        'Finish formal_1v3 before using the canonical supervised checkpoint, or pass a non-canonical explicit init checkpoint.'
     )
+
+
+def ensure_stage1_canonical_handoff_ready(init_state_file: str) -> None:
+    ensure_supervised_canonical_handoff_ready(init_state_file)
 
 
 def main() -> None:
@@ -519,7 +522,7 @@ def main() -> None:
         '--protocol-arm',
         default=CURRENT_PRIMARY_PROTOCOL_ARM,
         choices=sorted(PROTOCOL_ARM_MAP),
-        help='Stage 0.5 formal protocol arm. Default is the current primary candidate, not the old historical placeholder.',
+        help='Supervised formal protocol arm. Default is the current primary candidate, not the old historical placeholder.',
     )
     parser.add_argument('--list-protocol-arms', action='store_true')
     parser.add_argument('--step-scale', type=float, default=5.0)
@@ -530,8 +533,8 @@ def main() -> None:
         print(json.dumps(
             {
                 'current_primary_protocol_arm': CURRENT_PRIMARY_PROTOCOL_ARM,
-                'current_stage1_top4': list(CURRENT_STAGE1_TOP4),
-                'current_stage1_top_protocol_arms': list(CURRENT_STAGE1_TOP_PROTOCOL_ARMS),
+                'current_supervised_top4': list(CURRENT_SUPERVISED_TOP4),
+                'current_supervised_top_protocol_arms': list(CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS),
                 'all_protocol_arms': sorted(PROTOCOL_ARM_MAP),
             },
             ensure_ascii=False,

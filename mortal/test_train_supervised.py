@@ -75,25 +75,11 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
         self.assertTrue(train_supervised.batch_includes_oracle(10, enable_danger_aux=True))
 
     def test_missing_init_state_file_errors_immediately(self):
-        with self.assertRaisesRegex(FileNotFoundError, r'stage1\.init_state_file does not exist'):
+        with self.assertRaisesRegex(FileNotFoundError, r'supervised\.init_state_file does not exist'):
             train_supervised.ensure_init_state_file_exists(
                 r'X:\missing\stage0_5_seed.pth',
-                cfg_prefix='stage1',
+                cfg_prefix='supervised',
             )
-
-    def test_stage1_init_state_is_blocked_by_pending_formal_1v3(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            init_state_file = Path(tmp_dir) / 'stage0_5_supervised.pth'
-            init_state_file.write_text('checkpoint', encoding='utf-8')
-            with patch(
-                'run_stage05_formal.ensure_stage1_canonical_handoff_ready',
-                side_effect=RuntimeError('pending formal_1v3 handoff'),
-            ):
-                with self.assertRaisesRegex(RuntimeError, 'pending formal_1v3 handoff'):
-                    train_supervised.ensure_init_state_file_exists(
-                        str(init_state_file),
-                        cfg_prefix='stage1',
-                    )
 
     def test_full_validation_zero_disables_monitor_checks(self):
         self.assertFalse(
@@ -310,7 +296,7 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
         self.assertEqual('max_steps', actions['validation_reason'])
         self.assertTrue(actions['stop_due_to_budget'])
 
-    def test_checkpoint_head_flags_use_stage1_section_aux_enable_overrides(self):
+    def test_checkpoint_head_flags_use_supervised_section_aux_enable_overrides(self):
         state = {
             'config': {
                 'aux': {
@@ -318,7 +304,7 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
                     'danger_enabled': False,
                     'danger_weight': 0.0,
                 },
-                'stage1': {
+                'supervised': {
                     'aux': {
                         'opponent_state_weight': 0.25,
                         'danger_weight': 0.4,
@@ -331,13 +317,13 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
 
         flags = train_supervised.checkpoint_optional_head_flags_for_state(
             state,
-            config_section='stage1',
+            config_section='supervised',
         )
 
         self.assertTrue(flags['opponent_aux_net'])
         self.assertTrue(flags['danger_aux_net'])
 
-    def test_checkpoint_head_flags_use_stage1_section_aux_disable_overrides(self):
+    def test_checkpoint_head_flags_use_supervised_section_aux_disable_overrides(self):
         state = {
             'config': {
                 'aux': {
@@ -345,7 +331,7 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
                     'danger_enabled': True,
                     'danger_weight': 0.4,
                 },
-                'stage1': {
+                'supervised': {
                     'aux': {
                         'opponent_state_weight': 0.0,
                         'danger_enabled': False,
@@ -359,25 +345,17 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
 
         flags = train_supervised.checkpoint_optional_head_flags_for_state(
             state,
-            config_section='stage1',
+            config_section='supervised',
         )
 
         self.assertFalse(flags['opponent_aux_net'])
         self.assertFalse(flags['danger_aux_net'])
 
-    def test_resolve_stage2_handoff_state_file_respects_stage1_publish_flag(self):
+    def test_resolve_stage2_handoff_state_file_is_disabled(self):
         self.assertEqual(
             '',
             train_supervised.resolve_stage2_handoff_state_file(
-                cfg_prefix='stage1',
-                supervised_cfg={'publish_stage2_handoff': False},
-                control_cfg={'state_file': './checkpoints/mortal.pth'},
-            ),
-        )
-        self.assertEqual(
-            './checkpoints/mortal.pth',
-            train_supervised.resolve_stage2_handoff_state_file(
-                cfg_prefix='stage1',
+                cfg_prefix='supervised',
                 supervised_cfg={},
                 control_cfg={'state_file': './checkpoints/mortal.pth'},
             ),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Post-leakage Stage 0.5 mainline frozen for downstream Stage 1 seeding.
+# Current supervised mainline frozen after the P1 closeout.
 # Keep the verified P0 top3 in historical factual order; do not reorder it to
 # match later downstream protocol winners.
 CURRENT_P0_TOP3_PROTOCOL_ARMS = (
@@ -12,9 +12,11 @@ CURRENT_P0_TOP3_PROTOCOL_ARMS = (
 # Current verified protocol_decide winner: A2x.
 CURRENT_PROTOCOL_DECIDE_WINNER_ARM = 'C_A2x_cosine_broad_to_recent_strong_24m_12m'
 CURRENT_PRIMARY_PROTOCOL_ARM = CURRENT_PROTOCOL_DECIDE_WINNER_ARM
-CURRENT_STAGE1_TOP_PROTOCOL_ARMS = CURRENT_P0_TOP3_PROTOCOL_ARMS
+CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS = CURRENT_P0_TOP3_PROTOCOL_ARMS
+# Compatibility alias for older internal callers.
+CURRENT_STAGE1_TOP_PROTOCOL_ARMS = CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS
 
-# Current validated Stage 0.5 validation loader defaults on this machine.
+# Current validated supervised validation loader defaults on this machine.
 DEFAULT_VAL_FILE_BATCH_SIZE = 8
 DEFAULT_VAL_PREFETCH_FACTOR = 5
 
@@ -91,7 +93,7 @@ CURRENT_P1_WINNER_REFINE_CENTER_ARMS = ()
 
 # Current P1 mainline now stops after winner_refine. Keep ablation available as
 # a manual backlog-only confirmation path, but do not let it gate downstream
-# Stage 0.5 progression.
+# supervised progression.
 CURRENT_P1_MAINLINE_STAGES = (
     'calibration',
     'protocol_decide',

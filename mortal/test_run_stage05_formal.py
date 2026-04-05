@@ -439,8 +439,8 @@ class RunStage05FormalTests(unittest.TestCase):
         )
         self.assertEqual(stage05_formal.CURRENT_PRIMARY_PROTOCOL_ARM, finalized['selected_protocol_arm'])
         self.assertEqual(
-            list(stage05_formal.CURRENT_STAGE1_TOP_PROTOCOL_ARMS),
-            finalized['current_stage1_top_protocol_arms'],
+            list(stage05_formal.CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS),
+            finalized['current_supervised_top_protocol_arms'],
         )
 
     def test_finalize_formal_result_keeps_latest_offline_winner_but_falls_back_to_best_loss_pack_winner(self):
@@ -489,7 +489,7 @@ class RunStage05FormalTests(unittest.TestCase):
                 }
             )
 
-    def test_ensure_stage1_canonical_handoff_ready_blocks_pending_formal_1v3(self):
+    def test_ensure_supervised_canonical_handoff_ready_blocks_pending_formal_1v3(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
@@ -515,10 +515,10 @@ class RunStage05FormalTests(unittest.TestCase):
             )
 
             with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
-                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
-                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+                with self.assertRaisesRegex(RuntimeError, 'pending supervised formal_1v3 handoff'):
+                    stage05_formal.ensure_supervised_canonical_handoff_ready(str(alias_path))
 
-    def test_ensure_stage1_canonical_handoff_ready_blocks_failed_formal_1v3_before_publish(self):
+    def test_ensure_supervised_canonical_handoff_ready_blocks_failed_formal_1v3_before_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
@@ -544,10 +544,10 @@ class RunStage05FormalTests(unittest.TestCase):
             )
 
             with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
-                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
-                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+                with self.assertRaisesRegex(RuntimeError, 'pending supervised formal_1v3 handoff'):
+                    stage05_formal.ensure_supervised_canonical_handoff_ready(str(alias_path))
 
-    def test_ensure_stage1_canonical_handoff_ready_blocks_completed_formal_1v3_without_publish_coverage(self):
+    def test_ensure_supervised_canonical_handoff_ready_blocks_completed_formal_1v3_without_publish_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
@@ -576,10 +576,10 @@ class RunStage05FormalTests(unittest.TestCase):
             )
 
             with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
-                with self.assertRaisesRegex(RuntimeError, 'pending Stage 0\\.5 formal_1v3 handoff'):
-                    stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+                with self.assertRaisesRegex(RuntimeError, 'pending supervised formal_1v3 handoff'):
+                    stage05_formal.ensure_supervised_canonical_handoff_ready(str(alias_path))
 
-    def test_ensure_stage1_canonical_handoff_ready_ignores_older_pending_after_newer_completion(self):
+    def test_ensure_supervised_canonical_handoff_ready_ignores_older_pending_after_newer_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             alias_path = tmpdir / 'mortal' / 'checkpoints' / 'stage0_5_supervised.pth'
@@ -636,7 +636,7 @@ class RunStage05FormalTests(unittest.TestCase):
             os.utime(new_state_path, (2, 2))
 
             with patch.object(stage05_formal, 'STAGE05_FIDELITY_ROOT', fidelity_root):
-                stage05_formal.ensure_stage1_canonical_handoff_ready(str(alias_path))
+                stage05_formal.ensure_supervised_canonical_handoff_ready(str(alias_path))
 
 
 if __name__ == '__main__':

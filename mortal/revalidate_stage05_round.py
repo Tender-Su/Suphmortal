@@ -116,8 +116,6 @@ def build_eval_only_config(
 
     if config_section in saved_config and isinstance(saved_config[config_section], dict):
         section_cfg = dict(saved_config[config_section])
-    elif config_section == 'stage1' and isinstance(saved_config.get('supervised'), dict):
-        section_cfg = dict(saved_config['supervised'])
     else:
         raise KeyError(f'config section `{config_section}` missing from checkpoint config')
 

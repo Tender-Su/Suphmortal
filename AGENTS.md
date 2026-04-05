@@ -3,7 +3,7 @@
 ## Project Structure
 
 - **`libriichi/`** — Rust high-performance Mahjong engine (PyO3 extension). Contains game rules, state machine, feature extraction, and inline tests. Exposes 6 PyO3 sub-modules: `consts`, `state`, `dataset`, `arena`, `stat`, `mjai`.
-- **`mortal/`** — PyTorch training pipeline. Model definitions (`model.py`), supervised / oracle-dropout / online training scripts, A/B runners, evaluation, and all configs.
+- **`mortal/`** — PyTorch training pipeline. Model definitions (`model.py`), supervised / online training scripts, A/B runners, evaluation, and all configs.
 - **`exe-wrapper/`** — Small Rust helper binary crate (workspace member).
 - **`scripts/`** — Windows `.bat` entry points for build and training.
 - **`checkpoints/`** — Model weight outputs (not committed).
@@ -11,13 +11,13 @@
 ## Documentation Layout
 
 - **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; read this first for the current mainline, current live stop point, and the immediate next move.
-- **`docs/agent/mainline.md`** — stable defaults only: canonical branch, frozen Stage `0.5` / `P1` conclusions, and machine-specific operating defaults.
+- **`docs/agent/mainline.md`** — stable defaults only: canonical branch, frozen supervised-phase / `P1` conclusions, and machine-specific operating defaults.
 - **`docs/agent/experiment-workflow.md`** — how to operate the current mainline: stage order, manual stop points, and run discipline; not the place for frozen constants.
 - **`docs/agent/laptop-remote-ops.md`** — laptop-node shell / data / remote-execution notes: SSH / PowerShell behavior, dataset status, and proven remote operation patterns.
 - **`docs/agent/code-sync.md`** — desktop↔laptop Git sync only: canonical branch (`main`), bare mirror layout, and the one-command sync path.
-- **`docs/status/stage05-verified-status.md`** — manually maintained verified Stage 0.5 status; use this when the auto-generated summary lags behind raw artifacts.
+- **`docs/status/supervised-verified-status.md`** — manually maintained verified supervised-phase status; use this when the auto-generated summary lags behind raw artifacts.
 - **`docs/status/p1-selection-canonical.md`** — the only valid P1 winner-selection rubric.
-- **`docs/status/stage05-fidelity-results.md`** — auto-generated Stage 0.5 fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `stage05-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
+- **`docs/status/supervised-fidelity-results.md`** — auto-generated supervised-phase fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `supervised-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
 - **`docs/research/`** — human-oriented methodology, engineering, and experiment notes; not the default current-state handoff.
 - **`docs/reflections/`** — personal reflection and human-AI collaboration notes; background only.
 - **`docs/archive/`** — historical snapshots and retired long-form docs; never treat archive docs as current defaults unless a current entry doc explicitly revives them.
@@ -50,11 +50,9 @@ cargo test -p libriichi state::test
 python mortal\test_greedy.py
 
 # Current training entry points
-.\scripts\run_grp.bat                  # Stage 0: cd mortal && python train_grp.py
-.\scripts\run_supervised.bat           # Stage 0.5: formal supervised pretraining / protocol replay
-.\scripts\run_stage1_refine.bat        # Stage 1: oracle-dropout supervised refinement
-.\scripts\run_stage1_ab.bat            # Stage 1 Block C: recipe / gamma A-B runner
-.\scripts\run_online.bat               # Stage 2: cd mortal && python train_online.py
+.\scripts\run_grp.bat                  # GRP prerequisite model: cd mortal && python train_grp.py
+.\scripts\run_supervised.bat           # Supervised phase: formal supervised training / protocol replay
+.\scripts\run_online.bat               # Reinforcement learning phase: cd mortal && python train_online.py
 
 # Formatting
 cargo fmt                              # Rust formatting (always run before commit)
@@ -100,14 +98,13 @@ These are defined in `libriichi/src/consts.rs` and imported in Python via `from 
 
 ## Architecture — Current Training Pipeline
 
-1. **Stage 0 — GRP** (`train_grp.py`): Trains Global Reward Predictor on game logs. Output: `checkpoints/grp.pth`.
-2. **Stage 0.5 — Supervised Pretraining / Protocol Search** (`train_supervised.py`, `run_stage05_formal.py`, `run_stage05_fidelity.py`): Selects the strongest supervised protocol under temporal drift and saves `best_loss / best_acc / best_rank`.
-3. **Stage 1 — Oracle Dropout Supervised Refinement** (`train_stage1_refine.py`): Current default mainline direction. Continues from Stage `0.5` top-k protocol seeds with `policy CE + rank aux + opponent_state aux + danger aux`.
-4. **Stage 2 — PPO Online** (`train_online.py`): Self-play with dynamic entropy regularization. Run after the new Stage `1` line stabilizes.
+1. **GRP prerequisite** (`train_grp.py`): Trains Global Reward Predictor on game logs. Output: `checkpoints/grp.pth`.
+2. **Supervised phase** (`train_supervised.py`, `run_stage05_formal.py`, `run_stage05_fidelity.py`): Runs `P0 -> P1 -> formal_train -> formal_1v3`, selects the strongest supervised protocol under temporal drift, and freezes the canonical supervised winner.
+3. **Reinforcement learning phase** (`train_online.py`): PPO self-play with dynamic entropy regularization. Current RL design is not frozen in the repo docs yet.
 
 ## Configuration (`mortal/config.toml`)
 
-All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[policy]`, `[oracle]`, `[aux]`, `[optim]`, `[dataset]`, `[grp]`, `[online]`, `[env]`, `[1v3]`.
+All hyperparameters centralized here. Key sections: `[control]`, `[supervised]`, `[resnet]`, `[policy]`, `[aux]`, `[optim]`, `[dataset]`, `[grp]`, `[online]`, `[env]`, `[1v3]`.
 - Use `mortal/config.example.toml` as template for new environments.
 - `[dataset]` paths (e.g., `D:/mahjong_data/...`) are local — never commit real paths.
 - `MORTAL_CFG` env var overrides the config file path.
@@ -140,7 +137,7 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 
 - **Primary desktop**: Intel Core i5-13600KF + NVIDIA GeForce RTX 5070 Ti. This remains the default target when a note only says "this machine".
 - **Secondary laptop node**: Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU (`8 GB` VRAM) + `32 GB` DDR5. Treat it as an additional independent experiment runner, not as an already-wired distributed training worker.
-- Use the laptop for parallel GRP runs, Stage `0.5` loader / validation benchmarking, supervised A/Bs, and shorter Stage `1` probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
+- Use the laptop for parallel GRP runs, supervised loader / validation benchmarking, supervised A/Bs, and shorter auxiliary probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
 - Canonical development branch is now local `main`, which tracks `origin/main`.
 - Source-of-truth code lives in the desktop `main` worktree first.
 - Git sync details belong in `docs/agent/code-sync.md`.
@@ -150,18 +147,18 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 - Laptop Conda env: `C:\Users\numbe\miniconda3\envs\mortal`
 - Desktop-to-laptop shell access is available over LAN SSH via the desktop key `C:\Users\numbe\.ssh\mahjong_laptop_ed25519`. The laptop LAN IP can change, so re-check it before hardcoding commands.
 - When running the same stage on both machines, always use distinct run names / output directories tagged by machine, and never let both machines write to the same checkpoint path or log directory.
-- Current laptop Stage `0.5` operational defaults and benchmark scope notes live in `docs/agent/mainline.md` and `docs/agent/laptop-remote-ops.md`.
+- Current laptop supervised-phase operational defaults and benchmark scope notes live in `docs/agent/mainline.md` and `docs/agent/laptop-remote-ops.md`.
 
 ## User Objective
 
 - The primary objective is to build the strongest Mahjong AI possible on this machine, not merely the fastest or cheapest-to-train model.
 - When proposing architecture, training, or data-pipeline changes, optimize for final playing strength first and throughput second, as long as the setup remains practical on the local hardware profile above.
-- For auxiliary models such as GRP, evaluate trade-offs by likely downstream impact on Stage 1/2 policy quality, not just standalone validation speed.
+- For auxiliary models such as GRP, evaluate trade-offs by likely downstream impact on supervised / RL policy quality, not just standalone validation speed.
 - When two options are close in expected final strength, prefer the smaller or faster option; when gains are meaningful, prefer the stronger option even if training is slower.
 - Current GRP guidance from local benchmarking: for this machine, the strongest practical final GRP setup is currently `384x3` trained in `fp32` with validation-loss-driven checkpointing and LR scheduling. If prioritizing efficiency over peak strength, `256x3` is the best practical fallback. Depth `x4`, `fp64`, and very large widths currently show diminishing returns relative to the extra cost.
-- Stage `0.5` / supervised validation default: use validation-only `val_file_batch_size = 8` and `val_prefetch_factor = 5` on this machine. If validation hits a loader/resource error, keep the same validation settings and retry indefinitely; do not downgrade to a safe single-process validation mode. The validated fix path is to explicitly close validation iterators/workers after each pass and release the training loader before budget-bound validation, because the previous `1455` issue was shared-mapping lifetime pressure rather than simple RAM exhaustion.
-- Stage `0.5` / supervised training default: keep heavy action/scenario selection metrics out of the per-batch training hot path. Training should keep only lightweight optimization/basic monitoring metrics; full discard/decision/sliced-scenario metrics belong to validation unless a run explicitly asks otherwise.
-- Stage `0.5` / supervised validation memory default: training stays at `4/10/3`; validation stays at `8/5`. Treat `8/5` as the default long-run operating point on this machine unless a fresh benchmark shows a stronger speed/stability trade-off.
+- Supervised validation default: use validation-only `val_file_batch_size = 8` and `val_prefetch_factor = 5` on this machine. If validation hits a loader/resource error, keep the same validation settings and retry indefinitely; do not downgrade to a safe single-process validation mode. The validated fix path is to explicitly close validation iterators/workers after each pass and release the training loader before budget-bound validation, because the previous `1455` issue was shared-mapping lifetime pressure rather than simple RAM exhaustion.
+- Supervised training default: keep heavy action/scenario selection metrics out of the per-batch training hot path. Training should keep only lightweight optimization/basic monitoring metrics; full discard/decision/sliced-scenario metrics belong to validation unless a run explicitly asks otherwise.
+- Supervised validation memory default: training stays at `4/10/3`; validation stays at `8/5`. Treat `8/5` as the default long-run operating point on this machine unless a fresh benchmark shows a stronger speed/stability trade-off.
 
 ## Local Python Environment
 
@@ -192,27 +189,30 @@ All hyperparameters centralized here. Key sections: `[control]`, `[resnet]`, `[p
 
 There is no formal CI/CD pipeline. The project runs locally as a research training framework on Windows.
 
-### Online Self-Play Architecture (Stage 2)
+### Online Self-Play Architecture
 - **`server.py`** — `ThreadingTCPServer` at `127.0.0.1:5000`. Manages param distribution and replay buffer. Trainers call `drain` to pull replays and `submit_param` to push new weights.
 - **`client.py`** — Worker that polls the server for latest params, runs self-play games via `TrainPlayer.train_play()`, and submits replays back.
 - **`train_online.py`** — Trainer loop: drains replays from server, runs PPO updates, pushes new params.
 - Buffer/drain directories configured in `config.toml [online.server]` with `buffer_dir`, `drain_dir`, `capacity`.
+- Online bootstrap default:
+  - resume from `[control].state_file`
+  - if that file does not exist, initialize weights from `[online].init_state_file`
 
 ### Evaluation
 - **`one_vs_three.py`** — Runs challenger vs champion matches using `libriichi.arena.OneVsThree`. Configured via `config.toml [1v3]`.
-- **TensorBoard**: `tensorboard --logdir ./mortal/tb_log_supervised_main` (Stage `0.5`), `./mortal/tb_log` (legacy Stage `1` / Stage `2`), or `./mortal/tb_log_grp` (Stage `0`).
+- **TensorBoard**: `tensorboard --logdir ./mortal/tb_log_supervised_main` (supervised), `./mortal/tb_log` (online PPO), or `./mortal/tb_log_grp` (GRP).
 
 ### Checkpoint Artifacts
 - `checkpoints/grp.pth` — Stage 0 output (GRP weights).
 - `checkpoints/grp_latest.pth` — latest resumable GRP training state; use for continuing Stage 0 training, not as the default downstream model.
 - `checkpoints/grp_best_acc.pth` — GRP checkpoint with the best validation exact-permutation accuracy; keep as a secondary candidate for downstream A/B checks.
-- `checkpoints/stage0_5_supervised*.pth` — Stage `0.5` formal checkpoints (`best_loss / best_acc / best_rank / latest`).
+- `checkpoints/stage0_5_supervised*.pth` — canonical supervised checkpoints (`best_loss / best_acc / best_rank / latest`). The filename keeps the old prefix for compatibility.
 - `checkpoints/online_ppo/` — Stage 2 periodic saves.
 - State files contain `{'mortal': ..., 'policy_net': ..., 'config': ...}` dicts loaded via `torch.load(..., weights_only=True)`.
 
 ### GRP Checkpoint Policy
 - Treat GRP checkpoints as three roles: `best_loss` for default downstream use, `best_acc` as a backup candidate, and `latest` only for resume.
-- Default Stage 1/2 training should load the `best_loss` GRP checkpoint unless there is explicit evidence that `best_acc` produces a stronger downstream policy.
+- Default supervised / RL training should load the `best_loss` GRP checkpoint unless there is explicit evidence that `best_acc` produces a stronger downstream policy.
 - Use `best_acc` only for controlled comparisons; do not silently replace `best_loss` with it in the main pipeline.
 - When changing GRP architecture or dtype, prefer starting a fresh Stage 0 run rather than resuming from an incompatible `latest` state.
 

@@ -10,7 +10,7 @@
 1. `../AGENTS.md`
 2. `agent/current-plan.md`
 3. `agent/mainline.md`
-4. `status/stage05-verified-status.md`
+4. `status/supervised-verified-status.md`
 5. `status/p1-selection-canonical.md`
 6. 任务涉及双机或 Git 同步时，再读 `agent/laptop-remote-ops.md` / `agent/code-sync.md`
 
@@ -26,11 +26,11 @@
   - 台式机与笔记本的 Git 同步。
 - `agent/laptop-remote-ops.md`
   - 笔记本 shell、数据根、远端运行前提和踩坑结论。
-- `status/stage05-verified-status.md`
-  - 当前 Stage `0.5 / P1` 的人工核对结论。
+- `status/supervised-verified-status.md`
+  - 当前监督学习阶段的人工核对结论。
 - `status/p1-selection-canonical.md`
   - `P1` 唯一有效的选模与解释口径。
-- `status/stage05-fidelity-results.md`
+- `status/supervised-fidelity-results.md`
   - 历史 run snapshot。只回答“那次 run 写出了什么”，不回答“现在默认是什么”。
 
 ## 目录分工

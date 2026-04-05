@@ -88,14 +88,14 @@ class RunStage05FidelityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / 'fidelity_run'
             run_dir.mkdir(parents=True, exist_ok=True)
-            doc_path = Path(tmp_dir) / 'stage05-fidelity-results.md'
+            doc_path = Path(tmp_dir) / 'supervised-fidelity-results.md'
 
             with mock.patch.object(fidelity, 'RESULTS_DOC_PATH', doc_path):
                 fidelity.update_results_doc(run_dir, {'status': 'running'})
 
             first_line = doc_path.read_text(encoding='utf-8').splitlines()[0]
 
-        self.assertEqual('# Stage 0.5 保真版 A/B 实时结果', first_line)
+        self.assertEqual('# 监督学习阶段保真版 A/B 实时结果', first_line)
 
     def test_protocol_decide_probe_keeps_all_three_slots(self) -> None:
         ranked = [

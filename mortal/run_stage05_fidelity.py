@@ -40,7 +40,7 @@ from stage05_selection import (
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_DOC_PATH = REPO_ROOT / 'docs' / 'status' / 'stage05-fidelity-results.md'
+RESULTS_DOC_PATH = REPO_ROOT / 'docs' / 'status' / 'supervised-fidelity-results.md'
 FIDELITY_ROOT = REPO_ROOT / 'logs' / 'stage05_fidelity'
 FIDELITY_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -624,11 +624,15 @@ def skipped_round_payload(round_name: str, *, reason: str) -> dict[str, Any]:
     }
 
 
-def select_p0_stage1_top4(round2_ranking: list[dict[str, Any]]) -> list[CandidateSpec]:
+def select_p0_supervised_top4(round2_ranking: list[dict[str, Any]]) -> list[CandidateSpec]:
     valid_entries = [entry for entry in round2_ranking if entry.get('valid')]
     if not valid_entries:
         valid_entries = list(round2_ranking)
     return [candidate_from_entry(entry) for entry in valid_entries[:4]]
+
+
+def select_p0_stage1_top4(round2_ranking: list[dict[str, Any]]) -> list[CandidateSpec]:
+    return select_p0_supervised_top4(round2_ranking)
 
 
 def full_recent_metrics(summary: dict[str, Any]) -> dict[str, Any]:
@@ -4656,16 +4660,16 @@ def p1_snapshot_uses_current_defaults(p1: dict[str, Any]) -> bool:
 def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
     p1 = state.get('p1') or {}
     historical_snapshot = not p1_snapshot_uses_current_defaults(p1)
-    title = '# Stage 0.5 保真版 A/B 实时结果'
+    title = '# 监督学习阶段保真版 A/B 实时结果'
     if historical_snapshot:
         title += ' (historical snapshot)'
     lines = [
-        '# Stage 0.5 保真版 A/B 实时结果',
+        '# 监督学习阶段保真版 A/B 实时结果',
         '',
         f'- 运行目录：`{run_dir}`',
         f'- 更新时间：`{ts_now()}`',
         f'- 当前状态：`{state.get("status", "unknown")}`',
-        '- 自动串联范围：`P0 + P1 + Stage 0.5 formal_train`',
+        '- 自动串联范围：`P0 + P1 + supervised formal_train`',
         '- 说明：`formal checkpoint pack` 产出后不再直接做 canonical 落位；当前主线会停在 `formal_1v3` 之前，最终 canonical 落位由 `formal_1v3` 决胜完成。',
         '',
     ]
@@ -4675,7 +4679,7 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
         lines.extend([
             '> historical snapshot: this file records one run output and may not match the current default search space.',
             '> The search_space section below may contain retired keys or retired ambiguity settings from that run.',
-            '> For current defaults, prefer `docs/agent/current-plan.md`, `docs/agent/mainline.md`, `docs/status/stage05-verified-status.md`, and `docs/status/p1-selection-canonical.md`.',
+            '> For current defaults, prefer `docs/agent/current-plan.md`, `docs/agent/mainline.md`, `docs/status/supervised-verified-status.md`, and `docs/status/p1-selection-canonical.md`.',
             '',
         ])
     else:
@@ -4686,7 +4690,7 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
 
     final = state.get('final_conclusion') or {}
     if final:
-        p0_top4 = final.get('p0_stage1_top4') or []
+        p0_top4 = final.get('p0_supervised_top4') or final.get('p0_stage1_top4') or []
         p0_top4_display = ', '.join(p0_top4) if p0_top4 else 'TBD'
         lines.extend([
             '## 当前结论',
@@ -4699,7 +4703,7 @@ def update_results_doc(run_dir: Path, state: dict[str, Any]) -> None:
             f'- P1 ablation 策略：`{final.get("p1_ablation_policy", P1_ABLATION_POLICY)}`',
             f'- formal_train：`{final.get("formal_train_status", final.get("formal_status", "pending"))}`',
             f'- formal_1v3：`{final.get("formal_1v3_status", "pending")}`',
-            f'- Stage 0.5 canonical 落位：`{final.get("formal_status", "pending")}`',
+            f'- 监督学习 canonical 落位：`{final.get("formal_status", "pending")}`',
             '',
         ])
 
@@ -5177,7 +5181,7 @@ def load_cached_p0_rounds_upto_round2(
     return round0, round1, round2
 
 
-def load_cached_p0_stage1_top4(
+def load_cached_p0_supervised_top4(
     run_dir: Path,
     state: dict[str, Any],
     *,
@@ -5201,16 +5205,39 @@ def load_cached_p0_stage1_top4(
         return None
     round0, round1, round2 = cached_rounds
     ranking = round2['ranking']
-    stage1_top4 = select_p0_stage1_top4(ranking)
+    supervised_top4 = select_p0_supervised_top4(ranking)
     p0_state = state.setdefault('p0', {})
     p0_state['round0'] = round0
     p0_state['round1'] = round1
     p0_state['round2'] = round2
-    p0_state['stage1_top4'] = [candidate.arm_name for candidate in stage1_top4]
-    state.setdefault('final_conclusion', {})['p0_stage1_top4'] = p0_state['stage1_top4']
+    p0_state['supervised_top4'] = [candidate.arm_name for candidate in supervised_top4]
+    state.setdefault('final_conclusion', {})['p0_supervised_top4'] = p0_state['supervised_top4']
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
-    return stage1_top4
+    return supervised_top4
+
+
+def load_cached_p0_stage1_top4(
+    run_dir: Path,
+    state: dict[str, Any],
+    *,
+    base_cfg: dict[str, Any],
+    grouped: dict[str, list[str]],
+    seed: int,
+    candidate_subset: str = 'all',
+    skip_round1: bool = False,
+    round2_max_candidates: int | None = None,
+) -> list[CandidateSpec] | None:
+    return load_cached_p0_supervised_top4(
+        run_dir,
+        state,
+        base_cfg=base_cfg,
+        grouped=grouped,
+        seed=seed,
+        candidate_subset=candidate_subset,
+        skip_round1=skip_round1,
+        round2_max_candidates=round2_max_candidates,
+    )
 
 
 def run_p0(
@@ -5291,13 +5318,13 @@ def run_p0(
     p0_state['round2'] = round2
     update_results_doc(run_dir, state)
     round2_ranked = [candidate_from_entry(entry) for entry in round2['ranking']]
-    stage1_top4 = select_p0_stage1_top4(round2['ranking'])
-    p0_state['stage1_top4'] = [candidate.arm_name for candidate in stage1_top4]
-    state.setdefault('final_conclusion', {})['p0_stage1_top4'] = p0_state['stage1_top4']
+    supervised_top4 = select_p0_supervised_top4(round2['ranking'])
+    p0_state['supervised_top4'] = [candidate.arm_name for candidate in supervised_top4]
+    state.setdefault('final_conclusion', {})['p0_supervised_top4'] = p0_state['supervised_top4']
     if skip_round3:
         atomic_write_json(run_dir / 'state.json', state)
         update_results_doc(run_dir, state)
-        return stage1_top4
+        return supervised_top4
     top2 = round2_ranked[:2]
     if not top2:
         raise RuntimeError('P0 round2 produced no finalists')
@@ -5308,7 +5335,7 @@ def run_p0(
         state.setdefault('final_conclusion', {})['p0_winner'] = p0_state['winner']
         atomic_write_json(run_dir / 'state.json', state)
         update_results_doc(run_dir, state)
-        return stage1_top4
+        return supervised_top4
 
     round3 = execute_round(
         run_dir=run_dir,
@@ -5328,7 +5355,7 @@ def run_p0(
     state.setdefault('final_conclusion', {})['p0_winner'] = p0_state['winner']
     atomic_write_json(run_dir / 'state.json', state)
     update_results_doc(run_dir, state)
-    return stage1_top4
+    return supervised_top4
 
 
 def run_p1(
@@ -5688,7 +5715,7 @@ def main() -> None:
             or args.stop_after_p1_protocol_decide
             or args.stop_after_p1_winner_refine
         ):
-            p0_top4 = load_cached_p0_stage1_top4(
+            p0_top4 = load_cached_p0_supervised_top4(
                 run_dir,
                 state,
                 base_cfg=base_cfg,

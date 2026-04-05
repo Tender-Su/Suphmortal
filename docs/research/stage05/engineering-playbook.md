@@ -1,4 +1,4 @@
-# Stage 0.5 工程手册
+# 监督学习阶段工程手册
 
 这份文档只保留当前仍有效、会直接影响后续实验质量的工程经验。旧的长版记录已归档到：
 
@@ -6,8 +6,8 @@
 
 ## 当前默认前提
 
-- 当前默认主线以 `docs/agent/current-plan.md`、`docs/status/stage05-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准
-- 当前 downstream manual `formal` 口径再额外看 `docs/status/formal-triplet-playoff-canonical.md`
+- 当前默认主线以 `docs/agent/current-plan.md`、`docs/status/supervised-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准
+- 当前 downstream manual `formal` 口径再额外看 `docs/status/supervised-formal-triplet-playoff-canonical.md`
 - `P1` 当前结构固定为：`calibration -> protocol_decide -> winner_refine`
 - `P1 ablation` 当前只保留为 `backlog / manual only`
 - 当前 `P0 top3` 事实顺序固定为 `A2y / A2x / A1x`
@@ -37,7 +37,7 @@
 
 ### 4. run snapshot 不等于当前默认
 
-- `docs/status/stage05-fidelity-results.md` 只是某次 run 的快照
+- `docs/status/supervised-fidelity-results.md` 只是某次 run 的快照
 - 当前默认解释必须优先看 `current-plan / verified-status / p1-selection-canonical`
 - 历史 run 里出现旧 `ambig` 或旧 center 口径，不代表它们仍然是当前默认
 
@@ -82,7 +82,7 @@
 
 ## 当前推荐阅读顺序
 
-1. `docs/status/stage05-verified-status.md`
+1. `docs/status/supervised-verified-status.md`
 2. `docs/status/p1-selection-canonical.md`
 3. 本文档
 4. `docs/research/stage05/selector-stat-audit.md`

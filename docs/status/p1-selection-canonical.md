@@ -119,7 +119,7 @@
   - 当前 active 位次分是 `90 / 45 / 0 / -135`
 - `3210` 只保留为诊断对照，不覆盖当前 winner 决议
 - 当前 triplet 的固定口径看：
-  - `docs/status/formal-triplet-playoff-canonical.md`
+  - `docs/status/supervised-formal-triplet-playoff-canonical.md`
 
 ## ce_only 的解释
 

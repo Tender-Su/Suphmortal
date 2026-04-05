@@ -14,10 +14,6 @@ def resolve_effective_config_section(config, config_section):
     section_cfg = config.get(config_section)
     if isinstance(section_cfg, dict):
         return section_cfg
-    if config_section == 'stage1':
-        fallback_cfg = config.get('supervised')
-        if isinstance(fallback_cfg, dict):
-            return fallback_cfg
     return {}
 
 
@@ -216,10 +212,6 @@ def loader_uses_oracle(*, training, use_oracle, validation_use_oracle):
 
 
 def ensure_init_state_file_exists(init_state_file, *, cfg_prefix):
-    if init_state_file and cfg_prefix == 'stage1':
-        import run_stage05_formal as stage05_formal
-
-        stage05_formal.ensure_stage1_canonical_handoff_ready(init_state_file)
     if init_state_file and not path.exists(init_state_file):
         raise FileNotFoundError(f'{cfg_prefix}.init_state_file does not exist: {init_state_file}')
 
@@ -247,15 +239,7 @@ def paths_match(lhs, rhs):
 
 
 def resolve_stage2_handoff_state_file(*, cfg_prefix, supervised_cfg, control_cfg):
-    if cfg_prefix != 'stage1':
-        return ''
-    if not isinstance(supervised_cfg, dict):
-        return ''
-    if not bool(supervised_cfg.get('publish_stage2_handoff', True)):
-        return ''
-    if not isinstance(control_cfg, dict):
-        return ''
-    return str(control_cfg.get('state_file', '') or '')
+    return ''
 
 
 def should_enable_normal_export(
@@ -452,7 +436,7 @@ def compute_exact_action_metric_stats(
 def train(
     config_section='supervised',
     *,
-    stage_label='Supervised Pretraining (Stage 0.5)',
+    stage_label='Supervised Training',
     checkpoint_label='supervised',
     export_normal_checkpoints=False,
 ):
@@ -471,7 +455,6 @@ def train(
     from glob import glob
     from datetime import datetime
     from itertools import chain
-    from pathlib import Path
     from torch import nn, optim
     from torch.amp import GradScaler
     from torch.nn.utils import clip_grad_norm_
@@ -499,51 +482,10 @@ def train(
 
     version = config['control']['version']
     oracle_channels = oracle_obs_shape(version)[0]
+    if config_section != 'supervised':
+        raise KeyError(f'unsupported config section: {config_section}')
     if config_section not in config:
-        if config_section != 'stage1' or 'supervised' not in config:
-            raise KeyError(f'missing config section: {config_section}')
-
-        supervised_fallback = copy.deepcopy(config['supervised'])
-        fallback_state_dir = Path(supervised_fallback['state_file']).resolve().parent
-        fallback_tb_dir = Path(supervised_fallback['tensorboard_dir']).resolve().parent
-        fallback_init_state = config.get('oracle', {}).get(
-            'init_state_file',
-            supervised_fallback.get('best_loss_state_file', supervised_fallback['best_state_file']),
-        )
-        synthetic_stage1 = {
-            **supervised_fallback,
-            'state_file': str(fallback_state_dir / 'stage1_latest_oracle.pth'),
-            'best_state_file': str(fallback_state_dir / 'stage1_best_loss_oracle.pth'),
-            'best_loss_state_file': str(fallback_state_dir / 'stage1_best_loss_oracle.pth'),
-            'best_acc_state_file': str(fallback_state_dir / 'stage1_best_acc_oracle.pth'),
-            'best_rank_state_file': str(fallback_state_dir / 'stage1_best_rank_oracle.pth'),
-            'best_loss_normal_state_file': str(fallback_state_dir / 'stage1_best_loss_normal.pth'),
-            'best_acc_normal_state_file': str(fallback_state_dir / 'stage1_best_acc_normal.pth'),
-            'best_rank_normal_state_file': str(fallback_state_dir / 'stage1_best_rank_normal.pth'),
-            'tensorboard_dir': str(fallback_tb_dir / 'tb_log_stage1'),
-            'file_index': str(fallback_state_dir / 'file_index_stage1_json.pth'),
-            'init_state_file': fallback_init_state,
-            'enable_oracle': True,
-            'validation_use_oracle': False,
-            'oracle_dropout': {
-                'enabled': True,
-                'schedule': 'linear',
-                'gamma_start': float(config.get('oracle', {}).get('gamma_start', 1.0)),
-                'gamma_end': float(config.get('oracle', {}).get('gamma_end', 0.0)),
-                'hold_steps': 0,
-                'decay_steps': int(
-                    supervised_fallback.get(
-                        'max_steps',
-                        config.get('optim', {}).get('scheduler', {}).get('max_steps', 0),
-                    ) or 0
-                ),
-            },
-        }
-        config[config_section] = synthetic_stage1
-        logging.warning(
-            'missing [stage1] in config; using synthesized Stage 1 section derived from [supervised]. '
-            'Add an explicit [stage1] section to config.toml to freeze real Stage 1 semantics.'
-        )
+        raise KeyError(f'missing config section: {config_section}')
     supervised_cfg = config[config_section]
     cfg_prefix = config_section
 
@@ -692,7 +634,7 @@ def train(
     use_oracle = supervised_cfg.get('enable_oracle', False)
     validation_use_oracle = supervised_cfg.get(
         'validation_use_oracle',
-        False if cfg_prefix == 'stage1' else use_oracle,
+        use_oracle,
     )
     oracle_dropout_cfg = supervised_cfg.get('oracle_dropout', {})
     oracle_dropout_enabled = bool(use_oracle and oracle_dropout_cfg.get('enabled', False))
@@ -713,11 +655,7 @@ def train(
     init_state_file = supervised_cfg.get('init_state_file', '')
     tensorboard_dir = supervised_cfg['tensorboard_dir']
     file_index = supervised_cfg['file_index']
-    stage2_handoff_state_file = resolve_stage2_handoff_state_file(
-        cfg_prefix=cfg_prefix,
-        supervised_cfg=supervised_cfg,
-        control_cfg=config.get('control', {}),
-    )
+    stage2_handoff_state_file = ''
     scheduler_cfg = supervised_cfg.get('scheduler', {})
     peak_lr = supervised_cfg.get('lr', config['optim']['scheduler']['peak'])
     warm_up_steps = scheduler_cfg.get('warm_up_steps', config['optim']['scheduler'].get('warm_up_steps', 0))
@@ -738,6 +676,14 @@ def train(
         )
     if oracle_dropout_enabled and oracle_dropout_decay_steps < 0:
         raise ValueError(f'{cfg_prefix}.oracle_dropout.decay_steps must be non-negative')
+    if use_oracle:
+        raise RuntimeError(
+            'supervised.enable_oracle has been retired; Oracle is no longer part of the supervised stage'
+        )
+    if oracle_dropout_enabled:
+        raise RuntimeError(
+            'supervised.oracle_dropout has been retired; Oracle is no longer part of the supervised stage'
+        )
 
     action_group_specs = {
         'discard': (0, 37),

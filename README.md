@@ -25,10 +25,17 @@
 
 ## 当前训练主线
 
-1. `Stage 0`：训练 `GRP`
-2. `Stage 0.5`：监督预训练 / 协议 A/B，正式入口为 `.\scripts\run_supervised.bat`
-3. `Stage 1`：当前默认主线是 `Oracle Dropout Supervised Refinement`，训练入口为 `.\scripts\run_stage1_refine.bat`，配方 A/B 入口为 `.\scripts\run_stage1_ab.bat`
-4. `Stage 2`：PPO 在线自博弈
+1. `GRP`：监督学习阶段的前置辅助模型
+2. `监督学习阶段`：内部结构固定为 `P0 -> P1 -> formal_train -> formal_1v3`，正式入口为 `.\scripts\run_supervised.bat`
+3. `强化学习阶段`：PPO 在线自博弈，入口为 `.\scripts\run_online.bat`
+
+当前监督学习阶段已经收口：
+
+- 当前正式 winner：`anchor*1.0`
+- 当前第一替补：`opp_lean*0.85`
+- 监督学习阶段不再继续做 Oracle 路线
+- 强化学习阶段方案仍在研究，暂不在 README 里写死
+- 当前 RL 入口默认会先续跑 `./checkpoints/mortal.pth`，不存在时再从 canonical supervised checkpoint `./checkpoints/stage0_5_supervised.pth` 起跑
 
 ## 快速开始
 
@@ -57,21 +64,19 @@ python -c "import libriichi; print('OK')"
 ```powershell
 .\scripts\run_grp.bat
 .\scripts\run_supervised.bat
-.\scripts\run_stage1_refine.bat
-.\scripts\run_stage1_ab.bat
 .\scripts\run_online.bat
 ```
 
 ## 监控与结果
 
-- `Stage 0.5` 正式训练与协议 A/B 日志位于 `logs/stage05_ab/`
+- 监督学习正式训练与协议 A/B 日志位于 `logs/stage05_ab/`
 - 保真串联流程日志位于 `logs/stage05_fidelity/`
 - 每个具体 run 的 TensorBoard 位于对应目录下的 `tb/`
 - `GRP` 的 TensorBoard 位于 `mortal/tb_log_grp`
-- 人工核对后的当前进度以 `docs/status/stage05-verified-status.md` 为准
+- 人工核对后的当前进度以 `docs/status/supervised-verified-status.md` 为准
 - `P1` 的唯一有效选模口径见 `docs/status/p1-selection-canonical.md`
 - selector 哪些部分已可统计化见 `docs/research/stage05/selector-stat-audit.md`
-- 自动生成的 `Stage 0.5` 摘要保留在 `docs/status/stage05-fidelity-results.md`
+- 自动生成的监督学习阶段 run snapshot 保留在 `docs/status/supervised-fidelity-results.md`
 - `scripts/` 目录只保留当前支持的训练入口与在用辅助脚本，不再推荐历史 GRP helper
 
 ## 说明
@@ -79,4 +84,4 @@ python -c "import libriichi; print('OK')"
 - 只使用 `scripts/` 下的批处理入口；根目录旧 wrapper 已移除
 - 不要修改特征通道数，相关约束见 `AGENTS.md`
 - 当前训练策略会持续演进，默认口径与路线图以 `docs/agent/current-plan.md` 为准
-- `Stage 0.5` 当前仍有效的工程经验见 `docs/research/stage05/engineering-playbook.md`
+- 监督学习阶段当前仍有效的工程经验见 `docs/research/stage05/engineering-playbook.md`

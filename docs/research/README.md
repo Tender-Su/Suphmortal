@@ -7,7 +7,7 @@
 - `stage0/grp-experience.md`
   - `GRP` 当前默认、代表性结果、仍值得继续探索的候选
 
-## Stage 0.5 / P1
+## 监督学习阶段 / P1
 
 - `stage05/engineering-playbook.md`
   - 当前仍有效的工程方法、排障经验、运行纪律

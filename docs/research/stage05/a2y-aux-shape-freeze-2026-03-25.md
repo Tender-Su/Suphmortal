@@ -246,4 +246,4 @@ The following were updated to use the frozen defaults:
 - [run_rank_shape_probe.py](/C:/Users/numbe/Desktop/MahjongAI/mortal/run_rank_shape_probe.py)
 - [train_supervised.py](/C:/Users/numbe/Desktop/MahjongAI/mortal/train_supervised.py)
 - [current-plan.md](/C:/Users/numbe/Desktop/MahjongAI/docs/agent/current-plan.md)
-- [stage05-verified-status.md](/C:/Users/numbe/Desktop/MahjongAI/docs/status/stage05-verified-status.md)
+- [supervised-verified-status.md](/C:/Users/numbe/Desktop/MahjongAI/docs/status/supervised-verified-status.md)

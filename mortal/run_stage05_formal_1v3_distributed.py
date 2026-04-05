@@ -555,7 +555,7 @@ def validate_published_canonical_checkpoints(
     }
     if not published_destinations:
         raise RuntimeError(
-            'formal_1v3 finished ranking but did not publish any expected Stage 0.5 canonical aliases'
+            'formal_1v3 finished ranking but did not publish any expected supervised canonical aliases'
         )
     missing_targets = sorted(
         str(target)
@@ -564,7 +564,7 @@ def validate_published_canonical_checkpoints(
     )
     if missing_targets:
         raise RuntimeError(
-            'formal_1v3 did not publish all expected Stage 0.5 canonical aliases: '
+            'formal_1v3 did not publish all expected supervised canonical aliases: '
             + ', '.join(missing_targets)
         )
 

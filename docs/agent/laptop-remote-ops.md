@@ -39,7 +39,7 @@ Git 同步细节不在这里，见 `docs/agent/code-sync.md`。
 
 ## 当前笔记本默认
 
-### Stage 0.5 loader
+### 监督学习阶段 loader
 
 - train：`num_workers = 4`
 - train：`file_batch_size = 10`

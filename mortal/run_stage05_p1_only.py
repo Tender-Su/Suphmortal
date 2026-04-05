@@ -13,7 +13,7 @@ import stage05_current_defaults as stage05_defaults
 
 DEFAULT_RUN_NAME = 's05_fidelity_p1_top3'
 DEFAULT_P1_SEED = ab.BASE_SCREENING['seed'] + 1000
-FROZEN_TOP3 = stage05_defaults.CURRENT_STAGE1_TOP_PROTOCOL_ARMS
+FROZEN_TOP3 = stage05_defaults.CURRENT_SUPERVISED_TOP_PROTOCOL_ARMS
 
 
 def build_protocol_arm_map() -> dict[str, tuple[str, str, str, str]]:
