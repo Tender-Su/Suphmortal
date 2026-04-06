@@ -2,8 +2,8 @@
 
 > Archive note (`2026-04-04`)：
 > 本文档只保留 `2026-03-29` 当时的阶段判断，不能当当前主线入口。
-> 其中 `Stage 0.5 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后，不读取任何 `P2` 输出。
-> 当前默认以 `docs/agent/current-plan.md`、`docs/agent/mainline.md`、`docs/status/stage05-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准。
+> 其中 `监督学习阶段 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后，不读取任何 `P2` 输出。
+> 当前默认以 `docs/agent/current-plan.md`、`docs/agent/mainline.md`、`docs/status/supervised-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准。
 
 本文档是 agent 的续工入口，只保留当前主线、已证实结论和待验证项，不再重复 `AGENTS.md` 的基础规范。
 
@@ -12,10 +12,10 @@
 - `AGENTS.md`：工程规范、架构常量、硬件假设、强约束
 - `README.md`：项目简介和快速启动
 - `docs/README.md`：给你看的文档总索引
-- `docs/status/stage05-verified-status.md`：人工核对后的当前运行状态
+- `docs/status/supervised-verified-status.md`：人工核对后的当前运行状态
 - `docs/research/stage0/grp-experience.md`：`Stage 0` 的架构、精度与训练配置实验记录
-- `docs/research/stage05/engineering-playbook.md`：`Stage 0.5` 排障经验
-- `docs/status/stage05-fidelity-results.md`：`Stage 0.5 fidelity / P0 / P1` 的自动生成短结果
+- `docs/research/supervised/engineering-playbook.md`：`监督学习阶段` 排障经验
+- `docs/status/supervised-fidelity-results.md`：监督学习阶段 `fidelity / P0 / P1` 的自动生成短结果
 - 本文档：当前最强方案、已定主线、待做 A/B
 
 ## 一、已证实 / 主线默认
@@ -36,20 +36,20 @@
 - `512x4` 是当前最高优先级的大模型继续探索候选
 - 详细实验记录见 `docs/research/stage0/grp-experience.md`
 
-### 3. Stage 0.5（监督预训练）主线
+### 3. 监督学习阶段（监督预训练）主线
 
 - 旧的 `A1y_broad_to_recent_mild_12m_6m` 只应视为历史条件 winner，不能再作为当前主线结论
-- 当前 `Stage 0.5` 全局主线未定，必须以当前代码下的 `AB1234/P0` 与重跑 `AB1` 复核结果为准
+- 当前 `监督学习阶段` 全局主线未定，必须以当前代码下的 `AB1234/P0` 与重跑 `AB1` 复核结果为准
 - 当前代码下的 `AB1` 三个 seed 复核结果一致为 `cosine` 胜出：
   - `seed=20260312`：`B_cosine loss=0.604391`，`A_plateau loss=0.625892`
   - `seed=20260413`：`B_cosine loss=0.610014`，`A_plateau loss=0.628657`
   - `seed=20260514`：`B_cosine loss=0.609496`，`A_plateau loss=0.624212`
-- 因此，旧的 “`AB1: plateau > cosine`” 结论已经失效；后续 `Stage 0.5` 不应再把 `plateau` 视为默认 scheduler
-- `2026-03-24` 基于泄露修复后的 `P0` clean rerun，当前 `Stage 0.5` 已经得到足够强的正向入选结论：可直接进入下一轮 `P1` 的 `top3` 协议种子为：
+- 因此，旧的 “`AB1: plateau > cosine`” 结论已经失效；后续 `监督学习阶段` 不应再把 `plateau` 视为默认 scheduler
+- `2026-03-24` 基于泄露修复后的 `P0` clean rerun，当前 `监督学习阶段` 已经得到足够强的正向入选结论：可直接进入下一轮 `P1` 的 `top3` 协议种子为：
   - `C_A2y_cosine_broad_to_recent_strong_12m_6m`
   - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
   - `C_A1x_cosine_broad_to_recent_mild_24m_12m`
-- 这次 `P0` 的当前主口径来自 `logs/stage05_fidelity/s05_fidelity_p0_cosine18_direct_r2top8_20260324_0230/` 与对应 `logs/stage05_ab/..._p0_r2/*/arm_result.json`，不再以历史 `s05_fidelity_main` 的泄露版 shortlist 为准
+- 这次 `P0` 的当前主口径来自 `logs/sl_fidelity/sl_fidelity_p0_cosine18_direct_r2top8_20260324_0230/` 与对应 `logs/sl_ab/..._p0_r2/*/arm_result.json`，不再以历史 `sl_fidelity_main` 的泄露版 shortlist 为准
 - 泄露前实际进入下游口径的种子池是 `A1x / A3x / B2z / B2x`；clean rerun 后只有 `A1x` 保留，`A2y / A2x` 新上位，说明泄露确实改变了 `P0` shortlist
 - 这条结论的强项是“正向入选”而不是“穷尽淘汰”：当前已经足以确认上述 3 条值得进入 `P1`
 - 基于效率优先的项目决策，`B-side` 协议在当前阶段正式冻结，不再继续补跑或进入 `P1`
@@ -64,7 +64,7 @@
   - `12m_6m` 是当前最强的近期对齐 sweet spot，`24m_12m` 则提供更稳的长期缓冲；`6m_6m` 更容易把 recent loss 压低，但稳健性不一定最好
   - `two_stage` 和 `recent_broad_recent` 在泄露前显得过强，但 clean rerun 没能进入当前 `top3`，这与“泄露会放大 replay-heavy / repeat-exposure 协议优势”的主观逻辑一致
 - 泄露前 raw run 与 clean rerun 的分值量纲不应做跨期绝对横比；跨期比较应主要看名单变化、同轮内排序和同口径下的指标结构
-- 历史 `s05_fidelity_main` 已推进到 `P1 solo`；但它的 `P0` seed pool 建立在泄露版口径上，不能继续作为当前 `P0` 选种依据
+- 历史 `sl_fidelity_main` 已推进到 `P1 solo`；但它的 `P0` seed pool 建立在泄露版口径上，不能继续作为当前 `P0` 选种依据
 - 当前工程默认参数仍为：
   - `batch_size = 1024`
   - `num_workers = 4`
@@ -103,18 +103,18 @@
   - 三类调度器为 `plateau / cosine / phasewise`
   - 其中 `phasewise` 在当前三阶段实现里已经等价于 `warmup + cosine + plateau`
   - 不再把 `AB1` 与 `AB234` 人为拆开后再拼接成主线
-- 详细实验记录见 `docs/research/stage05/engineering-playbook.md`
+- 详细实验记录见 `docs/research/supervised/engineering-playbook.md`
 
-### 4. Stage 0.5 + Stage 1 联合主线
+### 4. 监督学习阶段 + 监督学习阶段 联合主线
 
-- 旧 `Stage 1 = Oracle AWR + GRP hand-level advantage` 不再作为默认主线
+- 旧 `监督学习阶段 = Oracle AWR + GRP hand-level advantage` 不再作为默认主线
 - 原因不是 `Oracle Dropout` 本身有问题，而是“用 `GRP` 产生的整局/整小局粗粒度顺位变化去指数加权每一步动作”噪声过大：
   - 同一小局内所有动作共享同一 `advantage`，无法区分局中好手与恶手
   - 晚局/末盘会把运气型结果过度放大，防守好但结果差的样本被错误压低
   - 该信号更像“局结果归因”，不像“动作质量归因”
-- 新默认主线改为：**合并 `Stage 0.5` 与旧 `Stage 1`，做 `Oracle Dropout Supervised Refinement`**
+- 新默认主线改为：**合并 `监督学习阶段` 与旧 `监督学习阶段`，做 `Oracle Dropout Supervised Refinement`**
 - 新主线的固定骨架：
-  - 从 `Stage 0.5 / P0` clean rerun 得到的 `top3` 协议种子初始化：`A2y / A2x` 负责主攻，`A1x` 负责稳健 hedge
+  - 从 `监督学习阶段 / P0` clean rerun 得到的 `top3` 协议种子初始化：`A2y / A2x` 负责主攻，`A1x` 负责稳健 hedge
   - 维持人类动作监督 `policy CE` 作为主损失，其他项全部视为辅助项
   - 保留 `Oracle Dropout`，但不再使用旧 `GRP-AWR` 样本权重
   - 三类辅助不再按“谁更高贵”排序，而是按“与当前动作的因果距离、噪声、与最终目标的对齐程度”重新评估
@@ -143,7 +143,7 @@
   - `opp = shanten 0.8506568408 / tenpai 1.1493431592`（`HYBRID_GRAD`，保留旧 `1:1` 方案的总系数和为 `2.0` 语义）
   - `danger = 0.0904217947 / 0.8180402859 / 0.0915379194`（`18K_STAT`）
 - `2026-03-25` 这轮 `A2y` micro AB 也修正了口径：`P1` 的单辅助 winner 判定必须按 `policy_quality` 做，也就是用 `comparison_recent_loss = recent_policy_loss` 过门槛，再按 `selection_tiebreak_key` 比较；当前排序键已经收敛到 `selection_quality_score -> -recent_policy_loss -> -old_regression_policy_loss`，各类 `acc` 只保留为诊断字段；`full_recent_loss` 只保留为 aux tax 诊断字段，不再作为这类实验的主判胜口径
-- 上面这条 `policy_quality` 规则现在已经冻结为项目内唯一有效的 `P1` 口径；任何脚本、文档、人工总结或自动摘要若与它冲突，一律以 `docs/status/p1-selection-canonical.md` 与 `mortal/run_stage05_fidelity.py` 为准
+- 上面这条 `policy_quality` 规则现在已经冻结为项目内唯一有效的 `P1` 口径；任何脚本、文档、人工总结或自动摘要若与它冲突，一律以 `docs/status/p1-selection-canonical.md` 与 `mortal/run_sl_fidelity.py` 为准
 - `2026-03-26` 新增了 `mortal/analyze_selection_heuristics.py` 的 selector 审计：在跨 `2009-2026` 的 `3240` 文件样本和现有多 seed `P1 solo` 结果上，确认 `policy_loss_epsilon = 0.003` 可以视为统计支持；`old_regression_policy_loss_epsilon` 与主门槛解绑，单独固定为 `0.0035`
 - 同一天又做了针对新 selector 语义的 `scenario_factor` 细搜：在正式搜索带 `0.0-0.25` 内，先看 pairwise 稳定性、再用 aggregate winner 一致率做次级筛选；最优点落在 `0.199`，因此把运行时默认值四舍五入到 `0.20`
 - `P1 calibration` 口径进一步升级为两层：
@@ -164,7 +164,7 @@
   - 全局顺位/价值建模候选
   - 下游评估或奖励塑形候选
   - 可做弱辅助头候选
-  - **不再默认直接充当 `Stage 1` 的主样本加权器**
+  - **不再默认直接充当 `监督学习阶段` 的主样本加权器**
 - 如果后续还要做离线强化学习，前提应改成：
   - 先有更细粒度、动作更近因的 value/critic 信号
   - 再重启 `AWR/PPO` 类训练
@@ -190,7 +190,7 @@
 
 - 使用 `384x3 fp32` 训练并维护 `best_loss / best_acc / latest`
 
-### 2. Stage 0.5
+### 2. 监督学习阶段
 
 - 先完成当前 `P0/P1/P2` 所需的监督协议筛选
 - 保留至少以下 checkpoint：
@@ -199,30 +199,30 @@
   - `best_acc`
   - `best_rank`
 
-### 3. Stage 1
+### 3. 监督学习阶段
 
-- 将旧 `Stage 1` 改造为“`Oracle Dropout Supervised Refinement`”
-- 默认从 `Stage 0.5 top-k` 协议中选 `top3` 种子启动：`A2y / A2x` 提供当前最强主攻线，`A1x` 提供稳健 hedge
+- 将旧 `监督学习阶段` 改造为“`Oracle Dropout Supervised Refinement`”
+- 默认从 `监督学习阶段 top-k` 协议中选 `top3` 种子启动：`A2y / A2x` 提供当前最强主攻线，`A1x` 提供稳健 hedge
 - 默认比较顺序：
   - `visible-only CE` 基线
   - `oracle-dropout CE + protocol_decide winner`
   - `oracle-dropout CE + winner_refine front runner`
   - `oracle-dropout CE + ablation confirmed winner`
-  - `Oracle Value Predictor` 先独立训练，再决定是否进入后续 `Stage 1` / `Stage 2` 迁移链路
-- 新 `Stage 1` 默认选模仍以 `recent loss + action/scenario quality` 组合口径为准
+  - `Oracle Value Predictor` 先独立训练，再决定是否进入后续 `监督学习阶段` / `强化学习阶段` 迁移链路
+- 新 `监督学习阶段` 默认选模仍以 `recent loss + action/scenario quality` 组合口径为准
 - 旧 `Oracle AWR` 不再作为当前工程结构的一部分；后续只讨论现有主线与新 value/critic 方案
 
-### 4. Stage 2
+### 4. 强化学习阶段
 
-- 在新的 `Stage 1` 稳定后，推进 PPO 在线自博弈
+- 在新的 `监督学习阶段` 稳定后，推进 PPO 在线自博弈
 - 奖励塑形和对战口径通过单独 A/B 再定
 
 ### 5. 后续实验执行树（冻结版）
 
-- 当前后续实验按五个连续区块推进：`A = Stage 0.5 收尾`，`B = 新 Stage 1 训练器落地`，`C = 新 Stage 1 配方筛选`，`D = Stage 1 迁移定型`，`E = Oracle Value Predictor / Stage 2`
+- 当前后续实验按五个连续区块推进：`A = 监督学习阶段 收尾`，`B = 新 监督学习阶段 训练器落地`，`C = 新 监督学习阶段 配方筛选`，`D = 监督学习阶段 迁移定型`，`E = Oracle Value Predictor / 强化学习阶段`
 - 五个区块允许少量工程并行，但不允许在统计上互相污染；任何下游区块都不能反过来改写上游区块的比较口径
 
-**区块 A：Stage 0.5 收尾**
+**区块 A：监督学习阶段 收尾**
 
 - 固定泄露修复后的 `P0 top3` 为当前下游协议种子池：`A2y / A2x / A1x`
 - `P0 round3` 只负责给主协议排序，不再阻塞后续主线；真正阻塞后续的是 `P1 / P2`
@@ -236,15 +236,15 @@
 - `区块 A` 完成门槛：
   - 已得到单一 `P1` 协议 winner，并在该协议内部冻结一版三头全开 front runner
   - 已完成 `P2` 去重，形成 `2 ~ 4` 个可送入下游的 checkpoint 候选
-  - `Stage 0.5` 的默认选模口径被冻结，不再边跑边改
+  - `监督学习阶段` 的默认选模口径被冻结，不再边跑边改
 
-**区块 B：新 Stage 1 训练器落地**
+**区块 B：新 监督学习阶段 训练器落地**
 
 - 在 `区块 A` 运行期间，允许并行完成新的 `Oracle Dropout Supervised Refinement` 训练器
 - 这一步只做工程落地，不做大规模结论宣告；目标是把后续实验入口准备好
 - `区块 B` 的工程实现必须遵守四条硬约束：
-  - **共享 core + 薄入口**：不得再复制一份大号训练脚本；`Stage 0.5` 与新 `Stage 1` 必须共用同一套训练核心，只允许保留各自的薄入口脚本
-  - **配置语义隔离**：新 `Stage 1` 必须使用独立的配置段与独立输出路径，不能继续复用 `[supervised]` 的语义去承载 `oracle dropout / normal export / Stage 1` 专属逻辑
+  - **共享 core + 薄入口**：不得再复制一份大号训练脚本；`监督学习阶段` 与新 `监督学习阶段` 必须共用同一套训练核心，只允许保留各自的薄入口脚本
+  - **配置语义隔离**：新 `监督学习阶段` 必须使用独立的配置段与独立输出路径，不能继续复用 `[supervised]` 的语义去承载 `oracle dropout / normal export / 监督学习阶段` 专属逻辑
   - **visible-only 验证主导**：即使训练过程中使用 `oracle dropout`，验证、early stopping、LR 调度与默认选模也必须以 `visible-only` 路径为准；oracle 侧指标只允许作为诊断，不允许反客为主
   - **双形态 checkpoint**：训练态必须保留可恢复的 oracle checkpoint；同时必须导出可直接下游使用的 `visible-only / normal` checkpoint，两者职责不得混淆
 - 新训练器必须满足：
@@ -252,15 +252,15 @@
   - 支持 `rank aux + opponent_state aux + danger aux`
   - 支持 `oracle dropout`
   - 明确禁止旧 `GRP hand-level advantage` 样本加权链路进入主线
-  - 支持从 `Stage 0.5` 的 `best_loss / best_acc / best_rank` 加载初始化
+  - 支持从 `监督学习阶段` 的 `best_loss / best_acc / best_rank` 加载初始化
 - `区块 B` 完成门槛：
   - 新训练入口可独立启动
   - 同一配置下可稳定恢复、保存、验证
   - 可导出 `visible-only` 形态 checkpoint
 
-**区块 C：新 Stage 1 配方筛选**
+**区块 C：新 监督学习阶段 配方筛选**
 
-- `区块 C` 的目标不是马上找最终最强 seed，而是先确定新 `Stage 1` 的默认损失骨架和 `oracle dropout` 日程
+- `区块 C` 的目标不是马上找最终最强 seed，而是先确定新 `监督学习阶段` 的默认损失骨架和 `oracle dropout` 日程
 - 为避免组合爆炸，先固定一条代表性强种子做配方筛选；如果只能选一条，当前默认优先使用 `C_A2y_cosine_broad_to_recent_strong_12m_6m`
 - 默认比较顺序固定为：
   - `S1-A = visible-only CE`
@@ -272,37 +272,37 @@
   - `G1 = linear 1 -> 0`
   - `G2 = smooth / cosine-like 1 -> 0`
 - `区块 C` 完成门槛：
-  - 得到一套默认 `Stage 1` 损失骨架
+  - 得到一套默认 `监督学习阶段` 损失骨架
   - 得到一套默认 `oracle dropout gamma` 日程
   - 明确 `danger aux` 是否进入主线第一版
 
-**区块 D：Stage 1 迁移定型**
+**区块 D：监督学习阶段 迁移定型**
 
-- 在 `区块 C` 固定默认配方后，再把它迁移到 `P2` 保留下来的 `2 ~ 4` 个 `Stage 0.5` 候选 checkpoint 上
-- 这一阶段才回答“哪个 `Stage 0.5` checkpoint 最能转化成下游强度”
-- 这一步对应 `Stage 0.5` 文档中的 `P3`
+- 在 `区块 C` 固定默认配方后，再把它迁移到 `P2` 保留下来的 `2 ~ 4` 个 `监督学习阶段` 候选 checkpoint 上
+- 这一阶段才回答“哪个 `监督学习阶段` checkpoint 最能转化成下游强度”
+- 这一步对应 `监督学习阶段` 文档中的 `P3`
 - 默认执行顺序：
   - 先做小预算迁移筛选，保留 `top 2`
-  - 再做长预算迁移对照，决出最终 `Stage 1` 默认初始化
+  - 再做长预算迁移对照，决出最终 `监督学习阶段` 默认初始化
 - `区块 D` 完成门槛：
-  - 得到新的 `Stage 1` 默认初始化 checkpoint
+  - 得到新的 `监督学习阶段` 默认初始化 checkpoint
   - 在统一预算下，明确新主线相对历史旧方案的增益或退化
 
-**区块 E：Oracle Value Predictor / Stage 2**
+**区块 E：Oracle Value Predictor / 强化学习阶段**
 
 - `Oracle Value Predictor` 当前只作为独立立项，不得阻塞 `A/B/C/D`
-- 它的职责是长期价值建模与后续 `Stage 2 critic` 初始化候选，而不是当前 `Stage 1` 的主损失组成部分
+- 它的职责是长期价值建模与后续 `强化学习阶段 critic` 初始化候选，而不是当前 `监督学习阶段` 的主损失组成部分
 - 只有在 `区块 D` 完成后，才允许进入：
   - `Oracle Value Predictor vs GRP` 对照
-  - `Stage 2` reward table 对照
-  - `Stage 2 critic` 初始化对照
+  - `强化学习阶段` reward table 对照
+  - `强化学习阶段 critic` 初始化对照
 
 **并行与禁止事项**
 
 - 允许并行：`区块 A` 的 `P1/P2` 与 `区块 B` 的工程开发
 - 不允许并行下结论：`区块 C/D/E` 必须等上游默认口径冻结后再宣告 winner
-- 不允许把 `Oracle Value Predictor` 与 `Stage 2 reward table` 混入当前 `Stage 1` 默认配方筛选
-- 不允许在 `P1/P2` 还没冻结时，提前宣布某个 `Stage 0.5` checkpoint 是最终主线赢家
+- 不允许把 `Oracle Value Predictor` 与 `强化学习阶段 reward table` 混入当前 `监督学习阶段` 默认配方筛选
+- 不允许在 `P1/P2` 还没冻结时，提前宣布某个 `监督学习阶段` checkpoint 是最终主线赢家
 - 不允许因为局部离线 loss 好看，就绕过 `区块 D` 直接宣告下游最强
 
 **当前立即动作**
@@ -310,7 +310,7 @@
 - 立即动作 1：先跑瘦版 `P1 calibration`，沿用 `2026-03-25` 已验证的单头映射，只补 `pairwise / triple combo factor`，再启动 `protocol_decide`
 - 立即动作 2：`protocol_decide` 默认保持三头全开；不再先做主决策用的单头淘汰
 - 立即动作 3：待 `protocol_decide` 选出协议 winner 后，只在 winner 协议内部进入 `winner_refine -> ablation`
-- 立即动作 4：并行落地新的 `Stage 1` 训练器与配置模板
+- 立即动作 4：并行落地新的 `监督学习阶段` 训练器与配置模板
 - 立即动作 5：待 `P1 / P2` 冻结后，再在单一代表性种子上做 `区块 C`
 - 立即动作 6：只有 `区块 C` 定型后，才进入 `区块 D/E`
 
@@ -323,37 +323,37 @@
 这些结论可能受到训练长度影响，短预算 A/B 只能给方向，不能直接当最终定论：
 
 - `Stage 0`：`384x3` vs `512x4 / 384x4 / 512x3` 的长预算复验
-- `Stage 0.5`：`AB1234 joint` 的 54 臂长预算复验与 top-k 二次复验
-- `Stage 1`：`P1 calibration` 现在不再只看 `loss` 量纲；它会同时记录 `rank / opp / danger` 对共享表示 `phi` 的梯度 RMS、两两梯度夹角，并据此生成 `pairwise / triple combo factor`，避免“loss 看似公平、trunk 实际受力不公平”
-- `Stage 1`：主决策轮不再使用 `SoloAuxGate / Pairwise / JointRefine` 三级串联；历史结果只保留为诊断和缩范围证据
-- `Stage 1`：`rank` 若胜出，只能说明“当前实现下存在净收益”；`rank` 若失利，也只说明“当前实现与当前权重接法不成立”，不等于长期价值信号本身无用
-- `Stage 1`：`P1` 当前主线固定为“冻结内部 shape + 三头全开 + 只搜索总预算/内部配比”；`rank / opp / danger` 都默认在搜索空间里，不先互相关闭
-- `Stage 1`：`protocol_decide` 必须在统一三头脚手架下比较协议；协议 winner 选出后，后续只沿单一 winner 协议继续前进
-- `Stage 1`：`winner_refine` 只做小步长三头配比微调；旧 `Δbudget_ratio = 0.25` 的 `JointRefine` 口径已废弃
-- `Stage 1`：`P1` 的主线 winner 选择（`protocol_decide / winner_refine / ablation / final_compare`）继续使用多 seed 聚合；单 seed 只作排错或方向判断，不直接宣告 winner
-- `Stage 1`：`P1 calibration` 本身是“量纲定标”而不是“winner 判决”；默认先依赖单 seed + 多 batch 中位数探针，只有当 `loss/grad` 两条轴给出的排序冲突、或不同协议之间定标结果波动过大时，才把 calibration 升级到和 winner 相同的 3-seed 级别
-- `Stage 1`：`phase-wise auxiliary schedule` 暂不直接进主线；只有在固定 `P1` 静态权重基线后，通过受控 A/B 同时打赢静态方案和小预算 `Stage 1 transfer`，才允许升级为默认主线
-- `Stage 0.5`：当前默认执行方案为“保真版”，详见 `docs/research/stage05/engineering-playbook.md`
+- `监督学习阶段`：`AB1234 joint` 的 54 臂长预算复验与 top-k 二次复验
+- `监督学习阶段`：`P1 calibration` 现在不再只看 `loss` 量纲；它会同时记录 `rank / opp / danger` 对共享表示 `phi` 的梯度 RMS、两两梯度夹角，并据此生成 `pairwise / triple combo factor`，避免“loss 看似公平、trunk 实际受力不公平”
+- `监督学习阶段`：主决策轮不再使用 `SoloAuxGate / Pairwise / JointRefine` 三级串联；历史结果只保留为诊断和缩范围证据
+- `监督学习阶段`：`rank` 若胜出，只能说明“当前实现下存在净收益”；`rank` 若失利，也只说明“当前实现与当前权重接法不成立”，不等于长期价值信号本身无用
+- `监督学习阶段`：`P1` 当前主线固定为“冻结内部 shape + 三头全开 + 只搜索总预算/内部配比”；`rank / opp / danger` 都默认在搜索空间里，不先互相关闭
+- `监督学习阶段`：`protocol_decide` 必须在统一三头脚手架下比较协议；协议 winner 选出后，后续只沿单一 winner 协议继续前进
+- `监督学习阶段`：`winner_refine` 只做小步长三头配比微调；旧 `Δbudget_ratio = 0.25` 的 `JointRefine` 口径已废弃
+- `监督学习阶段`：`P1` 的主线 winner 选择（`protocol_decide / winner_refine / ablation / final_compare`）继续使用多 seed 聚合；单 seed 只作排错或方向判断，不直接宣告 winner
+- `监督学习阶段`：`P1 calibration` 本身是“量纲定标”而不是“winner 判决”；默认先依赖单 seed + 多 batch 中位数探针，只有当 `loss/grad` 两条轴给出的排序冲突、或不同协议之间定标结果波动过大时，才把 calibration 升级到和 winner 相同的 3-seed 级别
+- `监督学习阶段`：`phase-wise auxiliary schedule` 暂不直接进主线；只有在固定 `P1` 静态权重基线后，通过受控 A/B 同时打赢静态方案和小预算 `监督学习阶段 transfer`，才允许升级为默认主线
+- `监督学习阶段`：当前默认执行方案为“保真版”，详见 `docs/research/supervised/engineering-playbook.md`
 - action-side 综合评分权重
-- `best_loss` / `best_acc` / `best_rank` 对下游 `Stage 1` 的迁移差异
-- 新 `Stage 1`：`oracle-dropout` 是否应使用 `P0` 的 `top3` 全部复筛，还是先在单一 backbone 上筛损失设计
-- 新 `Stage 1`：`danger aux` 三路输出的总权重与是否分阶段启用（内部配比已冻结为 `18K_STAT`）
-- 新 `Stage 1`：`rank / opponent_state / danger` 的联合预算与 selector 口径是否需要同步改成更偏 `policy loss` 的主门槛
-- 新 `Stage 1`：`oracle dropout gamma` 曲线与 phase 长度
+- `best_loss` / `best_acc` / `best_rank` 对下游 `监督学习阶段` 的迁移差异
+- 新 `监督学习阶段`：`oracle-dropout` 是否应使用 `P0` 的 `top3` 全部复筛，还是先在单一 backbone 上筛损失设计
+- 新 `监督学习阶段`：`danger aux` 三路输出的总权重与是否分阶段启用（内部配比已冻结为 `18K_STAT`）
+- 新 `监督学习阶段`：`rank / opponent_state / danger` 的联合预算与 selector 口径是否需要同步改成更偏 `policy loss` 的主门槛
+- 新 `监督学习阶段`：`oracle dropout gamma` 曲线与 phase 长度
 
 ### B. 下游强度项
 
 这些需要看最终对局强度，而不是只看监督指标：
 
-- `Stage 0.5 best_loss` 与 `best_acc` 对 `Stage 1` 的影响
-- `GRP best_loss` 与 `best_acc` 对 `Stage 1/2` 的影响
-- 新 `Stage 1` 相比历史旧方案对 `Stage 2` 初始化强度的影响
-- `Oracle Value Predictor` 相比 `GRP` 在 `Stage 1` 长期价值建模与 `Stage 2 critic` 初始化上的收益
-- `Stage 2` 奖励表的实际对局收益
+- `监督学习阶段 best_loss` 与 `best_acc` 对 `监督学习阶段` 的影响
+- `GRP best_loss` 与 `best_acc` 对 `监督学习阶段/2` 的影响
+- 新 `监督学习阶段` 相比历史旧方案对 `强化学习阶段` 初始化强度的影响
+- `Oracle Value Predictor` 相比 `GRP` 在 `监督学习阶段` 长期价值建模与 `强化学习阶段 critic` 初始化上的收益
+- `强化学习阶段` 奖励表的实际对局收益
 
 ### C. 奖励表项
 
-需要在 `Stage 2` 做较重的对照：
+需要在 `强化学习阶段` 做较重的对照：
 
 - `2,1,0,-3`
 - `3,2,1,0`
@@ -372,21 +372,21 @@
 - `best_loss` 稳定收敛
 - 大模型相对更小模型没有明显下游回报再提升时，停止继续放大
 
-### Stage 0.5 完成标准
+### 监督学习阶段 完成标准
 
 - `recent loss` 进入平台区
 - action-side 指标不再持续改善
 - 没有明显旧分布灾难性回退
-- 获得可用于 `Stage 1` 的 `best_loss / best_acc / best_rank`
+- 获得可用于 `监督学习阶段` 的 `best_loss / best_acc / best_rank`
 
-### Stage 1 完成标准
+### 监督学习阶段 完成标准
 
 - `oracle-dropout` 退出到 `gamma=0` 后仍能稳定提升
 - action-side 指标与难场景指标同步改善，而不是只压低总体 `loss`
 - 留在主线里的辅助项（`rank / danger / opponent_state`）已经在长预算下证明净收益；无收益项已被剔除
-- 导出可直接供 `Stage 2` 使用的 normal 形态 checkpoint
+- 导出可直接供 `强化学习阶段` 使用的 normal 形态 checkpoint
 
-### Stage 2 完成标准
+### 强化学习阶段 完成标准
 
 - 对战评估相对基线有稳定提升
 - 奖励表和 checkpoint 口径经过对照验证
@@ -406,11 +406,11 @@
 如果现在要继续主线训练，默认做法就是：
 
 1. `Stage 0` 使用 `384x3 fp32`
-2. `Stage 0.5` 先完成 `P1` 的 `CE-only -> protocol_decide -> winner_refine -> ablation` 与 `P2`，冻结辅助预算和 checkpoint 口径，再进入下游
+2. `监督学习阶段` 先完成 `P1` 的 `CE-only -> protocol_decide -> winner_refine -> ablation` 与 `P2`，冻结辅助预算和 checkpoint 口径，再进入下游
 3. 新默认主线直接进入合并后的 `Oracle Dropout Supervised Refinement`
-4. `Stage 0.5 / P0` clean rerun 的 `top3` 直接作为新 `Stage 1` 的首批协议种子池；真正进入 `Stage 1` 迁移的是 `P2` 去重后的候选 checkpoint
-5. `Stage 1` 先筛配方，再筛 seed；配方筛选顺序固定为 `CE-only -> protocol winner -> winner-only 配比 refine -> ablation winner -> oracle dropout 细化`
-6. `Oracle Value Predictor` 与 `Stage 2 reward table` 都是后置实验，不阻塞当前 `Stage 0.5 -> Stage 1` 主线
+4. `监督学习阶段 / P0` clean rerun 的 `top3` 直接作为新 `监督学习阶段` 的首批协议种子池；真正进入 `监督学习阶段` 迁移的是 `P2` 去重后的候选 checkpoint
+5. `监督学习阶段` 先筛配方，再筛 seed；配方筛选顺序固定为 `CE-only -> protocol winner -> winner-only 配比 refine -> ablation winner -> oracle dropout 细化`
+6. `Oracle Value Predictor` 与 `强化学习阶段 reward table` 都是后置实验，不阻塞当前 `监督学习阶段 -> 监督学习阶段` 主线
 ## P1 staged multiseed（2026-03-20 追加）
 
 - `P1 calibration` 继续保持 `single-seed`；当前默认是 `A2y-only + combo-only`，职责是复用已验证单头量纲并补充组合耦合，不直接判 winner

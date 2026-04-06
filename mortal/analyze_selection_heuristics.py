@@ -12,12 +12,12 @@ from typing import Any
 import numpy as np
 
 from libriichi.dataset import GameplayLoader
-from stage05_selection import SELECTION_SCENARIO_FACTOR
+from sl_selection import SELECTION_SCENARIO_FACTOR
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATASET_ROOT = Path(r"D:/mahjong_data/dataset_json")
-DEFAULT_FIDELITY_ROOT = REPO_ROOT / "logs" / "stage05_fidelity"
+DEFAULT_FIDELITY_ROOT = REPO_ROOT / "logs" / "sl_fidelity"
 DEFAULT_REPORT_JSON = REPO_ROOT / "logs" / "selection_heuristic_audit.json"
 DEFAULT_REPORT_MD = REPO_ROOT / "logs" / "selection_heuristic_audit.md"
 

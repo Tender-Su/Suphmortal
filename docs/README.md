@@ -1,9 +1,6 @@
 # 文档导航
 
-这套文档现在分成两层：
-
-- 活跃 handoff 文档：给无上下文 agent 和当前操作者，回答“现在默认是什么、停在哪、下一步怎么做”。
-- 历史 / 研究文档：给回溯、复盘和方法论使用，不作为当前默认入口。
+这套文档按“入口层 -> 状态层 -> 证据层 -> 背景层”组织。先读入口层和状态层，再决定是否需要深入证据或背景材料。
 
 ## 默认读取顺序
 
@@ -12,42 +9,70 @@
 3. `agent/mainline.md`
 4. `status/supervised-verified-status.md`
 5. `status/p1-selection-canonical.md`
-6. 任务涉及双机或 Git 同步时，再读 `agent/laptop-remote-ops.md` / `agent/code-sync.md`
+6. 任务涉及 formal triplet / `formal_1v3` 时，再读 `status/supervised-formal-triplet-playoff-canonical.md`
+7. 任务涉及双机时，再读 `agent/laptop-remote-ops.md` / `agent/code-sync.md`
+8. 需要监督学习阶段演进背景时，再读 `research/supervised-evolution.md`
 
-## 活跃文档分工
+## 文档分层
 
-- `agent/current-plan.md`
-  - 当前主线、真实停点、启动前清理状态、下一步。
-- `agent/mainline.md`
-  - 当前冻结默认。只放稳定规则，不放 run 过程叙事。
-- `agent/experiment-workflow.md`
-  - 当前阶段应该怎么跑、在哪些点强制停下来。
-- `agent/code-sync.md`
-  - 台式机与笔记本的 Git 同步。
-- `agent/laptop-remote-ops.md`
-  - 笔记本 shell、数据根、远端运行前提和踩坑结论。
-- `status/supervised-verified-status.md`
-  - 当前监督学习阶段的人工核对结论。
-- `status/p1-selection-canonical.md`
-  - `P1` 唯一有效的选模与解释口径。
-- `status/supervised-fidelity-results.md`
-  - 历史 run snapshot。只回答“那次 run 写出了什么”，不回答“现在默认是什么”。
+### 1. 入口层：`agent/`
 
-## 目录分工
+- `current-plan.md`
+  - 当前停点、当前下一步、当前工作边界
+- `mainline.md`
+  - 冻结默认、命名族、机器默认、脚本入口
+- `experiment-workflow.md`
+  - 当前主线怎么跑、在哪里人工确认
+- `laptop-remote-ops.md`
+  - 远程 shell、数据根、双机运行资产与已验证坑点
+- `code-sync.md`
+  - 台式机到笔记本的 Git 同步边界
 
-- `agent/`
-  - 当前默认、当前流程、当前运维入口。
-- `status/`
-  - 当前状态、当前口径、当前 benchmark 结论。
-- `research/`
-  - 方法、证据、专项实验与工程经验。
+### 2. 状态层：`status/`
+
+- `supervised-verified-status.md`
+  - 当前监督学习阶段已经核对过的真实结论
+- `p1-selection-canonical.md`
+  - `P1` 唯一有效的评估与解释口径
+- `supervised-formal-triplet-playoff-canonical.md`
+  - pre-formal 第一梯队如何通过 formal triplet 与 `formal_1v3` 产生官方 winner
+- `supervised-fidelity-results.md`
+  - 自动生成的 run snapshot；它只描述某次 run 产物
+- `laptop-sl-loader-benchmark-2026-03-31.md`
+  - 笔记本监督学习 loader 的当前证据
+- `1v3-multishard-benchmark-2026-04-02.md`
+  - 双机 `1v3` 并发参数的当前证据
+
+### 3. 证据层：`research/`
+
+- `supervised-evolution.md`
+  - 监督学习阶段从实验探索到当前结构的统一演进记录
+- `stage0/`
+  - `GRP` 相关经验与候选对比
+- `supervised/`
+  - 监督学习阶段的工程经验、selector 统计与专项实验
+- `rl-ppo-improvement-plan.md`
+  - 强化学习阶段的研究性方案草稿
+
+### 4. 背景层：`reflections/` 与 `archive/`
+
 - `reflections/`
-  - 人机协作、复盘和长期记录。
+  - 复盘、人机协同方法、个人研究判断
 - `archive/`
-  - 已退役入口、旧快照、旧长文。默认不参与当前判断。
+  - 已退役入口、旧快照、旧长文
 
-## 使用纪律
+## 当前命名族
 
-- 先读活跃 handoff 文档，不要先从 `research/` 或 `archive/` 开始。
-- 如果某份 run snapshot、旧研究文档或旧状态摘要与活跃 handoff 文档冲突，以活跃 handoff 文档为准。
-- `P1` winner 的解释一律以 `status/p1-selection-canonical.md` 为准。
+- 监督学习阶段脚本：`sl_*`
+- 监督学习阶段日志：`logs/sl_*`
+- 监督学习阶段 checkpoint：`sl_canonical*.pth`
+
+## 使用规则
+
+- `current-plan.md` 只回答“现在停在哪、接下来做什么”
+- `mainline.md` 只回答“当前设计是什么”
+- `supervised-verified-status.md` 只回答“当前真实结论是什么”
+- `p1-selection-canonical.md` 只回答“`P1` 如何比较和解释”
+- `supervised-formal-triplet-playoff-canonical.md` 只回答“正式 winner 如何由 triplet / `formal_1v3` 产生”
+- `supervised-evolution.md` 统一负责“监督学习阶段是如何一步步演进到当前结构的”
+- 自动摘要、研究长文、复盘文档和归档文档都不能覆盖入口层与状态层

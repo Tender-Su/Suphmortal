@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_train_throughput_once
-import run_stage05_loader_ab as loader_ab
+import run_sl_loader_ab as loader_ab
 
 
 class RunTrainThroughputOnceTests(unittest.TestCase):

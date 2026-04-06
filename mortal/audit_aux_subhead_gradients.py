@@ -18,8 +18,8 @@ from model import AuxNet, Brain, CategoricalPolicy, DangerAuxNet, OpponentStateA
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SAMPLE_PATHS = REPO_ROOT / "logs" / "turn_weight_sample_paths.txt"
-DEFAULT_FIDELITY_DIR = REPO_ROOT / "logs" / "stage05_fidelity" / "s05_fidelity_main"
-DEFAULT_AB_ROOT = REPO_ROOT / "logs" / "stage05_ab"
+DEFAULT_FIDELITY_DIR = REPO_ROOT / "logs" / "sl_fidelity" / "sl_fidelity_main"
+DEFAULT_AB_ROOT = REPO_ROOT / "logs" / "sl_ab"
 DEFAULT_HEURISTIC_AUDIT = REPO_ROOT / "logs" / "aux_heuristic_audit.json"
 DEFAULT_REPORT_JSON = REPO_ROOT / "logs" / "aux_subhead_gradient_audit.json"
 DEFAULT_REPORT_MD = REPO_ROOT / "logs" / "aux_subhead_gradient_audit.md"

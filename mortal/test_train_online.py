@@ -48,7 +48,7 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
     def test_resolve_online_init_state_file_prefers_online_override(self):
         config = make_config(online=True)
         config['online']['init_state_file'] = './checkpoints/custom_supervised_winner.pth'
-        config['supervised']['best_loss_state_file'] = './checkpoints/stage0_5_supervised.pth'
+        config['supervised']['best_loss_state_file'] = './checkpoints/sl_canonical.pth'
 
         self.assertEqual(
             './checkpoints/custom_supervised_winner.pth',
@@ -57,10 +57,10 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
 
     def test_resolve_online_init_state_file_falls_back_to_supervised_best_loss(self):
         config = make_config(online=True)
-        config['supervised']['best_loss_state_file'] = './checkpoints/stage0_5_supervised.pth'
+        config['supervised']['best_loss_state_file'] = './checkpoints/sl_canonical.pth'
 
         self.assertEqual(
-            './checkpoints/stage0_5_supervised.pth',
+            './checkpoints/sl_canonical.pth',
             train_online.resolve_online_init_state_file(config),
         )
 
@@ -69,16 +69,16 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
 
     def test_ensure_online_init_state_file_ready_checks_canonical_handoff(self):
         with patch(
-            'run_stage05_formal.ensure_supervised_canonical_handoff_ready',
+            'run_sl_formal.ensure_supervised_canonical_handoff_ready',
             side_effect=RuntimeError('pending formal_1v3 handoff'),
         ):
             with self.assertRaisesRegex(RuntimeError, 'pending formal_1v3 handoff'):
-                train_online.ensure_online_init_state_file_ready('./checkpoints/stage0_5_supervised.pth')
+                train_online.ensure_online_init_state_file_ready('./checkpoints/sl_canonical.pth')
 
     def test_ensure_online_init_state_file_ready_requires_existing_file_after_handoff_check(self):
-        with patch('run_stage05_formal.ensure_supervised_canonical_handoff_ready'):
+        with patch('run_sl_formal.ensure_supervised_canonical_handoff_ready'):
             with self.assertRaisesRegex(FileNotFoundError, r'online\.init_state_file does not exist'):
-                train_online.ensure_online_init_state_file_ready(r'X:\missing\stage0_5_supervised.pth')
+                train_online.ensure_online_init_state_file_ready(r'X:\missing\sl_canonical.pth')
 
     def test_checkpoint_supports_online_resume_requires_online_training_state(self):
         state = {

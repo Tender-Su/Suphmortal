@@ -7,9 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_stage05_ab as ab
-import run_stage05_fidelity as fidelity
-import run_stage05_loader_ab as loader_ab
+import run_sl_ab as ab
+import run_sl_fidelity as fidelity
+import run_sl_loader_ab as loader_ab
 
 
 def parse_args() -> argparse.Namespace:

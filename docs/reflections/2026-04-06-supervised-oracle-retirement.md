@@ -15,7 +15,7 @@
 
 - 当前正式 winner：`anchor*1.0`
 - 当前第一替补：`opp_lean*0.85`
-- 当前 canonical checkpoint 仍沿用历史文件名 `stage0_5_supervised.pth`
+- 当前 canonical checkpoint 仍沿用历史文件名 `sl_canonical.pth`
 
 Oracle 如果以后还要做，只会去强化学习阶段里重新设计，而不是再回监督学习阶段里补一个旧式续跑。
 

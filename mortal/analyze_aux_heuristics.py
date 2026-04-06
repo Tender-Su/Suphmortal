@@ -20,7 +20,7 @@ from libriichi.dataset import GameplayLoader
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATASET_ROOT = Path(r"D:/mahjong_data/dataset_json")
 DEFAULT_SAMPLE_PATHS = REPO_ROOT / "logs" / "turn_weight_sample_paths.txt"
-DEFAULT_FIDELITY_DIR = REPO_ROOT / "logs" / "stage05_fidelity" / "s05_fidelity_main"
+DEFAULT_FIDELITY_DIR = REPO_ROOT / "logs" / "sl_fidelity" / "sl_fidelity_main"
 DEFAULT_REPORT_JSON = REPO_ROOT / "logs" / "aux_heuristic_audit.json"
 DEFAULT_REPORT_MD = REPO_ROOT / "logs" / "aux_heuristic_audit.md"
 

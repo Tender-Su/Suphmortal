@@ -4,8 +4,8 @@ import argparse
 import json
 import os
 
-import run_stage05_ab as ab
-import run_stage05_loader_ab as loader_ab
+import run_sl_ab as ab
+import run_sl_loader_ab as loader_ab
 
 
 def parse_args() -> argparse.Namespace:

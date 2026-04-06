@@ -9,17 +9,17 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-import run_stage05_ab as ab
-import run_stage05_fidelity as fidelity
+import run_sl_ab as ab
+import run_sl_fidelity as fidelity
 from dataloader import SupervisedFileDatasetsIter
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FIDELITY_RUN_DIR = REPO_ROOT / "logs" / "stage05_fidelity" / "s05_fidelity_main"
+DEFAULT_FIDELITY_RUN_DIR = REPO_ROOT / "logs" / "sl_fidelity" / "sl_fidelity_main"
 DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "rank_shape_probe_plan.json"
 
 DEFAULT_PROTOCOL_ARM = "C_B2z_cosine_recent_broad_recent_strong_6m_6m"
-DEFAULT_AB_NAME = "s05_rank_shape_probe"
+DEFAULT_AB_NAME = "sl_rank_shape_probe"
 
 RANK_SHAPE_TEMPLATES = [
     {

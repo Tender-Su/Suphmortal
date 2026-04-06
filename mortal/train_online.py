@@ -95,9 +95,9 @@ def ensure_online_init_state_file_ready(init_state_file):
         return
 
     from os import path
-    import run_stage05_formal as stage05_formal
+    import run_sl_formal as sl_formal
 
-    stage05_formal.ensure_supervised_canonical_handoff_ready(init_state_file)
+    sl_formal.ensure_supervised_canonical_handoff_ready(init_state_file)
     if not path.exists(init_state_file):
         raise FileNotFoundError(f'online.init_state_file does not exist: {init_state_file}')
 

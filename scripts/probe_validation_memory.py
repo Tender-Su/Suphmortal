@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / 'mortal'))
 
-import run_stage05_ab as ab
+import run_sl_ab as ab
 from dataloader import SupervisedFileDatasetsIter, resolve_rayon_num_threads, worker_init_fn
 
 

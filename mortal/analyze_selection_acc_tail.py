@@ -9,7 +9,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FIDELITY_ROOT = REPO_ROOT / "logs" / "stage05_fidelity"
+DEFAULT_FIDELITY_ROOT = REPO_ROOT / "logs" / "sl_fidelity"
 DEFAULT_REPORT_JSON = REPO_ROOT / "logs" / "selection_acc_tail_audit.json"
 DEFAULT_REPORT_MD = REPO_ROOT / "logs" / "selection_acc_tail_audit.md"
 NEAR_TIE_THRESHOLDS = (1e-4, 2e-4, 5e-4, 1e-3)

@@ -43,11 +43,11 @@ games = 3000
 log_dir = '/path/to/test_play'
 
 [supervised]
-state_file = '/path/to/stage0_5_latest.pth'
-best_state_file = '/path/to/stage0_5_supervised.pth'
-best_loss_state_file = '/path/to/stage0_5_supervised.pth'
-best_acc_state_file = '/path/to/stage0_5_supervised_best_acc.pth'
-best_rank_state_file = '/path/to/stage0_5_supervised_best_rank.pth'
+state_file = '/path/to/sl_latest.pth'
+best_state_file = '/path/to/sl_canonical.pth'
+best_loss_state_file = '/path/to/sl_canonical.pth'
+best_acc_state_file = '/path/to/sl_best_acc.pth'
+best_rank_state_file = '/path/to/sl_best_rank.pth'
 init_state_file = '/path/to/optional_init_only_checkpoint.pth'
 tensorboard_dir = '/path/to/tb_log_supervised_main'
 file_index = '/path/to/file_index_supervised_json.pth'
@@ -190,7 +190,7 @@ state_file = '/path/to/baseline.pth'
 [online]
 history_window = 50
 enable_compile = false
-init_state_file = '/path/to/stage0_5_supervised.pth'
+init_state_file = '/path/to/sl_canonical.pth'
 
 [online.remote]
 host = '127.0.0.1'

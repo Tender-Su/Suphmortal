@@ -30,7 +30,7 @@ def watcher_command(run_name: str) -> list[str]:
 class StopAfterP0Round2WatcherTests(unittest.TestCase):
     def test_watcher_ignores_stale_existing_round2_file(self):
         run_name = f'test_stale_round2_{os.getpid()}_{time.time_ns()}'
-        run_dir = REPO_ROOT / 'logs' / 'stage05_fidelity' / run_name
+        run_dir = REPO_ROOT / 'logs' / 'sl_fidelity' / run_name
         target_json = run_dir / 'p0_round2.json'
         log_path = run_dir / 'stop_after_round2.log'
         run_dir.mkdir(parents=True, exist_ok=True)

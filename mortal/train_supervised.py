@@ -238,7 +238,7 @@ def paths_match(lhs, rhs):
     return path.abspath(lhs) == path.abspath(rhs)
 
 
-def resolve_stage2_handoff_state_file(*, cfg_prefix, supervised_cfg, control_cfg):
+def resolve_rl_handoff_state_file(*, cfg_prefix, supervised_cfg, control_cfg):
     return ''
 
 
@@ -248,14 +248,14 @@ def should_enable_normal_export(
     best_loss_normal_state_file,
     best_acc_normal_state_file,
     best_rank_normal_state_file,
-    stage2_handoff_state_file,
+    rl_handoff_state_file,
 ):
     return bool(
         export_normal_checkpoints
         or best_loss_normal_state_file
         or best_acc_normal_state_file
         or best_rank_normal_state_file
-        or stage2_handoff_state_file
+        or rl_handoff_state_file
     )
 
 
@@ -472,7 +472,7 @@ def train(
     from lr_scheduler import LinearWarmUpCosineAnnealingLR
     from libriichi.consts import ACTION_SPACE, obs_shape, oracle_obs_shape
     from model import AuxNet, Brain, CategoricalPolicy, DangerAuxNet, OpponentStateAuxNet
-    from stage05_selection import (
+    from sl_selection import (
         ACTION_SCORE_WEIGHTS,
         SCENARIO_SCORE_WEIGHTS,
         action_quality_score,
@@ -655,7 +655,7 @@ def train(
     init_state_file = supervised_cfg.get('init_state_file', '')
     tensorboard_dir = supervised_cfg['tensorboard_dir']
     file_index = supervised_cfg['file_index']
-    stage2_handoff_state_file = ''
+    rl_handoff_state_file = ''
     scheduler_cfg = supervised_cfg.get('scheduler', {})
     peak_lr = supervised_cfg.get('lr', config['optim']['scheduler']['peak'])
     warm_up_steps = scheduler_cfg.get('warm_up_steps', config['optim']['scheduler'].get('warm_up_steps', 0))
@@ -666,7 +666,7 @@ def train(
         best_loss_normal_state_file=best_loss_normal_state_file,
         best_acc_normal_state_file=best_acc_normal_state_file,
         best_rank_normal_state_file=best_rank_normal_state_file,
-        stage2_handoff_state_file=stage2_handoff_state_file,
+        rl_handoff_state_file=rl_handoff_state_file,
     )
     if normal_export_enabled and not use_oracle:
         logging.info('normal-export requested on non-oracle run; normal export will mirror original weights')
@@ -3398,13 +3398,13 @@ def train(
             )
         if (
             checkpoint_path == best_loss_state_file
-            and stage2_handoff_state_file
-            and not paths_match(stage2_handoff_state_file, best_loss_normal_state_file)
+            and rl_handoff_state_file
+            and not paths_match(rl_handoff_state_file, best_loss_normal_state_file)
         ):
             export_normal_state(
                 state,
-                stage2_handoff_state_file,
-                label='Stage 2 handoff checkpoint',
+                rl_handoff_state_file,
+                label='RL handoff checkpoint',
             )
         elif checkpoint_path == best_acc_state_file and best_acc_normal_state_file:
             export_normal_state(

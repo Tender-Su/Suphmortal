@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_stage05_ab as stage05_ab
+import run_sl_ab as sl_ab
 import toml_utils
 
 
@@ -101,12 +101,12 @@ class TomlUtilsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / 'config.toml'
             config_path.write_bytes(codecs.BOM_UTF8 + b"[control]\nversion = 4\n")
-            original_base_cfg_path = stage05_ab.BASE_CFG_PATH
+            original_base_cfg_path = sl_ab.BASE_CFG_PATH
             try:
-                stage05_ab.BASE_CFG_PATH = config_path
-                cfg = stage05_ab.build_base_config()
+                sl_ab.BASE_CFG_PATH = config_path
+                cfg = sl_ab.build_base_config()
             finally:
-                stage05_ab.BASE_CFG_PATH = original_base_cfg_path
+                sl_ab.BASE_CFG_PATH = original_base_cfg_path
 
             self.assertEqual(4, cfg['control']['version'])
 

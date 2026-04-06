@@ -323,11 +323,11 @@ def make_case_config(
     supervised_cfg = cfg["supervised"]
     dataset_cfg = cfg["dataset"]
 
-    supervised_cfg["state_file"] = str(case_dir / "stage0_5_latest.pth")
-    supervised_cfg["best_state_file"] = str(case_dir / "stage0_5_supervised.pth")
-    supervised_cfg["best_loss_state_file"] = str(case_dir / "stage0_5_supervised.pth")
-    supervised_cfg["best_acc_state_file"] = str(case_dir / "stage0_5_supervised_best_acc.pth")
-    supervised_cfg["best_rank_state_file"] = str(case_dir / "stage0_5_supervised_best_rank.pth")
+    supervised_cfg["state_file"] = str(case_dir / "sl_latest.pth")
+    supervised_cfg["best_state_file"] = str(case_dir / "sl_canonical.pth")
+    supervised_cfg["best_loss_state_file"] = str(case_dir / "sl_canonical.pth")
+    supervised_cfg["best_acc_state_file"] = str(case_dir / "sl_best_acc.pth")
+    supervised_cfg["best_rank_state_file"] = str(case_dir / "sl_best_rank.pth")
     supervised_cfg["tensorboard_dir"] = str(case_dir / "tb")
     supervised_cfg["file_index"] = shared_file_index or str(case_dir / "file_index_supervised_json.pth")
     supervised_cfg["batch_size"] = batch_size

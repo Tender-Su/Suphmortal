@@ -77,7 +77,7 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
     def test_missing_init_state_file_errors_immediately(self):
         with self.assertRaisesRegex(FileNotFoundError, r'supervised\.init_state_file does not exist'):
             train_supervised.ensure_init_state_file_exists(
-                r'X:\missing\stage0_5_seed.pth',
+                r'X:\missing\sl_seed.pth',
                 cfg_prefix='supervised',
             )
 
@@ -351,24 +351,24 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
         self.assertFalse(flags['opponent_aux_net'])
         self.assertFalse(flags['danger_aux_net'])
 
-    def test_resolve_stage2_handoff_state_file_is_disabled(self):
+    def test_resolve_rl_handoff_state_file_is_disabled(self):
         self.assertEqual(
             '',
-            train_supervised.resolve_stage2_handoff_state_file(
+            train_supervised.resolve_rl_handoff_state_file(
                 cfg_prefix='supervised',
                 supervised_cfg={},
                 control_cfg={'state_file': './checkpoints/mortal.pth'},
             ),
         )
 
-    def test_stage2_handoff_export_enables_normal_export_without_named_normal_paths(self):
+    def test_rl_handoff_export_enables_normal_export_without_named_normal_paths(self):
         self.assertTrue(
             train_supervised.should_enable_normal_export(
                 export_normal_checkpoints=False,
                 best_loss_normal_state_file='',
                 best_acc_normal_state_file='',
                 best_rank_normal_state_file='',
-                stage2_handoff_state_file='./checkpoints/stage2_handoff.pth',
+                rl_handoff_state_file='./checkpoints/rl_handoff.pth',
             )
         )
 
@@ -379,7 +379,7 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
                 best_loss_normal_state_file='',
                 best_acc_normal_state_file='',
                 best_rank_normal_state_file='',
-                stage2_handoff_state_file='',
+                rl_handoff_state_file='',
             )
         )
 

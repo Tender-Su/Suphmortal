@@ -1,15 +1,15 @@
 param(
-    [string]$RunName = "s05_fidelity_main",
+    [string]$RunName = "sl_fidelity_main",
     [int]$PollSeconds = 1
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$runDir = Join-Path $repoRoot ("logs\stage05_fidelity\" + $RunName)
+$runDir = Join-Path $repoRoot ("logs\sl_fidelity\" + $RunName)
 $targetJson = Join-Path $runDir "p0_round2.json"
 $logPath = Join-Path $runDir "stop_after_round2.log"
-$stopHelper = Join-Path $PSScriptRoot "stop_stage05_fidelity.py"
+$stopHelper = Join-Path $PSScriptRoot "stop_sl_fidelity.py"
 $pythonExe = "C:\ProgramData\anaconda3\envs\mortal\python.exe"
 if (-not (Test-Path $pythonExe)) {
     $pythonExe = "python"
@@ -28,7 +28,7 @@ function Stop-TargetProcesses {
     $output = & $pythonExe $stopHelper --run-name $RunName 2>&1
     $exitCode = $LASTEXITCODE
     foreach ($line in @($output)) {
-        Write-Log ("stop_stage05_fidelity.py: {0}" -f $line)
+        Write-Log ("stop_sl_fidelity.py: {0}" -f $line)
     }
     if ($exitCode -ne 0) {
         throw "stop helper failed with exit code $exitCode"

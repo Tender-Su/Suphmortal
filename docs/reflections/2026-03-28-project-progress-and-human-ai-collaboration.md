@@ -35,8 +35,8 @@
 
 当前仓库里的对应风格已经存在，例如：
 
-- [stage05-verified-status.md](../status/stage05-verified-status.md)
-- [stage05-progress-2026-03-22.md](../archive/status/stage05-progress-2026-03-22.md)
+- [supervised-verified-status.md](../status/supervised-verified-status.md)
+- [sl-progress-2026-03-22.md](../archive/status/sl-progress-2026-03-22.md)
 - [p1-selection-canonical.md](../status/p1-selection-canonical.md)
 
 结论：
@@ -57,9 +57,9 @@
 
 当前仓库里的对应风格也已经存在，例如：
 
-- [engineering-playbook.md](../research/stage05/engineering-playbook.md)
-- [p1-aux-adjustment-2026-03-22.md](../research/stage05/p1-aux-adjustment-2026-03-22.md)
-- [a2y-aux-shape-freeze-2026-03-25.md](../research/stage05/a2y-aux-shape-freeze-2026-03-25.md)
+- [engineering-playbook.md](../research/supervised/engineering-playbook.md)
+- [p1-aux-adjustment-2026-03-22.md](../research/supervised/p1-aux-adjustment-2026-03-22.md)
+- [a2y-aux-shape-freeze-2026-03-25.md](../research/supervised/a2y-aux-shape-freeze-2026-03-25.md)
 
 结论：
 
@@ -104,7 +104,7 @@
 
 从仓库历史和实验产物看，到 `2026-03-28` 为止，项目主线可以概括成四段。
 
-### 3.1 起步阶段：先把 `Stage 0.5` 基础设施搭起来
+### 3.1 起步阶段：先把 `监督学习阶段` 基础设施搭起来
 
 大约对应 `2026-03-10` 到 `2026-03-13`。
 
@@ -113,7 +113,7 @@
 - 建训练和验证管线
 - 调整 loader、线程、内存与日志行为
 - 清理旧实验残留
-- 加入 `Stage 0.5` A/B runner
+- 加入 `监督学习阶段` A/B runner
 - 把 formal 与 A/B 入口拆开
 - 处理 Windows 下 collate / pickle / worker 的工程问题
 
@@ -143,11 +143,11 @@
 - “winner 是否由错误口径制造出来”
 - “实验因子是不是被拆错了”
 
-### 3.3 后段：`Stage 0.5` 从调参进入“选模制度化”
+### 3.3 后段：`监督学习阶段` 从调参进入“选模制度化”
 
 大约对应 `2026-03-21` 到 `2026-03-27`。
 
-这段时间，最重要的推进不是主干网络改了，而是整个 `Stage 0.5` 的证据链越来越严：
+这段时间，最重要的推进不是主干网络改了，而是整个 `监督学习阶段` 的证据链越来越严：
 
 - `P0 fidelity` 跑起来了
 - leakage 问题被确认，并触发 clean rerun
@@ -162,17 +162,17 @@
 - 不是“多跑一点超参就会更强”
 - 而是“先保证比较口径正确，再决定谁值得留下”
 
-### 3.4 当前状态：还在 `Stage 0.5` 收尾，但已经开始补下游接口
+### 3.4 当前状态：还在 `监督学习阶段` 收尾，但已经开始补下游接口
 
 到 `2026-03-28` 为止：
 
 - `P1 pairwise` 已经启动
-- `Stage 0.5` 还没有完全定型
-- 但 `Stage 1` 和 `Stage 2 handoff` 的接口工作已经开始补
+- `监督学习阶段` 还没有完全定型
+- 但 `监督学习阶段` 和 `强化学习阶段 handoff` 的接口工作已经开始补
 
 这说明你现在的工作形态是：
 
-- 主实验仍在 `Stage 0.5`
+- 主实验仍在 `监督学习阶段`
 - 但下游已经开始做“接口前置准备”
 
 ## 4. 这个项目里，问题通常是怎么被发现的
@@ -386,16 +386,16 @@
 
 ### 8.7 要定期重审阶段图，删除已经失去下游读者的中间层
 
-`Stage 0.5` 里的 `P2` 是一个很典型的反例。
+`监督学习阶段` 里的 `P2` 是一个很典型的反例。
 
 它刚引入时并不是完全没道理。旧设计里，`P2` 负责两件事：
 
 - 在 `P0/P1` 产出的稳定训练曲线里离线比较 `K1_best_loss / K2_best_acc / K3_best_rank / K4_latest`
-- 把不同 selector 与 checkpoint 口径去重，保留 `2 ~ 4` 个候选，送去当时规划里的 `P3(Stage 1 transfer)`
+- 把不同 selector 与 checkpoint 口径去重，保留 `2 ~ 4` 个候选，送去当时规划里的 `P3(监督学习阶段 transfer)`
 
 在那个阶段，这样做的出发点是合理的：
 
-- `Stage 1 transfer` 比较贵
+- `监督学习阶段 transfer` 比较贵
 - 先用离线口径缩小候选，看起来像是在节省下游预算
 - 当时还没有当前这套已经收口的 `winner_refine -> formal` 主线
 
@@ -403,7 +403,7 @@
 
 - `P1` 收口成 `calibration -> protocol_decide -> winner_refine`
 - `formal` 会对最终 `P1 winner` 再跑一轮正式 checkpoint compare
-- `formal` 还会直接发布 canonical checkpoint，供下游 `Stage 1` 使用
+- `formal` 还会直接发布 canonical checkpoint，供下游 `监督学习阶段` 使用
 
 这时再保留 `P2`，问题就出现了：
 
@@ -461,7 +461,7 @@
 
 例如：
 
-- `2026-04-02-stage1-recipe-reflection.md`
+- `2026-04-02-supervised-recipe-reflection.md`
 - `2026-04-08-ppo-reward-design-reflection.md`
 
 ### 10.2 固定结构

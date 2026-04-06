@@ -6,8 +6,8 @@ from datetime import datetime
 from pathlib import Path
 
 import run_rank_shape_probe as rsp
-import run_stage05_ab as ab
-import run_stage05_fidelity as fidelity
+import run_sl_ab as ab
+import run_sl_fidelity as fidelity
 
 
 PROTOCOL_ARM = "C_A2y_cosine_broad_to_recent_strong_12m_6m"
@@ -21,7 +21,7 @@ SEED_OFFSETS = [0]
 
 def make_run_dir() -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = fidelity.FIDELITY_ROOT / f"s05_fidelity_a2y_internal_mix_micro1s_{stamp}"
+    run_dir = fidelity.FIDELITY_ROOT / f"sl_fidelity_a2y_internal_mix_micro1s_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -326,7 +326,7 @@ def main() -> None:
     baseline_summary, baseline_rows = run_round(
         run_dir=run_dir,
         round_name="baseline_round",
-        ab_name="s05_a2y_baseline_micro",
+        ab_name="sl_a2y_baseline_micro",
         base_cfg=base_cfg,
         grouped=grouped,
         eval_splits=eval_splits,
@@ -339,9 +339,9 @@ def main() -> None:
 
     final = {"baseline_round": baseline_rows}
     for round_name, ab_name, candidates in [
-        ("opp_internal_mix_round", "s05_a2y_opp_internal_mix_micro", opp_candidates),
-        ("rank_shape_round", "s05_a2y_rank_shape_micro", rank_candidates),
-        ("danger_internal_mix_round", "s05_a2y_danger_internal_mix_micro", danger_candidates),
+        ("opp_internal_mix_round", "sl_a2y_opp_internal_mix_micro", opp_candidates),
+        ("rank_shape_round", "sl_a2y_rank_shape_micro", rank_candidates),
+        ("danger_internal_mix_round", "sl_a2y_danger_internal_mix_micro", danger_candidates),
     ]:
         _, rows = run_round(
             run_dir=run_dir,

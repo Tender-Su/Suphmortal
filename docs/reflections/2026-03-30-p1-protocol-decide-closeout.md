@@ -5,7 +5,7 @@
 ## 结果
 
 - 当前主线 run：
-  - `logs/stage05_fidelity/s05_fidelity_p1_top3_cali_slim_20260329_001413/`
+  - `logs/sl_fidelity/sl_fidelity_p1_top3_cali_slim_20260329_001413/`
 - 当前状态：
   - `stopped_after_p1_protocol_decide`
 - 当前已验证协议 winner：

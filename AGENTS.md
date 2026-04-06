@@ -10,15 +10,19 @@
 
 ## Documentation Layout
 
-- **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; read this first for the current mainline, current live stop point, and the immediate next move.
-- **`docs/agent/mainline.md`** — stable defaults only: canonical branch, frozen supervised-phase / `P1` conclusions, and machine-specific operating defaults.
-- **`docs/agent/experiment-workflow.md`** — how to operate the current mainline: stage order, manual stop points, and run discipline; not the place for frozen constants.
-- **`docs/agent/laptop-remote-ops.md`** — laptop-node shell / data / remote-execution notes: SSH / PowerShell behavior, dataset status, and proven remote operation patterns.
+- **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; read this first for the current stop point and immediate next move.
+- **`docs/agent/mainline.md`** — stable defaults only: naming rules, canonical branch, machine defaults, frozen supervised conclusions, and RL bootstrap rules.
+- **`docs/agent/experiment-workflow.md`** — how to operate the current mainline: entrypoints, stage order, manual stop points, and interpretation boundaries.
+- **`docs/agent/laptop-remote-ops.md`** — laptop-node shell / data / runtime-asset notes: SSH / PowerShell behavior, dataset roots, and proven remote operation patterns.
 - **`docs/agent/code-sync.md`** — desktop↔laptop Git sync only: canonical branch (`main`), bare mirror layout, and the one-command sync path.
-- **`docs/status/supervised-verified-status.md`** — manually maintained verified supervised-phase status; use this when the auto-generated summary lags behind raw artifacts.
-- **`docs/status/p1-selection-canonical.md`** — the only valid P1 winner-selection rubric.
-- **`docs/status/supervised-fidelity-results.md`** — auto-generated supervised-phase fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `supervised-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
-- **`docs/research/`** — human-oriented methodology, engineering, and experiment notes; not the default current-state handoff.
+- **`docs/status/supervised-verified-status.md`** — manually maintained verified supervised-phase status; use this for the current frozen truth.
+- **`docs/status/p1-selection-canonical.md`** — the only valid `P1` ranking and interpretation rubric.
+- **`docs/status/supervised-formal-triplet-playoff-canonical.md`** — the downstream formal triplet / `formal_1v3` evidence that fixes the current official supervised winner.
+- **`docs/status/supervised-fidelity-results.md`** — auto-generated supervised-phase fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `mainline.md`, `supervised-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
+- **`docs/status/laptop-sl-loader-benchmark-2026-03-31.md`** — current laptop supervised loader evidence.
+- **`docs/status/1v3-multishard-benchmark-2026-04-02.md`** — current dual-machine `1v3` throughput evidence.
+- **`docs/research/supervised-evolution.md`** — the single document that explains how the supervised phase evolved into the current structure.
+- **`docs/research/`** — methodology, engineering notes, and experimental evidence.
 - **`docs/reflections/`** — personal reflection and human-AI collaboration notes; background only.
 - **`docs/archive/`** — historical snapshots and retired long-form docs; never treat archive docs as current defaults unless a current entry doc explicitly revives them.
 - **`README.md` / `docs/README.md`** — quickstart plus the human-oriented documentation index.
@@ -52,6 +56,7 @@ python mortal\test_greedy.py
 # Current training entry points
 .\scripts\run_grp.bat                  # GRP prerequisite model: cd mortal && python train_grp.py
 .\scripts\run_supervised.bat           # Supervised phase: formal supervised training / protocol replay
+.\scripts\run_sl_p1_only.bat      # Manual supervised P1-only helper for selector / refine work
 .\scripts\run_online.bat               # Reinforcement learning phase: cd mortal && python train_online.py
 
 # Formatting
@@ -99,7 +104,7 @@ These are defined in `libriichi/src/consts.rs` and imported in Python via `from 
 ## Architecture — Current Training Pipeline
 
 1. **GRP prerequisite** (`train_grp.py`): Trains Global Reward Predictor on game logs. Output: `checkpoints/grp.pth`.
-2. **Supervised phase** (`train_supervised.py`, `run_stage05_formal.py`, `run_stage05_fidelity.py`): Runs `P0 -> P1 -> formal_train -> formal_1v3`, selects the strongest supervised protocol under temporal drift, and freezes the canonical supervised winner.
+2. **Supervised phase** (`train_supervised.py`, `run_sl_formal.py`, `run_sl_fidelity.py`): Runs `P0 -> P1 -> formal_train -> formal_1v3`, selects the strongest supervised protocol under temporal drift, and freezes the canonical supervised winner.
 3. **Reinforcement learning phase** (`train_online.py`): PPO self-play with dynamic entropy regularization. Current RL design is not frozen in the repo docs yet.
 
 ## Configuration (`mortal/config.toml`)
@@ -206,8 +211,8 @@ There is no formal CI/CD pipeline. The project runs locally as a research traini
 - `checkpoints/grp.pth` — Stage 0 output (GRP weights).
 - `checkpoints/grp_latest.pth` — latest resumable GRP training state; use for continuing Stage 0 training, not as the default downstream model.
 - `checkpoints/grp_best_acc.pth` — GRP checkpoint with the best validation exact-permutation accuracy; keep as a secondary candidate for downstream A/B checks.
-- `checkpoints/stage0_5_supervised*.pth` — canonical supervised checkpoints (`best_loss / best_acc / best_rank / latest`). The filename keeps the old prefix for compatibility.
-- `checkpoints/online_ppo/` — Stage 2 periodic saves.
+- `checkpoints/sl_canonical*.pth` — canonical supervised checkpoints (`best_loss / best_acc / best_rank / latest`).
+- `checkpoints/online_ppo/` — 强化学习阶段 periodic saves.
 - State files contain `{'mortal': ..., 'policy_net': ..., 'config': ...}` dicts loaded via `torch.load(..., weights_only=True)`.
 
 ### GRP Checkpoint Policy

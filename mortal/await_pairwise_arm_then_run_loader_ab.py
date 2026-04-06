@@ -7,13 +7,13 @@ import sys
 import time
 from pathlib import Path
 
-import run_stage05_fidelity as fidelity
-import stage05_current_defaults as stage05_defaults
+import run_sl_fidelity as fidelity
+import sl_current_defaults as sl_defaults
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MORTAL_DIR = REPO_ROOT / 'mortal'
-PAIRWISE_ROOT = REPO_ROOT / 'logs' / 'stage05_ab'
+PAIRWISE_ROOT = REPO_ROOT / 'logs' / 'sl_ab'
 
 
 def resolve_pairwise_dir(run_name: str) -> Path:
@@ -86,7 +86,7 @@ def wait_for_arm_completion(run_name: str, arm_name: str, poll_seconds: int) -> 
 def run_loader_ab(args: argparse.Namespace) -> int:
     cmd = [
         sys.executable,
-        'run_stage05_loader_ab.py',
+        'run_sl_loader_ab.py',
         '--run-name',
         args.run_name,
         '--protocol-arm',
@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--run-name', required=True)
     parser.add_argument('--arm-name', required=True)
     parser.add_argument('--poll-seconds', type=int, default=20)
-    parser.add_argument('--protocol-arm', default=stage05_defaults.CURRENT_PRIMARY_PROTOCOL_ARM)
+    parser.add_argument('--protocol-arm', default=sl_defaults.CURRENT_PRIMARY_PROTOCOL_ARM)
     parser.add_argument('--rank-budget-ratio', type=float, default=0.15)
     parser.add_argument('--opp-budget-ratio', type=float, default=0.03)
     parser.add_argument('--danger-budget-ratio', type=float, default=0.10)
