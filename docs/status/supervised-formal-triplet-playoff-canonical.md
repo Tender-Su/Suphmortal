@@ -11,15 +11,7 @@
 - downstream playoff run：
   - `logs/sl_fidelity/sl_formal_triplet_20260405_winner_playoff_1v3/`
 
-## 命名口径
-
-- center：
-  - `anchor / opp_lean / rank_lean / danger_lean`
-- 全头统一缩放：
-  - `*0.85 / *1.0 / *1.15`
-- center 内部再分配：
-  - `rank+/rank++/opp-/danger++`
-- 文档统一使用结构别名
+命名口径见 `docs/status/p1-selection-canonical.md` 命名口径一节。
 
 ## 当前 triplet
 

@@ -10,22 +10,14 @@
 
 ## Documentation Layout
 
-- **`docs/agent/current-plan.md`** — default handoff entry for new agent sessions; read this first for the current stop point and immediate next move.
-- **`docs/agent/mainline.md`** — stable defaults only: naming rules, canonical branch, machine defaults, frozen supervised conclusions, and RL bootstrap rules.
-- **`docs/agent/experiment-workflow.md`** — how to operate the current mainline: entrypoints, stage order, manual stop points, and interpretation boundaries.
-- **`docs/agent/laptop-remote-ops.md`** — laptop-node shell / data / runtime-asset notes: SSH / PowerShell behavior, dataset roots, and proven remote operation patterns.
-- **`docs/agent/code-sync.md`** — desktop↔laptop Git sync only: canonical branch (`main`), bare mirror layout, and the one-command sync path.
-- **`docs/status/supervised-verified-status.md`** — manually maintained verified supervised-phase status; use this for the current frozen truth.
-- **`docs/status/p1-selection-canonical.md`** — the only valid `P1` ranking and interpretation rubric.
-- **`docs/status/supervised-formal-triplet-playoff-canonical.md`** — the downstream formal triplet / `formal_1v3` evidence that fixes the current official supervised winner.
-- **`docs/status/supervised-fidelity-results.md`** — auto-generated supervised-phase fidelity run snapshot. It is run-scoped, not the default handoff; if it conflicts with `current-plan.md`, `mainline.md`, `supervised-verified-status.md`, or `p1-selection-canonical.md`, prefer those docs.
-- **`docs/status/laptop-sl-loader-benchmark-2026-03-31.md`** — current laptop supervised loader evidence.
-- **`docs/status/1v3-multishard-benchmark-2026-04-02.md`** — current dual-machine `1v3` throughput evidence.
-- **`docs/research/supervised-evolution.md`** — the single document that explains how the supervised phase evolved into the current structure.
-- **`docs/research/`** — methodology, engineering notes, and experimental evidence.
-- **`docs/reflections/`** — personal reflection and human-AI collaboration notes; background only.
-- **`docs/archive/`** — historical snapshots and retired long-form docs; never treat archive docs as current defaults unless a current entry doc explicitly revives them.
-- **`README.md` / `docs/README.md`** — quickstart plus the human-oriented documentation index.
+Four-layer structure — read in order: entry → status → evidence → background.
+
+- **`docs/agent/`** — entry layer: current stop point, frozen defaults, workflow, remote ops, code sync.
+- **`docs/status/`** — status layer: verified conclusions, P1 rubric, formal-triplet evidence, benchmark results.
+- **`docs/research/`** — evidence layer: evolution records, engineering playbooks, experiment notes.
+- **`docs/reflections/`** — background: personal reflection, human-AI collaboration notes.
+- **`docs/archive/`** — retired docs; never treat as current defaults.
+- Full per-file index: `docs/README.md`.
 
 ## Build, Test, and Development Commands
 
@@ -161,9 +153,9 @@ All hyperparameters centralized here. Key sections: `[control]`, `[supervised]`,
 - For auxiliary models such as GRP, evaluate trade-offs by likely downstream impact on supervised / RL policy quality, not just standalone validation speed.
 - When two options are close in expected final strength, prefer the smaller or faster option; when gains are meaningful, prefer the stronger option even if training is slower.
 - Current GRP guidance from local benchmarking: for this machine, the strongest practical final GRP setup is currently `384x3` trained in `fp32` with validation-loss-driven checkpointing and LR scheduling. If prioritizing efficiency over peak strength, `256x3` is the best practical fallback. Depth `x4`, `fp64`, and very large widths currently show diminishing returns relative to the extra cost.
-- Supervised validation default: use validation-only `val_file_batch_size = 8` and `val_prefetch_factor = 5` on this machine. If validation hits a loader/resource error, keep the same validation settings and retry indefinitely; do not downgrade to a safe single-process validation mode. The validated fix path is to explicitly close validation iterators/workers after each pass and release the training loader before budget-bound validation, because the previous `1455` issue was shared-mapping lifetime pressure rather than simple RAM exhaustion.
-- Supervised training default: keep heavy action/scenario selection metrics out of the per-batch training hot path. Training should keep only lightweight optimization/basic monitoring metrics; full discard/decision/sliced-scenario metrics belong to validation unless a run explicitly asks otherwise.
-- Supervised validation memory default: training stays at `4/10/3`; validation stays at `8/5`. Treat `8/5` as the default long-run operating point on this machine unless a fresh benchmark shows a stronger speed/stability trade-off.
+- Desktop supervised loader defaults (train `4/10/3`, val `8/5`) are the frozen operating point. If validation hits a loader/resource error, retry with the same settings; the validated fix is explicit iterator/worker teardown after each val pass, not downgrading to single-process mode.
+- Keep heavy action/scenario selection metrics out of the per-batch training hot path; full metrics belong to validation only.
+- Current loader and `1v3` defaults for both machines: `docs/agent/mainline.md`.
 
 ## Local Python Environment
 

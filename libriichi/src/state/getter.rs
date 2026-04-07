@@ -216,4 +216,30 @@ impl PlayerState {
     pub fn kakan_candidates(&self) -> &[Tile] {
         &self.kakan_candidates
     }
+
+    #[inline]
+    #[must_use]
+    pub const fn tehai_len_div3(&self) -> u8 {
+        self.tehai_len_div3
+    }
+    #[inline]
+    #[must_use]
+    pub const fn has_next_shanten_discard(&self) -> bool {
+        self.has_next_shanten_discard
+    }
+    #[inline]
+    #[must_use]
+    pub const fn tiles_seen(&self) -> [u8; 34] {
+        self.tiles_seen
+    }
+    #[inline]
+    #[must_use]
+    pub const fn doras_owned_self(&self) -> u8 {
+        self.doras_owned[0]
+    }
+    #[inline]
+    #[must_use]
+    pub const fn dora_factor(&self) -> [u8; 34] {
+        self.dora_factor
+    }
 }

@@ -158,9 +158,16 @@ class Brain(nn.Module):
         # always use EMA or CMA when True
         self._freeze_bn = False
 
-    def forward(self, obs: Tensor, invisible_obs: Optional[Tensor] = None) -> Union[Tuple[Tensor, Tensor], Tensor]:
+    def forward(self, obs: Tensor, invisible_obs: Optional[Tensor] = None, oracle_dropout: float = 0.0) -> Union[Tuple[Tensor, Tensor], Tensor]:
         if self.is_oracle:
             assert invisible_obs is not None
+            # Suphx-style oracle dropout: gradually drop oracle channels
+            # oracle_dropout=0.0 → full oracle, oracle_dropout=1.0 → fully masked
+            if oracle_dropout > 0.0 and self.training:
+                drop_mask = torch.bernoulli(
+                    torch.full_like(invisible_obs[:, :1, :1], oracle_dropout)
+                ).expand_as(invisible_obs)
+                invisible_obs = invisible_obs * (1.0 - drop_mask)
             obs = torch.cat((obs, invisible_obs), dim=1)
         phi = self.encoder(obs)
 
@@ -204,6 +211,24 @@ class AuxNet(nn.Module):
         return self.net(x).split(self.dims, dim=-1)
 
 
+class ValueHead(nn.Module):
+    """Centralized value head for PPO critic (RVR-style 4-player output)."""
+    def __init__(self, num_players=4):
+        super().__init__()
+        self.num_players = num_players
+        self.net = nn.Sequential(
+            nn.Linear(1024, 256),
+            nn.Mish(inplace=True),
+            nn.Linear(256, num_players),
+        )
+        for mod in self.net.modules():
+            if isinstance(mod, nn.Linear):
+                orthogonal_init(mod)
+
+    def forward(self, phi):
+        return self.net(phi)
+
+
 class OpponentStateAuxNet(nn.Module):
     def __init__(self, *, shanten_dims=(4, 4, 4), tenpai_dims=(2, 2, 2)):
         super().__init__()
@@ -217,6 +242,55 @@ class OpponentStateAuxNet(nn.Module):
         shanten_logits = logits[:len(self.shanten_dims)]
         tenpai_logits = logits[len(self.shanten_dims):]
         return shanten_logits, tenpai_logits
+
+
+class TileEfficiencyRegretHead(nn.Module):
+    """Predicts per-tile shanten-efficiency regret for each of 37 discardable tiles.
+    Output range [0, 2] via sigmoid * 2. Labels from Rust-side shanten analysis."""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Linear(1024, DANGER_DISCARD_DIM, bias=False)
+
+    def forward(self, phi):
+        return self.net(phi).sigmoid() * 2.0
+
+
+class FuroRegretHead(nn.Module):
+    """Predicts regret for furo (meld) decisions: 2-dim [call_regret, pass_regret].
+    Labels from Rust-side counterfactual shanten comparison."""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1024, 64),
+            nn.Mish(inplace=True),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, phi):
+        return self.net(phi)
+
+
+class HandValueRegretHead(nn.Module):
+    """Predicts per-tile expected-point delta for each of 37 discardable tiles.
+
+    Unlike TileEfficiencyRegretHead (shanten-focused), this head captures the
+    trade-off between speed and hand value: 'fast but cheap' vs 'slow but high
+    scoring'. Output is log-scale expected point change (sigmoid → [0, 1], then
+    scaled to [0, log1p(96000)] for interpretability).
+
+    Labels require Rust-side enumeration of possible winning hands per discard
+    candidate, using existing ron_point infrastructure.
+    """
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1024, 128),
+            nn.Mish(inplace=True),
+            nn.Linear(128, DANGER_DISCARD_DIM),
+        )
+
+    def forward(self, phi):
+        return self.net(phi)
 
 
 class DangerAuxNet(nn.Module):
@@ -268,6 +342,25 @@ class DangerAuxNet(nn.Module):
         any_logits, value, player_logits = fused.split(self.split_sizes, dim=-1)
         player_logits = player_logits.view(-1, self.discard_dim, self.player_dim)
         return any_logits, value, player_logits
+
+
+class ExpectedRewardNet(nn.Module):
+    """Predicts expected reward for each player from oracle observations.
+    Trained on (state, actual_reward) pairs to reduce terminal reward variance."""
+    def __init__(self, num_players=4):
+        super().__init__()
+        self.num_players = num_players
+        self.net = nn.Sequential(
+            nn.Linear(1024, 256),
+            nn.Mish(inplace=True),
+            nn.Linear(256, num_players),
+        )
+        for mod in self.net.modules():
+            if isinstance(mod, nn.Linear):
+                orthogonal_init(mod)
+
+    def forward(self, phi):
+        return self.net(phi)
 
 class CategoricalPolicy(nn.Module):
     def __init__(self):

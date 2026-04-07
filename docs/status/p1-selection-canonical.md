@@ -7,12 +7,8 @@
 - `protocol_decide` 负责选出协议 winner
 - `winner_refine` 负责在 winner 协议内部给出 pre-formal 第一梯队
 - `formal triplet playoff -> formal_1v3` 负责产生官方 supervised winner
-- 当前官方 supervised winner：
-  - `anchor*1.0`
-- 当前第一替补：
-  - `opp_lean*0.85`
-- downstream 证据入口：
-  - `docs/status/supervised-formal-triplet-playoff-canonical.md`
+- 当前官方结论见 `docs/status/supervised-verified-status.md`
+- downstream 证据见 `docs/status/supervised-formal-triplet-playoff-canonical.md`
 
 ## 适用范围
 

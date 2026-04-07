@@ -3,11 +3,12 @@ import numpy as np
 from multiprocessing import Manager, Value
 
 class RewardCalculator:
-    def __init__(self, grp=None, pts=None, uniform_init=False, shared_stats=None):
+    def __init__(self, grp=None, pts=None, uniform_init=False, shared_stats=None, label_smoothing=0.0):
         self.device = torch.device('cpu')
         self.grp = grp.to(self.device).eval() if grp is not None else None
         self.grp_dtype = next(self.grp.parameters()).dtype if self.grp is not None else torch.float64
         self.uniform_init = uniform_init
+        self.label_smoothing = label_smoothing
 
         pts = pts or [3, 1, -1, -3]
         self.pts = torch.tensor(pts, dtype=self.grp_dtype, device=self.device)
@@ -37,8 +38,13 @@ class RewardCalculator:
     def calc_rank_prob(self, player_id, grp_feature, rank_by_player):
         matrix = self.calc_grp(grp_feature)
 
+        eps = self.label_smoothing
         final_ranking = torch.zeros((1, 4), dtype=self.grp_dtype, device=self.device)
-        final_ranking[0, rank_by_player[player_id]] = 1.
+        if eps > 0:
+            final_ranking.fill_(eps / 4)
+            final_ranking[0, rank_by_player[player_id]] = 1.0 - 3 * eps / 4
+        else:
+            final_ranking[0, rank_by_player[player_id]] = 1.
         rank_prob = torch.cat((matrix[:, player_id], final_ranking))
         if self.uniform_init:
             rank_prob[0, :] = 1 / 4

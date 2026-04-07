@@ -1,9 +1,9 @@
-use riichi::algo::agari::{self, AgariCalculator};
-use riichi::algo::shanten;
-use riichi::algo::sp::{InitState, SPCalculator};
-use riichi::hand::hand;
-use riichi::state::PlayerState;
-use riichi::{t, tu8};
+use libriichi::algo::agari::{self, AgariCalculator};
+use libriichi::algo::shanten;
+use libriichi::algo::sp::{InitState, SPCalculator};
+use libriichi::hand::hand;
+use libriichi::state::PlayerState;
+use libriichi::{t, tu8};
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};

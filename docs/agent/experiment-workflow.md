@@ -95,8 +95,3 @@ python mortal/run_sl_formal_1v3_distributed.py dispatch `
 - `formal_1v3` 回答 canonical winner
 - `P1` 评估口径见 `docs/status/p1-selection-canonical.md`
 - formal triplet / `formal_1v3` 证据见 `docs/status/supervised-formal-triplet-playoff-canonical.md`
-
-## 当前入口命名
-
-- 监督学习阶段入口使用 `run_sl_*` 系列脚本
-- 当前 supervised checkpoint 使用 `sl_canonical*.pth` 命名族

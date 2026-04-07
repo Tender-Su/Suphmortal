@@ -9,12 +9,12 @@
 - 笔记本 Python：`C:\Users\numbe\miniconda3\envs\mortal\python.exe`
 - 台式机 SSH 别名：`mahjong-laptop`
 - 台式机 SSH key：`$HOME\.ssh\mahjong_laptop_ed25519`
-- 笔记本 OpenSSH 默认 shell：`PowerShell`
+- 笔记本 OpenSSH 默认 shell：`PowerShell 7.6 (pwsh)`
 
 结论：
 
-- 现在默认直接发 PowerShell 命令
-- 不要再默认包一层 `powershell -Command`
+- 现在默认直接发 `pwsh` / PowerShell 命令
+- 不要再默认包一层 `pwsh -Command`
 - 不要把 SSH `Session 0` 里的后台进程当正式 benchmark 口径
 
 ## 数据根
@@ -32,22 +32,7 @@
 
 ## 当前笔记本默认
 
-### 监督学习 loader
-
-- train：`num_workers = 4`
-- train：`file_batch_size = 10`
-- train：`prefetch_factor = 4`
-- val：`val_file_batch_size = 7`
-- val：`val_prefetch_factor = 5`
-
-这组默认来自 `docs/status/laptop-sl-loader-benchmark-2026-03-31.md`。
-
-### `1v3`
-
-- `seed_count = 640`
-- `shard_count = 3`
-
-这组默认来自 `docs/status/1v3-multishard-benchmark-2026-04-02.md`。
+笔记本 loader 与 `1v3` 数值默认见 `docs/agent/mainline.md`（监督学习 loader 默认 / `1v3` 默认两节）。
 
 ## 双机任务的运行资产
 
@@ -86,7 +71,7 @@ ssh -i "$HOME\.ssh\mahjong_laptop_ed25519" numbe@<laptop-ip> "Get-ChildItem 'C:\
 ### 长脚本
 
 - 优先把脚本 `scp` 到远端再执行
-- 不要默认依赖 `stdin -> powershell -Command -`
+- 不要默认依赖 `stdin -> pwsh -Command -`
 
 ### 传文件
 

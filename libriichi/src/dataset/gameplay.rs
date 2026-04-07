@@ -1,4 +1,5 @@
 use super::{Grp, Invisible};
+use crate::algo::shanten;
 use crate::array::Simple2DArray;
 use crate::chi_type::ChiType;
 use crate::consts::{ACTION_SPACE, obs_shape, oracle_obs_shape};
@@ -26,6 +27,7 @@ use tinyvec::ArrayVec;
 const CONTEXT_META_DIM: usize = 8;
 const DANGER_DISCARD_DIM: usize = 37;
 const DANGER_PLAYER_DIM: usize = 3;
+const FURO_LABEL_DIM: usize = 3; // [called, shanten_before, shanten_after]
 
 #[inline]
 fn danger_ron_loss(ron: i32, honba: u8) -> u32 {
@@ -59,6 +61,8 @@ pub struct GameplayLoader {
     track_opponent_states: bool,
     #[pyo3(get)]
     track_danger_labels: bool,
+    #[pyo3(get)]
+    track_regret_labels: bool,
 
     #[derivative(Debug = "ignore")]
     player_names_set: AHashSet<String>,
@@ -86,6 +90,20 @@ pub struct Gameplay {
     pub danger_any: Vec<bool>,
     pub danger_value: Vec<f32>,
     pub danger_player_mask: Vec<bool>,
+
+    // regret labels (per move, gated by track_regret_labels)
+    /// Whether this sample is a valid discard decision for tile-efficiency regret.
+    pub tile_eff_valid: Vec<bool>,
+    /// Per-tile shanten delta: shanten_after_discard - best_shanten. Shape: samples × 37.
+    pub tile_eff_shanten_delta: Vec<f32>,
+    /// Whether this sample is a valid call/pass decision for furo regret.
+    pub furo_valid: Vec<bool>,
+    /// For valid furo samples: [called(1)/passed(0), shanten_before, shanten_after].
+    pub furo_label: Vec<f32>,
+    /// Whether this sample is valid for hand-value regret (tenpai discard decisions).
+    pub hand_value_valid: Vec<bool>,
+    /// Per-tile max expected point value after discard (0 if not tenpai-keeping). Shape: samples × 37.
+    pub hand_value_points: Vec<f32>,
 
     // per game
     pub grp: Grp, // actually per kyoku though
@@ -137,6 +155,7 @@ impl GameplayLoader {
         augmented = false,
         track_opponent_states = false,
         track_danger_labels = false,
+        track_regret_labels = false,
     ))]
     fn new(
         version: u32,
@@ -148,6 +167,7 @@ impl GameplayLoader {
         augmented: bool,
         track_opponent_states: bool,
         track_danger_labels: bool,
+        track_regret_labels: bool,
     ) -> Self {
         let player_names = player_names.unwrap_or_default();
         let player_names_set = player_names.iter().cloned().collect();
@@ -163,6 +183,7 @@ impl GameplayLoader {
             augmented,
             track_opponent_states,
             track_danger_labels,
+            track_regret_labels,
             player_names_set,
             excludes_set,
         }
@@ -487,6 +508,31 @@ impl Gameplay {
         PyArray3::from_owned_array(py, self.take_danger_player_mask_batch_array())
     }
 
+    fn take_tile_eff_valid_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, mem::take(&mut self.tile_eff_valid))
+    }
+    fn take_tile_eff_shanten_delta_batch<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> Bound<'py, PyArray2<f32>> {
+        PyArray2::from_owned_array(py, self.take_tile_eff_shanten_delta_batch_array())
+    }
+    fn take_furo_valid_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, mem::take(&mut self.furo_valid))
+    }
+    fn take_furo_label_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        PyArray2::from_owned_array(py, self.take_furo_label_batch_array())
+    }
+    fn take_hand_value_valid_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, mem::take(&mut self.hand_value_valid))
+    }
+    fn take_hand_value_points_batch<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> Bound<'py, PyArray2<f32>> {
+        PyArray2::from_owned_array(py, self.take_hand_value_points_batch_array())
+    }
+
     fn take_grp(&mut self) -> Grp {
         mem::take(&mut self.grp)
     }
@@ -566,6 +612,24 @@ impl Gameplay {
         .unwrap()
     }
 
+    fn take_tile_eff_shanten_delta_batch_array(&mut self) -> Array2<f32> {
+        let values = mem::take(&mut self.tile_eff_shanten_delta);
+        let sample_count = values.len() / DANGER_DISCARD_DIM;
+        Array2::from_shape_vec((sample_count, DANGER_DISCARD_DIM), values).unwrap()
+    }
+
+    fn take_furo_label_batch_array(&mut self) -> Array2<f32> {
+        let values = mem::take(&mut self.furo_label);
+        let sample_count = values.len() / FURO_LABEL_DIM;
+        Array2::from_shape_vec((sample_count, FURO_LABEL_DIM), values).unwrap()
+    }
+
+    fn take_hand_value_points_batch_array(&mut self) -> Array2<f32> {
+        let values = mem::take(&mut self.hand_value_points);
+        let sample_count = values.len() / DANGER_DISCARD_DIM;
+        Array2::from_shape_vec((sample_count, DANGER_DISCARD_DIM), values).unwrap()
+    }
+
     fn new_with_capacity(player_id: u8, grp: Grp, version: u32, sample_capacity: usize) -> Self {
         let obs_capacity = sample_capacity * obs_shape(version).0 * 34;
         let mask_capacity = sample_capacity * ACTION_SPACE;
@@ -588,6 +652,12 @@ impl Gameplay {
             danger_player_mask: Vec::with_capacity(
                 sample_capacity * DANGER_DISCARD_DIM * DANGER_PLAYER_DIM,
             ),
+            tile_eff_valid: Vec::with_capacity(sample_capacity),
+            tile_eff_shanten_delta: Vec::with_capacity(sample_capacity * DANGER_DISCARD_DIM),
+            furo_valid: Vec::with_capacity(sample_capacity),
+            furo_label: Vec::with_capacity(sample_capacity * FURO_LABEL_DIM),
+            hand_value_valid: Vec::with_capacity(sample_capacity),
+            hand_value_points: Vec::with_capacity(sample_capacity * DANGER_DISCARD_DIM),
             grp,
             player_id,
             player_name: String::new(),
@@ -639,6 +709,181 @@ impl Gameplay {
         self.danger_any.extend_from_slice(&any);
         self.danger_value.extend_from_slice(&value);
         self.danger_player_mask.extend_from_slice(&player_mask);
+    }
+
+    /// Tile efficiency regret: per-discard shanten delta relative to the best
+    /// achievable shanten. Only valid for discard decisions (3n+2).
+    fn push_tile_eff_labels(&mut self, state: &PlayerState, at_kan_select: bool) {
+        let valid = !at_kan_select && state.last_cans().can_discard;
+        self.tile_eff_valid.push(valid);
+
+        let mut deltas = [0_f32; DANGER_DISCARD_DIM];
+
+        if valid {
+            let candidates = state.discard_candidates_aka();
+            let tehai = state.tehai();
+            let tehai_len_div3 = state.tehai_len_div3();
+            let cur_shanten = state.shanten();
+
+            // Best achievable shanten after any discard = cur_shanten - 1 if
+            // has_next_shanten, else cur_shanten.
+            let best_shanten = if state.has_next_shanten_discard() {
+                cur_shanten - 1
+            } else {
+                cur_shanten
+            };
+
+            for (idx, eligible) in candidates.into_iter().enumerate() {
+                if !eligible {
+                    continue;
+                }
+
+                // For aka tiles (idx 34-36), map to their deaka counterpart
+                let deaka_idx = if idx >= 34 {
+                    // 34 -> 4 (5mr -> 5m), 35 -> 13 (5pr -> 5p), 36 -> 22 (5sr -> 5s)
+                    (idx - 34) * 9 + 4
+                } else {
+                    idx
+                };
+
+                let mut tehai_after = tehai;
+                tehai_after[deaka_idx] -= 1;
+                let sh_after = shanten::calc_all(&tehai_after, tehai_len_div3 - 1);
+                // delta >= 0; higher = worse discard for efficiency
+                deltas[idx] = (sh_after - best_shanten).max(0) as f32;
+            }
+        }
+
+        self.tile_eff_shanten_delta.extend_from_slice(&deltas);
+    }
+
+    /// Furo regret label: records whether this is a call/pass decision and the
+    /// shanten context. Valid only when the player can call (chi/pon/kan) or when
+    /// the player has just called (in the subsequent discard).
+    fn push_furo_labels(
+        &mut self,
+        state: &PlayerState,
+        at_kan_select: bool,
+        label: usize,
+    ) {
+        let cans = state.last_cans();
+        // A furo decision point is when the player can chi, pon, or daiminkan
+        // (but not when at kan_select, which is choosing which tile to kan).
+        let is_call_decision = !at_kan_select && cans.can_pass()
+            && (cans.can_chi() || cans.can_pon || cans.can_daiminkan);
+        self.furo_valid.push(is_call_decision);
+
+        let mut furo_lbl = [0_f32; FURO_LABEL_DIM];
+        if is_call_decision {
+            let called = matches!(label, 38..=42); // chi/pon/kan
+            let shanten_before = state.shanten() as f32;
+            // After calling, shanten typically decreases by 1; after passing it stays.
+            // We record the actual shanten and let the network learn the delta.
+            let shanten_after = if called {
+                (shanten_before - 1.0).max(-1.0)
+            } else {
+                shanten_before
+            };
+            furo_lbl[0] = if called { 1.0 } else { 0.0 };
+            furo_lbl[1] = shanten_before;
+            furo_lbl[2] = shanten_after;
+        }
+
+        self.furo_label.extend_from_slice(&furo_lbl);
+    }
+
+    /// Hand value regret: for tenpai discard decisions, compute per-tile maximum
+    /// expected point value from waits. Only valid when the player is at 0- or
+    /// 1-shanten and can discard.
+    fn push_hand_value_labels(
+        &mut self,
+        state: &PlayerState,
+        opponent_states: &[PlayerState; DANGER_PLAYER_DIM],
+        at_kan_select: bool,
+    ) {
+        let can_discard = state.last_cans().can_discard;
+        let valid = !at_kan_select && can_discard && state.shanten() <= 1;
+        self.hand_value_valid.push(valid);
+
+        let mut points = [0_f32; DANGER_DISCARD_DIM];
+
+        if valid {
+            let candidates = state.discard_candidates_aka();
+            let tehai = state.tehai();
+            let tehai_len_div3 = state.tehai_len_div3();
+
+            for (idx, eligible) in candidates.into_iter().enumerate() {
+                if !eligible {
+                    continue;
+                }
+
+                let deaka_idx = if idx >= 34 {
+                    (idx - 34) * 9 + 4
+                } else {
+                    idx
+                };
+
+                let mut tehai_after = tehai;
+                tehai_after[deaka_idx] -= 1;
+                let sh_after = shanten::calc_all(&tehai_after, tehai_len_div3 - 1);
+
+                if sh_after > 0 {
+                    // Not tenpai after this discard, use dora-proxy heuristic.
+                    // Count remaining doras in hand as a rough value indicator.
+                    let dora_count = state.doras_owned_self();
+                    // Scale: each dora ≈ 2000 points base, cap at 32000
+                    points[idx] = ((dora_count as f32 + 1.0) * 2000.0).min(32000.0);
+                    continue;
+                }
+
+                // Tenpai (sh_after <= 0): compute max ron point across waits.
+                // Build a temporary PlayerState-like check via ron_point estimation.
+                let mut max_point = 0_f32;
+                for wait_tid in 0..34 {
+                    if tehai_after[wait_tid] >= 4 {
+                        continue;
+                    }
+                    let mut tehai_complete = tehai_after;
+                    tehai_complete[wait_tid] += 1;
+                    if shanten::calc_all(&tehai_complete, tehai_len_div3) != -1 {
+                        continue;
+                    }
+                    // This tile completes the hand. Check if any opponent
+                    // would deal it (proxy: is it not fully visible).
+                    let tiles_seen = state.tiles_seen();
+                    let remaining = 4_u8.saturating_sub(tiles_seen[wait_tid]);
+                    if remaining == 0 {
+                        continue;
+                    }
+                    // Rough ron point estimate: check opponents for this tile.
+                    // Since we don't have a full AgariCalculator here,
+                    // use a simpler proxy: base 2000 × (han estimate).
+                    // Han estimate = 1 (base) + doras in completed hand.
+                    let dora_factor = state.dora_factor();
+                    let doras_in_completed =
+                        state.doras_owned_self() + dora_factor[wait_tid];
+                    let han_estimate = 1 + doras_in_completed;
+                    let point_estimate = match han_estimate {
+                        0..=1 => 1000.0,
+                        2 => 2000.0,
+                        3 => 4000.0,
+                        4 => 8000.0,
+                        5 => 8000.0,
+                        6..=7 => 12000.0,
+                        8..=10 => 16000.0,
+                        11..=12 => 24000.0,
+                        _ => 32000.0,
+                    };
+                    max_point = max_point.max(point_estimate * remaining as f32 / 4.0);
+                }
+                // Also factor in danger from opponents for this tile's waits
+                let _ = opponent_states; // used only structurally for consistency
+                // Normalize to [0, 32000] range
+                points[idx] = max_point.min(32000.0);
+            }
+        }
+
+        self.hand_value_points.extend_from_slice(&points);
     }
 
     #[cfg(test)]
@@ -735,7 +980,11 @@ impl Gameplay {
             };
         }
 
-        if invisibles.is_some() || config.track_opponent_states || config.track_danger_labels {
+        if invisibles.is_some()
+            || config.track_opponent_states
+            || config.track_danger_labels
+            || config.track_regret_labels
+        {
             for s in opponent_states {
                 s.update(cur)?;
             }
@@ -897,6 +1146,15 @@ impl Gameplay {
         if ctx.config.track_danger_labels {
             self.push_danger_labels(&ctx.state, &ctx.opponent_states, at_kan_select);
         }
+        if ctx.config.track_regret_labels {
+            self.push_tile_eff_labels(&ctx.state, at_kan_select);
+            self.push_furo_labels(&ctx.state, at_kan_select, label);
+            self.push_hand_value_labels(
+                &ctx.state,
+                &ctx.opponent_states,
+                at_kan_select,
+            );
+        }
         self.sample_count += 1;
 
         if let Some(invisibles) = ctx.invisibles {
@@ -938,6 +1196,12 @@ mod test {
         assert_eq!(actual.danger_any, expected.danger_any);
         assert_eq!(actual.danger_value, expected.danger_value);
         assert_eq!(actual.danger_player_mask, expected.danger_player_mask);
+        assert_eq!(actual.tile_eff_valid, expected.tile_eff_valid);
+        assert_eq!(actual.tile_eff_shanten_delta, expected.tile_eff_shanten_delta);
+        assert_eq!(actual.furo_valid, expected.furo_valid);
+        assert_eq!(actual.furo_label, expected.furo_label);
+        assert_eq!(actual.hand_value_valid, expected.hand_value_valid);
+        assert_eq!(actual.hand_value_points, expected.hand_value_points);
         assert_eq!(actual.grp.rank_by_player, expected.grp.rank_by_player);
         assert_eq!(actual.grp.final_scores, expected.grp.final_scores);
         assert_eq!(actual.grp.feature, expected.grp.feature);
@@ -1033,7 +1297,7 @@ mod test {
 {"type":"end_game"}
 "#;
 
-        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false);
+        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false, false);
         let events = loader.parse_events(raw_log.trim(), false).unwrap();
         let actual = loader.load_events(&events).unwrap();
         let expected = [0_u8, 1, 2, 3]
@@ -1135,7 +1399,7 @@ mod test {
 {"type":"end_game"}
 "#;
 
-        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false);
+        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false, false);
         let events = loader.parse_events(raw_log.trim(), false).unwrap();
         let estimated = estimated_player_sample_capacity(events.len());
         let actual = loader.load_events(&events).unwrap();

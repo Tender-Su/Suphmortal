@@ -37,6 +37,15 @@ def danger_labels_enabled():
     return bool(aux_cfg.get('danger_enabled', False)) or aux_cfg.get('danger_weight', 0.0) > 0
 
 
+def regret_labels_enabled():
+    aux_cfg = config.get('aux', {})
+    return (
+        float(aux_cfg.get('tile_efficiency_weight', 0.0) or 0.0) > 0
+        or float(aux_cfg.get('furo_regret_weight', 0.0) or 0.0) > 0
+        or float(aux_cfg.get('hand_value_regret_weight', 0.0) or 0.0) > 0
+    )
+
+
 def iter_loaded_gameplay_batches(loader, file_list):
     if file_list and str(file_list[0]).endswith('.pt'):
         for cache_file in file_list:
@@ -58,7 +67,7 @@ class FileDatasetsIter(IterableDataset):
         pts,
         shared_stats=None,
         oracle = False,
-        file_batch_size = 20, 
+        file_batch_size = 20,
         reserve_ratio = 0,
         player_names = None,
         excludes = None,
@@ -68,6 +77,9 @@ class FileDatasetsIter(IterableDataset):
         worker_torch_num_threads = 1,
         worker_torch_num_interop_threads = 1,
         rayon_num_threads = 0,
+        emit_opponent_state_labels = False,
+        track_danger_labels = False,
+        track_regret_labels = False,
     ):
         super().__init__()
         self.version = version
@@ -85,17 +97,22 @@ class FileDatasetsIter(IterableDataset):
         self.worker_torch_num_interop_threads = worker_torch_num_interop_threads
         self.rayon_num_threads = rayon_num_threads
         self.iterator = None
-        self.shared_stats = shared_stats 
-        self.track_opponent_states = False
+        self.shared_stats = shared_stats
+        self.emit_opponent_state_labels = bool(emit_opponent_state_labels)
+        self.track_danger_labels = bool(track_danger_labels)
+        self.track_regret_labels = bool(track_regret_labels)
+        self.track_opponent_states = self.emit_opponent_state_labels
 
     def build_iter(self):
         self.grp = GRP(**config['grp']['network'])
         grp_state = torch.load(config['grp']['state_file'], weights_only=True, map_location=torch.device('cpu'))
         self.grp.load_state_dict(grp_state['model'])
+        label_smoothing = config.get('grp', {}).get('label_smoothing', 0.0)
         self.reward_calc = RewardCalculator(
             self.grp,
             self.pts,
-            shared_stats=self.shared_stats  
+            shared_stats=self.shared_stats,
+            label_smoothing=label_smoothing,
         )
 
         for _ in range(self.num_epochs):
@@ -112,6 +129,8 @@ class FileDatasetsIter(IterableDataset):
             excludes = self.excludes,
             augmented = augmented,
             track_opponent_states = self.track_opponent_states,
+            track_danger_labels = self.track_danger_labels,
+            track_regret_labels = self.track_regret_labels,
         )
         self.buffer = []
 
@@ -142,6 +161,22 @@ class FileDatasetsIter(IterableDataset):
                 masks = game.take_masks_batch()
                 at_kyoku = game.take_at_kyoku_batch()
 
+                if self.emit_opponent_state_labels:
+                    opponent_shanten = game.take_opponent_shanten_batch()
+                    opponent_tenpai = game.take_opponent_tenpai_batch()
+                if self.track_danger_labels:
+                    danger_valid = game.take_danger_valid_batch()
+                    danger_any = game.take_danger_any_batch()
+                    danger_value = game.take_danger_value_batch()
+                    danger_player_mask = game.take_danger_player_mask_batch()
+                if self.track_regret_labels:
+                    tile_eff_valid = game.take_tile_eff_valid_batch()
+                    tile_eff_shanten_delta = game.take_tile_eff_shanten_delta_batch()
+                    furo_valid = game.take_furo_valid_batch()
+                    furo_label = game.take_furo_label_batch()
+                    hand_value_valid = game.take_hand_value_valid_batch()
+                    hand_value_points = game.take_hand_value_points_batch()
+
                 # per game
                 grp = game.take_grp()
                 player_id = game.take_player_id()
@@ -151,7 +186,7 @@ class FileDatasetsIter(IterableDataset):
                 grp_feature = grp.take_feature()
                 rank_by_player = grp.take_rank_by_player()
                 advantage = self.reward_calc.calc_delta_pt(player_id, grp_feature, rank_by_player)
-                assert len(advantage) >= at_kyoku[-1] + 1 
+                assert len(advantage) >= at_kyoku[-1] + 1
 
                 # player's final rank (0-3) for AuxNet label
                 player_rank = rank_by_player[player_id]
@@ -169,6 +204,27 @@ class FileDatasetsIter(IterableDataset):
                     sample_advantage,
                     repeat(player_rank, game_size),
                 ))
+                if self.emit_opponent_state_labels:
+                    columns.extend((
+                        opponent_shanten,
+                        opponent_tenpai,
+                    ))
+                if self.track_danger_labels:
+                    columns.extend((
+                        danger_valid,
+                        danger_any,
+                        danger_value,
+                        danger_player_mask,
+                    ))
+                if self.track_regret_labels:
+                    columns.extend((
+                        tile_eff_valid,
+                        tile_eff_shanten_delta,
+                        furo_valid,
+                        furo_label,
+                        hand_value_valid,
+                        hand_value_points,
+                    ))
                 extend_buffer_from_columns(self.buffer, *columns)
 
     def __iter__(self):

@@ -1,23 +1,6 @@
 # 监督学习阶段工程手册
 
-这份文档只记录当前仍有效、会直接影响实验质量的工程经验。监督学习阶段如何形成当前结构，统一看 `docs/research/supervised-evolution.md`。
-
-## 当前默认前提
-
-- 当前主线入口：
-  - `docs/agent/current-plan.md`
-  - `docs/status/supervised-verified-status.md`
-  - `docs/status/p1-selection-canonical.md`
-- 当前 formal triplet / `formal_1v3` 证据：
-  - `docs/status/supervised-formal-triplet-playoff-canonical.md`
-- `P1` 结构：
-  - `calibration -> protocol_decide -> winner_refine`
-- `P1 ablation`：
-  - 手动诊断轮
-- `P0 top3`：
-  - `A2y / A2x / A1x`
-- downstream 协议：
-  - `A2x`
+这份文档只记录当前仍有效、会直接影响实验质量的工程经验。当前入口见 `docs/agent/current-plan.md`，演进过程见 `docs/research/supervised-evolution.md`。
 
 ## 当前工程结论
 
@@ -78,11 +61,3 @@
   - `danger_lean`
   - `*0.85 / *1.0 / *1.15`
   - `rank-- / danger++`
-
-## 当前推荐阅读顺序
-
-1. `docs/status/supervised-verified-status.md`
-2. `docs/status/p1-selection-canonical.md`
-3. `docs/research/supervised-evolution.md`
-4. 本文档
-5. `docs/research/supervised/selector-stat-audit.md`

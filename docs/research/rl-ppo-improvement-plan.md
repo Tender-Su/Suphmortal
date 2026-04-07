@@ -675,10 +675,10 @@ pub kan_regret_valid: Vec<bool>,
 | # | 维度 | 决策类型 | 攻/守 | 触发频率 | 已有覆盖 | 信号独特性 |
 |---|------|---------|-------|---------|---------|----------|
 | 0 | **危险度**（已有） | 打牌 | 守 | 每巡 | `DangerAuxNet` ✅ | 单张放铳概率 |
-| 1 | **牌效率后悔度** | 打牌 | 攻 | 每巡 | ❌ | 弃牌与后续摸牌的搭配损失 |
+| 1 | **牌效率后悔度** | 打牌 | 攻 | 每巡 | ✅ | 弃牌与后续摸牌的搭配损失 |
 | 2 | **立直改良后悔度** | 立直 | 攻 | 每局 0-1 | ❌ | 立直后的改良损失 |
 | 3 | **默听后悔度** | 立直/默听 | 攻守 | 每局 0-3 | ❌ | 立直 vs 默听的得点差 |
-| 4 | **副露后悔度** | 吃/碰/杠 or pass | 攻 | 每局 3-8 | ❌ | 副露决策的长期影响 |
+| 4 | **副露后悔度** | 吃/碰/杠 or pass | 攻 | 每局 3-8 | ✅ | 副露决策的长期影响 |
 | 5 | **见逃后悔度** | 和牌 or pass | 攻 | 每百局几次 | ❌ | 放弃得点 vs 实际结果 |
 | 6 | **押引后悔度** | 宏观攻防 | 攻守 | 有人立直后每巡 | 部分（danger 覆盖微观面） | 整体攻防姿态的选择 |
 | 7 | **杠后悔度** | 杠 or pass | 攻守 | 每局 0-2 | ❌ | 宝牌变化 + 岭上摸牌 |
@@ -799,16 +799,17 @@ pub kan_regret_valid: Vec<bool>,
 
 ## 六、实施时间线
 
-| 阶段 | 改进项 | 前置条件 |
-|------|--------|---------|
-| **监督学习阶段（现在就可以做）** | 4.1 Logits 阈值裁剪 | 无 |
-| **监督学习阶段（现在就可以做）** | 4.2 熵正则化乘法更新 | 无 |
-| **监督学习阶段（规划中）** | 5.x 局部后悔度辅助头（方式 A） | 需 Rust 端标签构造 |
-| **强化学习阶段 启动时首批** | 4.3 Centralized Value Function | 需改 dataloader |
-| **强化学习阶段 启动时首批** | 4.4.1 终局平滑 | 无 |
-| **强化学习阶段 稳定后** | 4.4.2 Expected Reward Network | 需额外训练管线 |
-| **强化学习阶段 稳定后** | 4.5 V-trace IS 截断 | 观察 ratio 方差后决定 |
-| **强化学习阶段 稳定后** | 5.x 局部后悔度（方式 B，作为 PPO 信号） | 方式 A 验证质量后 |
+| 阶段 | 改进项 | 前置条件 | 状态 |
+|------|--------|---------|------|
+| **强化学习阶段** | 4.1 Logits 阈值裁剪 | 无 | **已实现** ✅ `train_online.py` logit_thres 配置 |
+| **强化学习阶段** | 4.2 熵正则化乘法更新 | 无 | **已实现** ✅ log-space multiplicative update |
+| **强化学习阶段** | 4.3 Centralized Value Function (Phase A) | 需改 dataloader | **已实现** ✅ ValueHead + oracle_brain + RVR 零和约束 + Oracle Dropout Schedule |
+| **强化学习阶段** | 4.3 Step-Level GAE (Phase B) | Phase A 稳定后 | 待实施：需 dataloader 保持时序 |
+| **强化学习阶段** | 4.4.1 终局平滑 | 无 | **已实现** ✅ reward_calculator label_smoothing |
+| **强化学习阶段** | 4.4.2 Expected Reward Network | 需额外训练管线 | **已实现** ✅ ExpectedRewardNet 含 warmup |
+| **强化学习阶段** | 监督辅助头迁移 (opp + danger) | 需改 dataloader | **已实现** ✅ OpponentStateAuxNet + DangerAuxNet 在 online 中启用 |
+| **强化学习阶段 稳定后** | 4.5 V-trace IS 截断 | 观察 ratio 方差后决定 | **已实现** ✅ vtrace_rho_clip 参数控制，ratio variance/max 统计已加入 TensorBoard |
+| **强化学习阶段** | 5.x 局部后悔度辅助头 | 需 Rust 端标签构造 | **已实现** ✅ Rust 端标签构造 + Python dataloader 管线 + 训练损失全部完成，3 个 head 端到端可用 |
 
 ---
 
@@ -823,6 +824,29 @@ pub kan_regret_valid: Vec<bool>,
 4. **最高优先级的改进**是在 强化学习阶段 的 PPO 训练中加入 centralized value function（用全局信息训练 critic）+ step-level GAE，这与 RVR 的核心思想一致。
 
 5. **局部后悔度是本项目的原创方向**。它不替代 CFR，而是用辅助头的方式让 encoder 学到"事后来看哪些决策会后悔"的表示。这是低成本、高信息量的改进，尤其适合日麻这种有明确可枚举后悔场景的博弈。
+
+6. **Suphx Oracle Dropout Schedule 已吸收**。oracle_brain 的 forward 在训练时对 invisible_obs 做 Bernoulli dropout，从 `oracle_dropout_start`（默认 0.8）线性衰减到 0.0，经过 `oracle_dropout_steps`（默认 200000）步。这让 value critic 从依赖全局信息逐渐过渡到仅靠可观测信息估值。
+
+---
+
+## 八、组件间冲突与冗余的解决方案
+
+### 已解决的冗余
+
+| 组件 A | 组件 B | 冗余类型 | 解决方式 |
+|--------|--------|---------|---------|
+| AuxNet (rank 预测) | ValueHead (value 预测) | 都编码排位信息 | ValueHead 启用时自动将 AuxNet 权重从 `next_rank_weight` 压低至 `min(weight, 0.05)` |
+| ExpectedRewardNet | 终局 label_smoothing | 都降低终局 reward 方差 | 启动时打印日志提醒用户两者共存；建议 ExpectedRewardNet 训练成熟后关闭 label_smoothing |
+| ValueHead oracle_brain.forward | ExpectedRewardNet oracle_brain.forward | 同一 batch 内重复计算 oracle 特征 | 缓存 `oracle_phi_cached`，两个 head 共用同一次 forward 结果 |
+
+### 梯度隔离架构
+
+所有辅助头（rank / opp / danger / regret heads）均运行在 `phi.detach()` 上，梯度不回传到 Brain encoder。唯一通过 Brain 传梯度的路径是：
+
+- **策略梯度**：policy loss → policy_net → mortal (Brain encoder)
+- **Value critic**：value loss → value_net → oracle_brain (独立 Brain，不影响 mortal)
+
+这保证辅助 loss 不干扰策略优化，同时让辅助头的参数被独立训练。
 
 ---
 

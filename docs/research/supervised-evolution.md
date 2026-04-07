@@ -1,25 +1,6 @@
 # 监督学习阶段演进记录
 
-这份文档统一记录监督学习阶段如何一步步形成当前结构。活跃入口文档只描述当前设计；演进过程、方案切换和收敛路径都集中放在这里。
-
-## 当前结构
-
-监督学习阶段当前采用以下主线：
-
-1. `P0`
-2. `P1 calibration`
-3. `P1 protocol_decide`
-4. `P1 winner_refine`
-5. `formal_train`
-6. `formal_1v3`
-
-当前官方结论：
-
-- 协议 winner：`C_A2x_cosine_broad_to_recent_strong_24m_12m`
-- winner 点位：`0.12 + A2x`
-- supervised winner：`anchor*1.0`
-- 第一替补：`opp_lean*0.85`
-- canonical checkpoint：`./checkpoints/sl_canonical.pth`
+这份文档统一记录监督学习阶段如何一步步形成当前结构。当前结论见 `docs/status/supervised-verified-status.md`，当前设计见 `docs/agent/mainline.md`。
 
 ## 演进主线
 
@@ -81,37 +62,3 @@
 
 - 监督学习阶段的官方产物固定为当前 canonical checkpoint
 - 后续项目工作转入强化学习阶段方案定义与起跑准备
-
-## 关键设计收敛
-
-### 角色分离
-
-- `calibration`：负责定标
-- `protocol_decide`：负责选协议
-- `winner_refine`：负责 pre-formal 第一梯队
-- `formal_1v3`：负责官方 winner
-
-### 命名统一
-
-- 文档语义：
-  - `监督学习阶段`
-  - `强化学习阶段`
-- 监督学习阶段脚本与产物命名：
-  - `run_sl_*`
-  - `logs/sl_*`
-  - `sl_canonical*.pth`
-
-### 文档分层
-
-- 入口与当前默认：`docs/agent/`
-- 当前状态与结论：`docs/status/`
-- 演进与方法：`docs/research/`
-- 复盘与历史材料：`docs/reflections/` / `docs/archive/`
-
-## 相关文档
-
-- 当前停点：`docs/agent/current-plan.md`
-- 当前设计：`docs/agent/mainline.md`
-- 当前真实结论：`docs/status/supervised-verified-status.md`
-- `P1` 评估口径：`docs/status/p1-selection-canonical.md`
-- formal triplet / `formal_1v3` 证据：`docs/status/supervised-formal-triplet-playoff-canonical.md`
