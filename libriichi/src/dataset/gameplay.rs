@@ -714,7 +714,9 @@ impl Gameplay {
     /// Tile efficiency regret: per-discard shanten delta relative to the best
     /// achievable shanten. Only valid for discard decisions (3n+2).
     fn push_tile_eff_labels(&mut self, state: &PlayerState, at_kan_select: bool) {
-        let valid = !at_kan_select && state.last_cans().can_discard;
+        let tehai_len_div3 = state.tehai_len_div3();
+        // Need at least 1 group of 3 tiles to compute shanten after discard
+        let valid = !at_kan_select && state.last_cans().can_discard && tehai_len_div3 > 0;
         self.tile_eff_valid.push(valid);
 
         let mut deltas = [0_f32; DANGER_DISCARD_DIM];
@@ -722,7 +724,6 @@ impl Gameplay {
         if valid {
             let candidates = state.discard_candidates_aka();
             let tehai = state.tehai();
-            let tehai_len_div3 = state.tehai_len_div3();
             let cur_shanten = state.shanten();
 
             // Best achievable shanten after any discard = cur_shanten - 1 if
@@ -802,7 +803,9 @@ impl Gameplay {
         at_kan_select: bool,
     ) {
         let can_discard = state.last_cans().can_discard;
-        let valid = !at_kan_select && can_discard && state.shanten() <= 1;
+        let tehai_len_div3 = state.tehai_len_div3();
+        // Need at least 1 group of 3 tiles to compute shanten after discard
+        let valid = !at_kan_select && can_discard && tehai_len_div3 > 0 && state.shanten() <= 1;
         self.hand_value_valid.push(valid);
 
         let mut points = [0_f32; DANGER_DISCARD_DIM];
