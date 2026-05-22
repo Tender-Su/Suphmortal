@@ -1,6 +1,7 @@
 import math as _math
 import numpy as _np
 from collections import OrderedDict
+from contextlib import nullcontext
 
 from mortal.eval.oracle_experiments import (
     apply_oracle_experiment_to_config,
@@ -1347,6 +1348,7 @@ def train():
         if value_enabled and resolved_value_target_mode == 'all_players'
         else 0.0
     )
+    critic_warmup_steps = value_critic_warmup_steps(config) if value_enabled else 0
     actor_oracle_enabled = actor_oracle_guiding_enabled(config)
     actor_oracle_source = actor_oracle_guiding_source(config)
     actor_oracle_lr_scale = actor_oracle_guiding_lr_scale(config)
@@ -1526,6 +1528,13 @@ def train():
             entropy_floor,
             entropy_floor_start_step,
             entropy_adjust_rate,
+        )
+    if critic_warmup_steps > 0:
+        if not value_enabled:
+            raise ValueError('value.critic_warmup_steps requires value.enabled=true')
+        logging.info(
+            'Oracle critic actor-freeze warmup enabled: steps=%s (policy/aux heads frozen, value loss only)',
+            critic_warmup_steps,
         )
 
     mortal = Brain(version=version, is_oracle=actor_oracle_enabled, **config['resnet'], Norm="GN").to(device)
@@ -2889,6 +2898,7 @@ def train():
             replay_is_gap_mean = torch.tensor(0.0, device=device)
             replay_is_gap_max = torch.tensor(0.0, device=device)
             replay_is_tracked_mask_cpu = None
+            critic_warmup = value_critic_warmup_active(config, steps)
 
             with torch.no_grad():
                 with torch.autocast(device.type, enabled=enable_amp):
@@ -2909,13 +2919,16 @@ def train():
                     replay_param_version=replay_param_version_cpu,
                 )
 
+            actor_grad_context = torch.no_grad() if critic_warmup else nullcontext()
+            with actor_grad_context:
+                with torch.autocast(device.type, enabled=enable_amp):
+                    phi = (
+                        mortal(obs, invisible_obs=actor_invisible_obs)
+                        if actor_oracle_enabled
+                        else mortal(obs)
+                    )
+                    logits = policy_net.logits(phi, masks)
             with torch.autocast(device.type, enabled=enable_amp):
-                phi = (
-                    mortal(obs, invisible_obs=actor_invisible_obs)
-                    if actor_oracle_enabled
-                    else mortal(obs)
-                )
-                logits = policy_net.logits(phi, masks)
                 dist = Categorical(logits=logits)
                 new_log_prob = dist.log_prob(actions)
                 ratio = (new_log_prob - old_log_prob).exp()
@@ -3059,7 +3072,10 @@ def train():
                 entropy = dist.entropy().view(-1, 1)
                 entropy_loss = entropy * dynamic_entropy_weight
 
-                loss = -(clip_loss + entropy_loss).mean()
+                if critic_warmup:
+                    loss = torch.zeros((), dtype=phi.dtype, device=device)
+                else:
+                    loss = -(clip_loss + entropy_loss).mean()
 
                 if online_context_meta_enabled and context_meta is None:
                     raise RuntimeError('online auxiliary heads enabled but context_meta is missing')
@@ -3068,7 +3084,7 @@ def train():
                 # context weighting: turn bucket, south/all-last emphasis, gap focus,
                 # and max-weight clipping.
                 aux_loss_val = torch.tensor(0.0, device=device)
-                if aux_net is not None:
+                if aux_net is not None and not critic_warmup:
                     rank_logits = aux_net(phi)[0]
                     rank_aux_weights = compute_rank_aux_sample_weights(
                         context_meta,
@@ -3105,7 +3121,7 @@ def train():
 
                 # Opponent State auxiliary loss
                 opp_loss_val = torch.tensor(0.0, device=device)
-                if opponent_aux_net is not None and opp_shanten is not None:
+                if opponent_aux_net is not None and opp_shanten is not None and not critic_warmup:
                     opp_shanten_dev = opp_shanten.to(dtype=torch.int64, device=device)
                     opp_tenpai_dev = opp_tenpai.to(dtype=torch.int64, device=device)
                     shanten_logits, tenpai_logits = opponent_aux_net(phi)
@@ -3170,7 +3186,7 @@ def train():
 
                 # Danger auxiliary loss
                 danger_loss_val = torch.tensor(0.0, device=device)
-                if danger_aux_net is not None and danger_valid is not None:
+                if danger_aux_net is not None and danger_valid is not None and not critic_warmup:
                     danger_valid_dev = danger_valid.to(dtype=torch.bool, device=device)
                     danger_any_target = danger_any.to(dtype=torch.bool, device=device)
                     danger_any_dev = danger_any_target.to(dtype=torch.float32)
@@ -3309,7 +3325,7 @@ def train():
 
                 # Local Regret Heads
                 tile_eff_loss_val = torch.tensor(0.0, device=device)
-                if tile_eff_net is not None and tile_eff_valid is not None:
+                if tile_eff_net is not None and tile_eff_valid is not None and not critic_warmup:
                     tile_eff_pred = tile_eff_net(phi.detach())
                     te_valid = tile_eff_valid.to(device=device)
                     if te_valid.any():
@@ -3319,7 +3335,7 @@ def train():
                         loss = loss + tile_eff_weight * tile_eff_loss_val
 
                 furo_regret_loss_val = torch.tensor(0.0, device=device)
-                if furo_regret_net is not None and furo_valid is not None:
+                if furo_regret_net is not None and furo_valid is not None and not critic_warmup:
                     furo_pred = furo_regret_net(phi.detach())
                     fr_valid = furo_valid.to(device=device)
                     if fr_valid.any():
@@ -3340,7 +3356,7 @@ def train():
                         loss = loss + furo_regret_weight * furo_regret_loss_val
 
                 hand_value_regret_loss_val = torch.tensor(0.0, device=device)
-                if hand_value_regret_net is not None and hand_value_valid is not None:
+                if hand_value_regret_net is not None and hand_value_valid is not None and not critic_warmup:
                     hv_pred = hand_value_regret_net(phi.detach())
                     hv_valid = hand_value_valid.to(device=device)
                     if hv_valid.any():
@@ -3354,7 +3370,7 @@ def train():
 
                 # Expected Reward Network (reuses cached oracle features)
                 exp_reward_loss_val = torch.tensor(0.0, device=device)
-                if exp_reward_net is not None and steps >= exp_reward_warmup:
+                if exp_reward_net is not None and steps >= exp_reward_warmup and not critic_warmup:
                     if oracle_phi_cached is not None:
                         oracle_phi_for_reward = oracle_phi_cached.detach()
                     else:
