@@ -28,7 +28,7 @@ if ($decompress.Count -gt 0) {
 }
 
 Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -eq 'powershell.exe' -and (
+    $_.Name -in @('powershell.exe', 'pwsh.exe') -and (
         $_.CommandLine -like '*laptop_rebuild_remote_*' -or
         $_.CommandLine -like '*laptop_decompress_active.runner.ps1*'
     )

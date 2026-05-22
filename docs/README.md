@@ -1,47 +1,37 @@
-# 文档导航
+# 文档地图
 
-文档按四层组织：入口层 → 状态层 → 证据层 → 背景层。
+这套文档只有一个目标：让接手者先看到当前真相，再按需追证据，不在多个文件里拼结论。
 
-## 文档分层
+## 先读
 
-### 入口层：`agent/`
+| 目的 | 文件 |
+| --- | --- |
+| 接手当前工作 | `agent/README.md` |
+| 看当前下一步 | `agent/handoff.md` |
+| 跑命令 | `agent/workflows.md` |
+| 双机与远程 | `agent/remote-ops.md` |
+| 找代码位置 | `agent/code-map.md` |
 
-| 文件 | 职责 |
-|------|------|
-| `current-plan.md` | 当前停点与下一步 |
-| `mainline.md` | 冻结默认、命名族、机器默认 |
-| `experiment-workflow.md` | 当前主线怎么跑、人工确认点 |
-| `laptop-remote-ops.md` | 远程 shell、数据根、双机运行坑点 |
-| `code-sync.md` | 台式机到笔记本的 Git 同步 |
+## 当前真相
 
-### 状态层：`status/`
+| 主题 | 文件 |
+| --- | --- |
+| 监督学习最终结论 | `status/supervised-mainline.md` |
+| 在线 RL 当前主线 | `status/online-rl-mainline.md` |
+| 机器级 loader / `1v3` 默认 | `status/machine-benchmarks.md` |
+| 自动生成的监督学习 snapshot | `status/supervised-fidelity-results.md` |
 
-| 文件 | 职责 |
-|------|------|
-| `supervised-verified-status.md` | 人工核对后的监督学习阶段真实结论 |
-| `p1-selection-canonical.md` | `P1` 唯一有效评估口径 |
-| `supervised-formal-triplet-playoff-canonical.md` | formal triplet → `formal_1v3` → 官方 winner |
-| `supervised-fidelity-results.md` | 自动生成的 run snapshot（run-scoped，非当前默认） |
-| `laptop-sl-loader-benchmark-2026-03-31.md` | 笔记本 loader 证据 |
-| `1v3-multishard-benchmark-2026-04-02.md` | 双机 `1v3` 吞吐证据 |
+## 追溯材料
 
-### 证据层：`research/`
+| 目录 | 用途 |
+| --- | --- |
+| `research/` | 设计理由、证据链、仍可能复用的研究长文 |
+| `reflections/` | 人机协作、判断过程和个人复盘 |
+| `archive/` | 退役文档和旧快照 |
 
-| 文件 | 职责 |
-|------|------|
-| `supervised-evolution.md` | 监督学习阶段演进全记录 |
-| `stage0/grp-experience.md` | GRP 候选对比与探索方向 |
-| `supervised/engineering-playbook.md` | 监督学习工程经验 |
-| `supervised/selector-stat-audit.md` | selector 统计支持证据 |
-| `supervised/a2y-aux-shape-freeze-2026-03-25.md` | 三类辅助头内部 shape 冻结 |
-| `supervised/p1-aux-adjustment-2026-03-22.md` | P1 auxiliary 搜索调整记录 |
-| `rl-ppo-improvement-plan.md` | 强化学习 PPO 改进草案 |
+## 维护规则
 
-### 背景层：`reflections/` 与 `archive/`
-
-- `reflections/`：复盘、人机协同方法、个人研究判断
-- `archive/`：已退役入口、旧快照、旧长文
-
-## 使用规则
-
-入口层和状态层是当前真相；证据层、背景层（含自动摘要、研究长文、复盘、归档）不能覆盖前两层。
+- 当前结论只写在 `status/`；入口文档只链接和摘要。
+- 运行命令只写在 `agent/workflows.md` 或 `agent/remote-ops.md`。
+- 研究长文不参与默认接手，除非 `agent/README.md` 明确点名。
+- 新文档归属不确定时，先看 `agent/doc-maintenance.md`。

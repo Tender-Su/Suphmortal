@@ -1,14 +1,14 @@
 # 监督学习阶段工程手册
 
-这份文档只记录当前仍有效、会直接影响实验质量的工程经验。当前入口见 `docs/agent/current-plan.md`，演进过程见 `docs/research/supervised-evolution.md`。
+这份文档只记录当前仍有效、会直接影响实验质量的工程经验。当前入口见 `docs/agent/handoff.md`，演进过程见 `docs/research/supervised-evolution.md`。
 
 ## 当前工程结论
 
 ### 1. 正式训练和筛选实验分目录运行
 
 - 正式训练入口：`scripts/run_supervised.bat`
-- 单轮协议 A/B：`mortal/run_sl_ab.py`
-- 串联保真流程：`mortal/run_sl_fidelity.py`
+- 单轮协议 A/B：`mortal/supervised/run_sl_ab.py`
+- 串联保真流程：`mortal/supervised/run_sl_fidelity.py`
 - 正式训练目录与筛选实验目录分别承载不同职责
 
 ### 2. 重要重启使用全新输出目录
@@ -31,7 +31,7 @@
 
 ### 5. `P1` 的比较、第一梯队和 downstream 入口使用同一套口径
 
-- `P1` 的排序、第一梯队与 downstream 入口解释统一走 `docs/status/p1-selection-canonical.md`
+- `P1` 的排序、第一梯队与 downstream 入口解释统一走 `docs/status/supervised-mainline.md`
 - 自动摘要只提供辅助信息
 
 ### 6. invalid arm 先补齐，再比较结论

@@ -1,226 +1,112 @@
 # Repository Guidelines
 
-## Project Structure
+这份文件只放所有 agent 必须先知道的规则。当前训练结论、机器参数和长流程不要在这里复写，按入口文档读取。
 
-- **`libriichi/`** — Rust high-performance Mahjong engine (PyO3 extension). Contains game rules, state machine, feature extraction, and inline tests. Exposes 6 PyO3 sub-modules: `consts`, `state`, `dataset`, `arena`, `stat`, `mjai`.
-- **`mortal/`** — PyTorch training pipeline. Model definitions (`model.py`), supervised / online training scripts, A/B runners, evaluation, and all configs.
-- **`exe-wrapper/`** — Small Rust helper binary crate (workspace member).
-- **`scripts/`** — Windows `.bat` entry points for build and training.
-- **`checkpoints/`** — Model weight outputs (not committed).
+## 先读哪里
 
-## Documentation Layout
+- 接手入口：`docs/agent/README.md`
+- 当前状态：`docs/agent/handoff.md`
+- 监督学习主线：`docs/status/supervised-mainline.md`
+- 在线 RL 主线：`docs/status/online-rl-mainline.md`
+- 机器与 loader / `1v3` 默认：`docs/status/machine-benchmarks.md`
+- 命令与脚本：`docs/agent/workflows.md`
+- 双机与远程：`docs/agent/remote-ops.md`
+- 代码位置：`docs/agent/code-map.md`
+- 文档整理：`docs/agent/doc-maintenance.md`
 
-Four-layer structure — read in order: entry → status → evidence → background.
+冲突时按 `docs/status/` > `docs/agent/` > `docs/research/` 判断；`docs/archive/` 和 `docs/reflections/` 默认不作为当前运行依据。
+窄代码修改或定点排障可以先用 `rg` / 本地文件定位，再只打开相关文档；不要从研究长文或归档里拼当前默认。
 
-- **`docs/agent/`** — entry layer: current stop point, frozen defaults, workflow, remote ops, code sync.
-- **`docs/status/`** — status layer: verified conclusions, P1 rubric, formal-triplet evidence, benchmark results.
-- **`docs/research/`** — evidence layer: evolution records, engineering playbooks, experiment notes.
-- **`docs/reflections/`** — background: personal reflection, human-AI collaboration notes.
-- **`docs/archive/`** — retired docs; never treat as current defaults.
-- Full per-file index: `docs/README.md`.
+## 项目边界
 
-## Build, Test, and Development Commands
+- `libriichi/`：Rust 牌局引擎、状态机、特征提取、PyO3 模块。
+- `mortal/`：Python 训练、评测、实验编排；子目录职责看 `docs/agent/code-map.md`。
+- `exe-wrapper/`：小型 Rust helper binary crate。
+- `scripts/`：Windows 入口脚本。
+- `docs/`：当前状态、证据、接手说明和历史归档。
+- `checkpoints/`、`logs/`、`target/`：本地产物，默认不提交。
+
+## 工作原则
+
+- 总目标是最强模型，训练效率和便利性排在最终强度之后。
+- 默认用中文说明；保留项目内已稳定使用的术语，例如 `GRP`、`Oracle critic`、`value / GAE`、`1v3`。
+- 代码改动要小而清晰，优先删除旧路径或旧逻辑，避免只堆新增；逻辑转折处才加短注释。
+- 不要改动用户已有的无关变更；当前工作树可能本来就是 dirty。
+- 查找文件和文本优先用 `rg` / `rg --files`。
+- 长输出外部命令按 `RTK.md` 使用 `rtk`，PowerShell 内建、短探针和管道直接运行。
+- 本地 Codex shell 正常用工具层 `workdir` 控制目录；只有目录异常、嵌套 shell、远程 shell 或命令本身需要时才显式 `Set-Location`。
+- 面向用户解释时优先保留项目内已有术语；引入论文或外部概念时先用中文说明它和本项目的关系，再给原名。
+
+## 环境与常用命令
+
+非交互 Python 优先使用：
 
 ```powershell
-# Environment (name in environment.yml is "mortal"; scripts may say "mahjong")
-conda env create -f environment.yml
-conda activate mortal
+C:\ProgramData\anaconda3\envs\mortal\python.exe
+```
 
-# Build Rust engine → installs as importable Python package
-.\scripts\build_libriichi.bat          # runs: maturin develop --release --manifest-path Cargo.toml
+常用入口：
 
-# Verify build
-python -c "import libriichi; print('OK')"
+```powershell
+.\scripts\build_libriichi.bat
+.\scripts\run_grp.bat
+.\scripts\run_supervised.bat
+.\scripts\run_sl_p1_only.bat
+.\scripts\run_online.bat
+.\scripts\run_online_fidelity.bat
+.\scripts\run_oracle_critic_pretrain.bat
+.\scripts\run_oracle_dependency_eval.bat
+```
 
-# Rust tests
-cargo test -p libriichi                # all engine tests
-cargo test -p libriichi state::test    # targeted state module tests
+Rust / PyO3 测试前固定解释器和 DLL 路径：
 
-# Rust tests from a plain PowerShell shell may pick an unsupported global Python.
-# If that happens, pin PyO3 to the mortal env and prepend its DLL dirs to PATH:
+```powershell
 $env:PYO3_PYTHON="C:\ProgramData\anaconda3\envs\mortal\python.exe"
 $env:PATH="C:\ProgramData\anaconda3\envs\mortal;C:\ProgramData\anaconda3\envs\mortal\Library\bin;C:\ProgramData\anaconda3\envs\mortal\Scripts;$env:PATH"
 cargo test -p libriichi state::test
-
-# Python smoke test
-python mortal\test_greedy.py
-
-# Current training entry points
-.\scripts\run_grp.bat                  # GRP prerequisite model: cd mortal && python train_grp.py
-.\scripts\run_supervised.bat           # Supervised phase: formal supervised training / protocol replay
-.\scripts\run_sl_p1_only.bat      # Manual supervised P1-only helper for selector / refine work
-.\scripts\run_online.bat               # Reinforcement learning phase: cd mortal && python train_online.py
-
-# Formatting
-cargo fmt                              # Rust formatting (always run before commit)
 ```
 
-## Code Style
+Python smoke：
 
-### Rust (`libriichi/`)
-- **Edition 2024**, workspace resolver 3, release profile: `lto = true, codegen-units = 1`.
-- `lib.rs` enforces ~75 strict clippy lints via `#![deny(...)]` — including `float_cmp`, `undocumented_unsafe_blocks`, `use_self`, `uninlined_format_args`, `get_unwrap`, `string_add`, `trivially_copy_pass_by_ref`, and many more. One `#![allow(clippy::manual_range_patterns)]` for the `matches_tu8` macro.
-- snake_case modules, inline `#[cfg(test)] mod test` blocks. Tests use JSON mjai events to drive `PlayerState` updates (see `state/test.rs`).
-- Uses `mimalloc` global allocator (default feature).
+```powershell
+C:\ProgramData\anaconda3\envs\mortal\python.exe -m mortal.tests.test_greedy
+```
 
-### Python (`mortal/`)
-- 4-space indent, snake_case functions/variables, PascalCase classes.
-- `config.py` is 4 lines: loads `mortal/config.toml` (or `$MORTAL_CFG`), no validation. All type safety is the caller's responsibility.
-- `prelude.py` configures logging (INFO to stderr), silences warnings, sets UTF-8 stdin.
-- GRP precision is now configurable; for this machine and the current strongest GRP setup, prefer `torch.float32`.
+`conda` 在新 PowerShell 中不一定在 `PATH`；能用绝对解释器时不要假设 `conda run` 可用。
 
-## Architecture — Critical Constants
+## 代码约束
 
-These are defined in `libriichi/src/consts.rs` and imported in Python via `from libriichi.consts import ...`:
+- Rust：Edition 2024；`libriichi/src/lib.rs` 有严格 clippy deny；提交前运行 `cargo fmt`。
+- Python：4 空格缩进，函数和变量用 `snake_case`，类用 `PascalCase`。
+- 不要改特征通道数，除非同步更新 Rust 特征提取和 Python 模型输入。关键常数：`ACTION_SPACE=46`，`obs_shape(v4)=(1012,34)`，`oracle_obs_shape(v4)=(217,34)`，`GRP_SIZE=7`，`MAX_VERSION=4`。
+- `Brain.__init__` 默认是 `"BN"`，但当前配置和评测入口使用 `"GN"`；实例化时显式传 norm。
+- V3/V4 是 pre-activation ResBlock；每个 ResBlock 都有 SE-style channel attention，不要随手移除。
+- `mortal/config.toml` 可由 `MORTAL_CFG` 覆盖；不要提交真实数据路径或凭据。
+- Windows PowerShell 写 TOML / 配置时优先 `apply_patch`，避免 `Set-Content`、`Out-File`、`>` 产生编码问题。
+- CPU affinity 现在是 opt-in；正常训练默认不设置 `MORTAL_CPU_AFFINITY`。
 
-| Constant | Value | Notes |
-|----------|-------|-------|
-| `ACTION_SPACE` | 46 | 37 discard + 1 riichi + 3 chi + 1 pon + 1 kan + 1 agari + 1 ryukyoku + 1 pass |
-| `obs_shape(v4)` | (1012, 34) | Normal observation channels — defined in `state/obs_repr.rs` |
-| `oracle_obs_shape(v4)` | (217, 34) | Perfect-info Oracle channels — defined in `dataset/invisible.rs` |
-| `GRP_SIZE` | 7 | GRP input dimension |
-| `MAX_VERSION` | 4 | Current feature version |
+## 训练与产物口径
 
-**Do not modify feature channel counts** without updating both Rust extraction code and Python model input dimensions.
+- 当前阶段摘要看 `docs/agent/handoff.md`；不要从旧研究文档拼默认结论。
+- `GRP` checkpoint 分三类：`best_loss` 默认下游使用，`best_acc` 只做受控对照，`latest` 只用于续训。
+- 在线 RL 启动优先级：`[control].state_file` -> `[online].init_state_file` -> `[supervised].best_loss_state_file` -> `[supervised].best_state_file`。
+- `1v3` challenger 路径是 `[1v3.challenger].state_file`，不是 `[control].state_file`。
+- 训练阶段默认关闭 `search`；推理期增强要单独 A/B。
 
-## Architecture — Neural Network (`mortal/model.py`)
+## 双机纪律
 
-| Component | Key Details |
-|-----------|-------------|
-| **Brain (Encoder)** | 1D-ResNet, 40 blocks × 192 channels (config: `[resnet]`), GroupNorm(32), Mish activation, pre-activation ResBlocks with SE-style `ChannelAttention(ratio=16)` in every block. Output: 1024-dim. |
-| **CategoricalPolicy** | Linear(1024→256) + tanh + Linear(256→46), orthogonal init |
-| **DQN** | Linear(1024→47), Dueling split: V(1) + A(46) |
-| **AuxNet** | Linear(1024→sum(dims)), bias=False — ranking prediction head |
-| **GRP** | GRU(7, hidden=384, 3 layers, float32) → FC(1152→1152→24), 24 = 4! ranking permutations |
+- 台式机 `main` 工作树是源码真源。
+- 笔记本是独立实验 runner，不默认共享梯度、replay buffer 或 checkpoint。
+- 双机同时跑同一阶段时，run name、输出目录和 checkpoint 路径必须带机器区分。
+- 笔记本 IP 可能变化，远程命令前先按 `docs/agent/remote-ops.md` 重新确认。
 
-## Architecture — Current Training Pipeline
+## 测试与提交
 
-1. **GRP prerequisite** (`train_grp.py`): Trains Global Reward Predictor on game logs. Output: `checkpoints/grp.pth`.
-2. **Supervised phase** (`train_supervised.py`, `run_sl_formal.py`, `run_sl_fidelity.py`): Runs `P0 -> P1 -> formal_train -> formal_1v3`, selects the strongest supervised protocol under temporal drift, and freezes the canonical supervised winner.
-3. **Reinforcement learning phase** (`train_online.py`): PPO self-play with dynamic entropy regularization. Current RL design is not frozen in the repo docs yet.
+- Rust 测试放同模块 `#[cfg(test)]`，优先跑 targeted test。
+- Python 测试放 `mortal/tests/` 或相关模块附近，新增行为至少有可复现实测。
+- 安全注意：`mortal/core/common.py` 的 TCP / pickle 通信只面向本机可信输入。
+- commit subject 用短祈使句并带 scope，例如 `mortal: fix oracle dropout schedule`。
 
-## Configuration (`mortal/config.toml`)
+## 相关本地说明
 
-All hyperparameters centralized here. Key sections: `[control]`, `[supervised]`, `[resnet]`, `[policy]`, `[aux]`, `[optim]`, `[dataset]`, `[grp]`, `[online]`, `[env]`, `[1v3]`.
-- Use `mortal/config.example.toml` as template for new environments.
-- `[dataset]` paths (e.g., `D:/mahjong_data/...`) are local — never commit real paths.
-- `MORTAL_CFG` env var overrides the config file path.
-
-## Rust ↔ Python Integration
-
-| Pattern | Details |
-|---------|---------|
-| **Import** | `from libriichi.consts import obs_shape, ACTION_SPACE`; `from libriichi.dataset import GameplayLoader, Grp`; `from libriichi.state import PlayerState` |
-| **Data flow** | `GameplayLoader` (Rust) parses `.json.gz` → Python `FileDatasetsIter(IterableDataset)` → PyTorch DataLoader |
-| **Engine** | `mortal/engine.py` wraps model inference: `MortalEngine.react_batch()` takes numpy obs/masks, returns action lists |
-| **NumPy bridge** | Rust uses `numpy::PyArray1/2`; Python bridges via `np.stack` + `torch.as_tensor` |
-
-## Testing Guidelines
-
-- Rust: add `#[test]` in the same module file (e.g., `state/test.rs` contains ~1400 lines of inline tests driven by JSON mjai events).
-- Python: add `test_*.py` near related code.
-- Run targeted tests first: `cargo test -p libriichi state::test` or a focused Python script.
-- No coverage gate — but new behavior needs at least one reproducible test.
-
-## Local Hardware Profile
-
-- **CPU**: Intel Core i5-13600KF
-- **GPU**: NVIDIA GeForce RTX 5070 Ti
-- When suggesting training settings or performance tweaks, assume this machine as the default target.
-- Prefer recommendations that balance DataLoader throughput, CPU preprocessing, disk I/O, and GPU utilization for this hardware pair.
-- For the current `384x3` `fp32` GRP training setup on this machine, treat `num_workers = 10` as the practical default and only move lower or higher with task-specific evidence.
-
-## Multi-Machine Compute Topology
-
-- **Primary desktop**: Intel Core i5-13600KF + NVIDIA GeForce RTX 5070 Ti. This remains the default target when a note only says "this machine".
-- **Secondary laptop node**: Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU (`8 GB` VRAM) + `32 GB` DDR5. Treat it as an additional independent experiment runner, not as an already-wired distributed training worker.
-- Use the laptop for parallel GRP runs, supervised loader / validation benchmarking, supervised A/Bs, and shorter auxiliary probes when the desktop is busy. Do not assume cross-machine gradient sync, shared replay buffers, or checkpoint co-writing unless that plumbing is explicitly added for the task.
-- Canonical development branch is now local `main`, which tracks `origin/main`.
-- Source-of-truth code lives in the desktop `main` worktree first.
-- Git sync details belong in `docs/agent/code-sync.md`.
-- Shell / dataset / remote-execution details belong in `docs/agent/laptop-remote-ops.md`.
-- Do not trust an older copied workspace on the laptop without an explicit resync.
-- Laptop repo default path: `C:\Users\numbe\Desktop\MahjongAI`
-- Laptop Conda env: `C:\Users\numbe\miniconda3\envs\mortal`
-- Desktop-to-laptop shell access is available over LAN SSH via the desktop key `C:\Users\numbe\.ssh\mahjong_laptop_ed25519`. The laptop LAN IP can change, so re-check it before hardcoding commands.
-- When running the same stage on both machines, always use distinct run names / output directories tagged by machine, and never let both machines write to the same checkpoint path or log directory.
-- Current laptop supervised-phase operational defaults and benchmark scope notes live in `docs/agent/mainline.md` and `docs/agent/laptop-remote-ops.md`.
-
-## User Objective
-
-- The primary objective is to build the strongest Mahjong AI possible on this machine, not merely the fastest or cheapest-to-train model.
-- When proposing architecture, training, or data-pipeline changes, optimize for final playing strength first and throughput second, as long as the setup remains practical on the local hardware profile above.
-- For auxiliary models such as GRP, evaluate trade-offs by likely downstream impact on supervised / RL policy quality, not just standalone validation speed.
-- When two options are close in expected final strength, prefer the smaller or faster option; when gains are meaningful, prefer the stronger option even if training is slower.
-- Current GRP guidance from local benchmarking: for this machine, the strongest practical final GRP setup is currently `384x3` trained in `fp32` with validation-loss-driven checkpointing and LR scheduling. If prioritizing efficiency over peak strength, `256x3` is the best practical fallback. Depth `x4`, `fp64`, and very large widths currently show diminishing returns relative to the extra cost.
-- Desktop supervised loader defaults (train `4/10/3`, val `8/5`) are the frozen operating point. If validation hits a loader/resource error, retry with the same settings; the validated fix is explicit iterator/worker teardown after each val pass, not downgrading to single-process mode.
-- Keep heavy action/scenario selection metrics out of the per-batch training hot path; full metrics belong to validation only.
-- Current loader and `1v3` defaults for both machines: `docs/agent/mainline.md`.
-
-## Local Python Environment
-
-- **Preferred environment**: `conda activate mortal`
-- **Verified interpreter**: `C:\ProgramData\anaconda3\envs\mortal\python.exe` (`Python 3.12.12`)
-- **Verified `libriichi` install**: `C:\Users\numbe\AppData\Roaming\Python\Python312\site-packages\libriichi`
-- **Verified extension file**: `C:\Users\numbe\AppData\Roaming\Python\Python312\site-packages\libriichi\libriichi.cp312-win_amd64.pyd`
-- The current plain-shell default `python` is `C:\Python314\python.exe` (`Python 3.14.3`). PyO3 `0.23.4` does **not** support Python 3.14, so a bare `cargo test` can fail during PyO3 build discovery unless `PYO3_PYTHON` is pinned to the `mortal` interpreter above.
-- On this machine, `conda` is not guaranteed to be on `PATH` in a fresh PowerShell session. Prefer the absolute interpreter path `C:\ProgramData\anaconda3\envs\mortal\python.exe` when you only need Python, instead of assuming `conda run -n mortal ...` will work.
-- Rust test binaries may also fail with `STATUS_DLL_NOT_FOUND` unless the `mortal` env directories are prepended to `PATH` before running `cargo test`:
-  `C:\ProgramData\anaconda3\envs\mortal`
-  `C:\ProgramData\anaconda3\envs\mortal\Library\bin`
-  `C:\ProgramData\anaconda3\envs\mortal\Scripts`
-- When running training, smoke tests, import checks, or Rust tests that touch PyO3, prefer the `mortal` environment or the absolute `mortal` interpreter plus the PATH setup above.
-
-## Project Conventions (Non-obvious)
-
-- **Shell working directory discipline**: do not trust the initial PowerShell cwd, and do not assume tool-level `workdir` always takes effect for relative paths. For shell commands, explicitly prefix `Set-Location 'C:\Users\numbe\Desktop\MahjongAI'` before repo-root operations, or `Set-Location 'C:\Users\numbe\Desktop\MahjongAI\mortal'` when intentionally matching the training entry points. This avoids accidental resolution against `C:\Users\numbe` and similar parent directories.
-- **Conda env name mismatch**: `environment.yml` says `mortal`, batch scripts activate `mahjong`. Be aware when writing scripts.
-- **PowerShell file writes**: never use `Set-Content`, `Out-File`, or `>` to write `*.toml` / config files from Windows PowerShell unless you explicitly force BOM-free UTF-8. Prefer `apply_patch` for edits, or Python `Path.write_text(..., encoding='utf-8', newline='\n')`. Runtime TOML loaders are BOM-tolerant, but writers should still emit BOM-free UTF-8.
-- **CPU affinity is now opt-in**: training entry points no longer default to `p_cores`. Leave `MORTAL_CPU_AFFINITY` unset for normal Windows scheduling, or set it explicitly to values such as `p_cores`, `all`, or a CPU list/mask when you really want pinning.
-- **GroupNorm default**: `Brain.__init__` defaults to `"BN"`, but actual config and `player.py` both use `Norm="GN"` (GroupNorm, 32 groups). Always pass norm explicitly.
-- **SE Attention in every ResBlock**: Unlike standard ResNets, every block has channel attention — do not remove it.
-- **Pre-activation order**: V3/V4 use pre-activation ResBlocks (Norm→Activ→Conv).
-- **`common.py` TCP**: `drain()`/`submit_param()` use raw TCP sockets with `torch.save/load` serialization. `recv_msg()` currently uses `weights_only=False` (known TODO).
-
-## Deployment & Online Self-Play
-
-There is no formal CI/CD pipeline. The project runs locally as a research training framework on Windows.
-
-### Online Self-Play Architecture
-- **`server.py`** — `ThreadingTCPServer` at `127.0.0.1:5000`. Manages param distribution and replay buffer. Trainers call `drain` to pull replays and `submit_param` to push new weights.
-- **`client.py`** — Worker that polls the server for latest params, runs self-play games via `TrainPlayer.train_play()`, and submits replays back.
-- **`train_online.py`** — Trainer loop: drains replays from server, runs PPO updates, pushes new params.
-- Buffer/drain directories configured in `config.toml [online.server]` with `buffer_dir`, `drain_dir`, `capacity`.
-- Online bootstrap default:
-  - resume from `[control].state_file`
-  - if that file does not exist, initialize weights from `[online].init_state_file`
-
-### Evaluation
-- **`one_vs_three.py`** — Runs challenger vs champion matches using `libriichi.arena.OneVsThree`. Configured via `config.toml [1v3]`.
-- **TensorBoard**: `tensorboard --logdir ./mortal/tb_log_supervised_main` (supervised), `./mortal/tb_log` (online PPO), or `./mortal/tb_log_grp` (GRP).
-
-### Checkpoint Artifacts
-- `checkpoints/grp.pth` — Stage 0 output (GRP weights).
-- `checkpoints/grp_latest.pth` — latest resumable GRP training state; use for continuing Stage 0 training, not as the default downstream model.
-- `checkpoints/grp_best_acc.pth` — GRP checkpoint with the best validation exact-permutation accuracy; keep as a secondary candidate for downstream A/B checks.
-- `checkpoints/sl_canonical*.pth` — canonical supervised checkpoints (`best_loss / best_acc / best_rank / latest`).
-- `checkpoints/online_ppo/` — 强化学习阶段 periodic saves.
-- State files contain `{'mortal': ..., 'policy_net': ..., 'config': ...}` dicts loaded via `torch.load(..., weights_only=True)`.
-
-### GRP Checkpoint Policy
-- Treat GRP checkpoints as three roles: `best_loss` for default downstream use, `best_acc` as a backup candidate, and `latest` only for resume.
-- Default supervised / RL training should load the `best_loss` GRP checkpoint unless there is explicit evidence that `best_acc` produces a stronger downstream policy.
-- Use `best_acc` only for controlled comparisons; do not silently replace `best_loss` with it in the main pipeline.
-- When changing GRP architecture or dtype, prefer starting a fresh Stage 0 run rather than resuming from an incompatible `latest` state.
-
-## Security Notes
-
-- `common.py` TCP communication (`127.0.0.1:5000`) has no TLS or authentication.
-- `recv_msg()` uses pickle deserialization (`weights_only=False`) — do not expose to untrusted input.
-- Release profile has `overflow-checks = false`.
-- Do not commit `config.toml` with real dataset paths or credentials.
-
-## Commit Guidelines
-
-- Short, imperative, scoped subjects: `mortal: fix oracle dropout schedule`, `libriichi: add chi validation test`.
-- PRs should list which stage/crate changed, config/path updates, and include training metric screenshots when applicable.
+`RTK.md` 是命令输出压缩规则；写代码时也遵循其中“减少改动范围、重视可读性和运行效率”的约束。

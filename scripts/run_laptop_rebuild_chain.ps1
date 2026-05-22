@@ -37,7 +37,7 @@ function Write-Log {
 function Invoke-RemoteScript {
     param([string]$ScriptText)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
-    & ssh -i $sshKey "$User@$HostIp" "powershell -NoProfile -EncodedCommand $encoded" 2>&1 | Tee-Object -FilePath $LogPath -Append
+    & ssh -i $sshKey "$User@$HostIp" "pwsh -NoProfile -EncodedCommand $encoded" 2>&1 | Tee-Object -FilePath $LogPath -Append
     if ($LASTEXITCODE -ne 0) {
         throw "remote command failed"
     }
@@ -66,7 +66,7 @@ $cleanupScript = @"
 `$ErrorActionPreference = 'Stop'
 `$allProcesses = @(Get-CimInstance Win32_Process)
 `$rootProcessIds = @(`$allProcesses | Where-Object {
-    (`$_.Name -in @('python.exe', 'powershell.exe')) -and (
+    (`$_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe')) -and (
         (`$_.CommandLine -like '*extract_data.py*') -or
         (`$_.CommandLine -like '*decompress_dataset_json.py*') -or
         (`$_.CommandLine -like '*laptop_rebuild_remote_*')
@@ -127,10 +127,12 @@ if (Test-Path '$remoteErrLog') { Remove-Item -LiteralPath '$remoteErrLog' -Force
 `$runnerEsc = '$remoteRunner'.Replace('"','""')
 `$outEsc = '$remoteOutLog'.Replace('"','""')
 `$errEsc = '$remoteErrLog'.Replace('"','""')
-`$cmd = 'cmd /c start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "' + `$runnerEsc + '" 1>"' + `$outEsc + '" 2>"' + `$errEsc + '"'
+`$cmd = 'cmd /c start "" /b pwsh -NoProfile -ExecutionPolicy Bypass -File "' + `$runnerEsc + '" 1>"' + `$outEsc + '" 2>"' + `$errEsc + '"'
 Invoke-Expression `$cmd
 Start-Sleep -Seconds 1
-`$p = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { `$_.CommandLine -like ('*' + '$remoteRunner' + '*') } | Sort-Object CreationDate -Descending | Select-Object -First 1
+`$p = Get-CimInstance Win32_Process | Where-Object {
+    (`$_.Name -in @('pwsh.exe', 'powershell.exe')) -and (`$_.CommandLine -like ('*' + '$remoteRunner' + '*'))
+} | Sort-Object CreationDate -Descending | Select-Object -First 1
 if (`$null -eq `$p) { throw 'failed to locate remote rebuild runner process' }
 Write-Host ('REMOTE_CHAIN_PID=' + `$p.ProcessId)
 Write-Host ('REMOTE_CHAIN_RUNNER=' + '$remoteRunner')

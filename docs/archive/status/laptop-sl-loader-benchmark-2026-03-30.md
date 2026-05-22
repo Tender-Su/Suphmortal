@@ -2,7 +2,7 @@
 
 更新说明：
 
-- 这份文档已被 `docs/status/laptop-sl-loader-benchmark-2026-03-31.md` 的交互前台口径复核部分覆盖
+- 这份文档已被 `docs/status/machine-benchmarks.md` 中的笔记本 loader 冻结默认覆盖
 
 ## 机器
 

@@ -14,10 +14,10 @@ import torch
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / 'mortal'))
+sys.path.insert(0, str(REPO_ROOT))
 
-import run_sl_ab as ab
-from dataloader import SupervisedFileDatasetsIter, resolve_rayon_num_threads, worker_init_fn
+import mortal.supervised.run_sl_ab as ab
+from mortal.data.dataloader import SupervisedFileDatasetsIter, resolve_rayon_num_threads, worker_init_fn
 
 
 class MEMORYSTATUSEX(ctypes.Structure):

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -in @('python.exe', 'powershell.exe')) -and (
+    ($_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe')) -and (
         ($_.CommandLine -like '*extract_data.py*') -or
         ($_.CommandLine -like '*decompress_dataset_json.py*') -or
         ($_.CommandLine -like '*laptop_rebuild_remote_*')

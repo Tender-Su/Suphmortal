@@ -35,9 +35,8 @@
 
 当前仓库里的对应风格已经存在，例如：
 
-- [supervised-verified-status.md](../status/supervised-verified-status.md)
+- [supervised-mainline.md](../status/supervised-mainline.md)
 - [sl-progress-2026-03-22.md](../archive/status/sl-progress-2026-03-22.md)
-- [p1-selection-canonical.md](../status/p1-selection-canonical.md)
 
 结论：
 

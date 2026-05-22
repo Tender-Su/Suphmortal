@@ -1,6 +1,6 @@
 # 监督学习阶段演进记录
 
-这份文档统一记录监督学习阶段如何一步步形成当前结构。当前结论见 `docs/status/supervised-verified-status.md`，当前设计见 `docs/agent/mainline.md`。
+这份文档统一记录监督学习阶段如何一步步形成当前结构。当前结论见 `docs/status/supervised-mainline.md`，当前设计见 `docs/agent/handoff.md`。
 
 ## 演进主线
 

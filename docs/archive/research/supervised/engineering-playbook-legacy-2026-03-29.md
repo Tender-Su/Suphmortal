@@ -2,16 +2,16 @@
 
 > 历史说明：本文保留大量 `2026-03-28` 之前的工程与实验记录。
 > 凡是把 `P1` 主线写成 `SoloAuxGate -> Pairwise -> JointRefine` 的段落，都只能当历史设计与排错背景，不能当当前默认。
-> 当前默认 P1 结构以 `docs/agent/current-plan.md` 与 `docs/status/p1-selection-canonical.md` 为准，即：
+> 当前默认 P1 结构以 `docs/agent/handoff.md` 与 `docs/status/supervised-mainline.md` 为准，即：
 > `calibration -> protocol_decide -> winner_refine`；`ablation` 当前是 `backlog / manual only`。
 > 另：本文中出现的 `监督学习阶段 / P2` checkpoint 去重层也已从当前主线删除。
 > 当前 `formal` 直接接在 `P1 winner_refine` 之后；凡是把 `P2` 写成默认必经阶段的段落，都只能当历史设计背景。
 
-本文档只记录 `监督学习阶段` 的工程经验和排障结论，不重复 `AGENTS.md` 的通用规范，也不重复 `docs/agent/current-plan.md` 的长期路线。
+本文档只记录 `监督学习阶段` 的工程经验和排障结论，不重复 `AGENTS.md` 的通用规范，也不重复 `docs/agent/handoff.md` 的长期路线。
 
 ## 当前状态说明
 
-当前正式训练入口仍然是 `.\scripts\run_supervised.bat` 或 `python mortal/run_sl_formal.py`。`docs/status/supervised-verified-status.md` 负责记录人工核对后的当前口径，`docs/status/supervised-fidelity-results.md` 保留自动生成的 `fidelity / P0 / P1` 摘要，本文负责背景、排障、方法和试错过程。`2026-03-24` 之后需要额外注意：本文中凡是把 `C_B3z / C_B2z / C_A3x / C_A1x` 写成当前官方 `P0 top4` 或默认主线种子的表述，都只能视为泄露修复前的历史记录；修复 `old_regression` 泄露并 clean rerun `P0` 后，当前官方 `P1 entry top3` 已更新为 `C_A2y_cosine_broad_to_recent_strong_12m_6m`、`C_A2x_cosine_broad_to_recent_strong_24m_12m`、`C_A1x_cosine_broad_to_recent_mild_24m_12m`，以 `docs/agent/current-plan.md` 与 `docs/status/supervised-verified-status.md` 为准。当前代码下的 `监督学习阶段` 协议需要以 `AB1234/P0` 的全局联合筛选和重跑后的 `AB1` 复核结果为准。工程运行参数当前默认快路径为：`batch_size = 1024`、`num_workers = 4`、`file_batch_size = 10`、`prefetch_factor = 3`；正式训练验证节奏仍采用 `val_every_steps = 20000` 与 `monitor_val_batches = 512`，并关闭 `full_val_every_checks` 与 `old_regression_every_checks`。
+当前正式训练入口仍然是 `.\scripts\run_supervised.bat` 或 `python mortal/run_sl_formal.py`。`docs/status/supervised-mainline.md` 负责记录人工核对后的当前口径，`docs/status/supervised-fidelity-results.md` 保留自动生成的 `fidelity / P0 / P1` 摘要，本文负责背景、排障、方法和试错过程。`2026-03-24` 之后需要额外注意：本文中凡是把 `C_B3z / C_B2z / C_A3x / C_A1x` 写成当前官方 `P0 top4` 或默认主线种子的表述，都只能视为泄露修复前的历史记录；修复 `old_regression` 泄露并 clean rerun `P0` 后，当前官方 `P1 entry top3` 已更新为 `C_A2y_cosine_broad_to_recent_strong_12m_6m`、`C_A2x_cosine_broad_to_recent_strong_24m_12m`、`C_A1x_cosine_broad_to_recent_mild_24m_12m`，以 `docs/agent/handoff.md` 与 `docs/status/supervised-mainline.md` 为准。当前代码下的 `监督学习阶段` 协议需要以 `AB1234/P0` 的全局联合筛选和重跑后的 `AB1` 复核结果为准。工程运行参数当前默认快路径为：`batch_size = 1024`、`num_workers = 4`、`file_batch_size = 10`、`prefetch_factor = 3`；正式训练验证节奏仍采用 `val_every_steps = 20000` 与 `monitor_val_batches = 512`，并关闭 `full_val_every_checks` 与 `old_regression_every_checks`。
 
 CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现在正式训练和 A/B 如果没有手动设置 `MORTAL_CPU_AFFINITY`，就保持 Windows 默认调度；只有在明确做 `p_cores`、`all` 或 CPU 掩码对照实验时，才显式注入该环境变量。
 
@@ -152,7 +152,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
 
 - **全局权重 `opponent_state_weight`**
   - 默认主配置里是 `0.0`，表示默认并不打开这条辅助线。
-  - `P1` 搜索里如果需要打开它，非零权重不是拍脑袋给的，而是来自 `P1 calibration`：`opponent_state_weight = budget_ratio × opp_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 那轮更早期的 `0.064`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/current-plan.md`。
+  - `P1` 搜索里如果需要打开它，非零权重不是拍脑袋给的，而是来自 `P1 calibration`：`opponent_state_weight = budget_ratio × opp_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 那轮更早期的 `0.064`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/handoff.md`。
 - **巡目权重 `opponent_turn_weighting`**
   - 默认是 `0.20 / 1.00 / 1.60`。
   - 这一层确实来自统计，不是 calibration。证据同样在 `docs/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `opp_any_tenpai_rate = 0.0342 / 0.4078 / 0.8303`、`opp_any_near_rate = 0.2772 / 0.8721 / 0.9817`，说明“看懂别人”在早巡信息量有限，中后巡才快速变得关键，因此默认配置有明显的后巡抬升。
@@ -184,7 +184,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
 
 - **全局权重 `danger_weight`**
   - 默认主配置里也是 `0.0`，表示默认关闭。
-  - `P1` 搜索里如果需要打开它，非零权重同样来自 `P1 calibration`：`danger_weight = budget_ratio × danger_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 的 `0.144`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/current-plan.md`。
+  - `P1` 搜索里如果需要打开它，非零权重同样来自 `P1 calibration`：`danger_weight = budget_ratio × danger_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 的 `0.144`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/handoff.md`。
 - **巡目权重 `danger_turn_weighting`**
   - 默认是 `0.05 / 1.00 / 2.50`。
   - 这一层也来自统计，不是 calibration。对应证据同样写在 `docs/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `danger_state_has_any_rate = 0.0100 / 0.1650 / 0.4117`，`danger_positive_discard_rate_given_valid = 0.0014 / 0.0291 / 0.0909`。也就是说，早巡“立即放铳风险”几乎接近零，因此早巡默认大幅压低，后巡显著抬高。
@@ -214,7 +214,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
 - 每个 arm 都必须使用全新输出目录，不能复用旧日志目录
 - 选模规则按阶段拆开固定：
   - `P0 / P2 / formal checkpoint`：先按 `full_recent_loss <= best_loss + 0.003` 进入 eligible 集，再按 `selection_tiebreak_key` 排序，顺序为 `selection_quality_score -> -recent_loss -> -old_regression_loss`
-  - `P1 family / solo / pairwise / joint refine`：不再使用 `full_recent_loss` 做主门槛；唯一有效口径固定为 `docs/status/p1-selection-canonical.md`，即用 `comparison_recent_loss = recent_policy_loss` 过 `policy_quality` 门槛，再按同一 `selection_tiebreak_key` 比较；`full_recent_loss` 只保留为 aux tax / 总 loss 诊断字段
+  - `P1 family / solo / pairwise / joint refine`：不再使用 `full_recent_loss` 做主门槛；唯一有效口径固定为 `docs/status/supervised-mainline.md`，即用 `comparison_recent_loss = recent_policy_loss` 过 `policy_quality` 门槛，再按同一 `selection_tiebreak_key` 比较；`full_recent_loss` 只保留为 aux tax / 总 loss 诊断字段
   - 任何出现 `NaN`、缺失关键验证指标、训练提前崩溃、checkpoint 不完整的 arm 直接淘汰
 
 ### 总览

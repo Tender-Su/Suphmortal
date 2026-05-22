@@ -1,10 +1,7 @@
 import os
 from pathlib import Path
 
-try:
-    from .toml_utils import load_toml_file
-except ImportError:
-    from toml_utils import load_toml_file
+from mortal.core.toml_utils import load_toml_file
 
 
 PATH_KEYS = {
@@ -14,6 +11,9 @@ PATH_KEYS = {
     'best_loss_state_file',
     'best_acc_state_file',
     'best_state_file',
+    'oracle_critic_state_file',
+    'critic_state_file',
+    'pretrained_state_file',
     'tensorboard_dir',
     'log_dir',
     'file_index',

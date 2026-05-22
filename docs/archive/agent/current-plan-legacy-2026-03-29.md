@@ -3,7 +3,7 @@
 > Archive note (`2026-04-04`)：
 > 本文档只保留 `2026-03-29` 当时的阶段判断，不能当当前主线入口。
 > 其中 `监督学习阶段 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后，不读取任何 `P2` 输出。
-> 当前默认以 `docs/agent/current-plan.md`、`docs/agent/mainline.md`、`docs/status/supervised-verified-status.md`、`docs/status/p1-selection-canonical.md` 为准。
+> 当前默认以 `docs/agent/handoff.md` 与 `docs/status/supervised-mainline.md` 为准。
 
 本文档是 agent 的续工入口，只保留当前主线、已证实结论和待验证项，不再重复 `AGENTS.md` 的基础规范。
 
@@ -12,7 +12,7 @@
 - `AGENTS.md`：工程规范、架构常量、硬件假设、强约束
 - `README.md`：项目简介和快速启动
 - `docs/README.md`：给你看的文档总索引
-- `docs/status/supervised-verified-status.md`：人工核对后的当前运行状态
+- `docs/status/supervised-mainline.md`：人工核对后的当前监督学习主线结论
 - `docs/research/stage0/grp-experience.md`：`Stage 0` 的架构、精度与训练配置实验记录
 - `docs/research/supervised/engineering-playbook.md`：`监督学习阶段` 排障经验
 - `docs/status/supervised-fidelity-results.md`：监督学习阶段 `fidelity / P0 / P1` 的自动生成短结果
@@ -86,7 +86,7 @@
     - `P2`：`discard` 在 `all-last / threat / micro-gap / opponent-state` 下的专项 `nll`，以及 `push_fold_core / push_fold_extreme`
   - `old_regression` 只作为护栏
 - `P1` 的单辅助 / family / pairwise / joint refine 不再沿用上面的泛化 `loss-first` 简写口径：
-  - 唯一有效规范固定为 `docs/status/p1-selection-canonical.md`
+  - 唯一有效规范固定为 `docs/status/supervised-mainline.md`
   - 主门槛字段固定为 `comparison_recent_loss = recent_policy_loss`
   - `eligible` 必须按 `protocol_arm` 分组判断，而不是跨协议混排
   - `full_recent_loss` 在 `P1` 里只保留为 aux tax / 总 loss 诊断字段
@@ -143,7 +143,7 @@
   - `opp = shanten 0.8506568408 / tenpai 1.1493431592`（`HYBRID_GRAD`，保留旧 `1:1` 方案的总系数和为 `2.0` 语义）
   - `danger = 0.0904217947 / 0.8180402859 / 0.0915379194`（`18K_STAT`）
 - `2026-03-25` 这轮 `A2y` micro AB 也修正了口径：`P1` 的单辅助 winner 判定必须按 `policy_quality` 做，也就是用 `comparison_recent_loss = recent_policy_loss` 过门槛，再按 `selection_tiebreak_key` 比较；当前排序键已经收敛到 `selection_quality_score -> -recent_policy_loss -> -old_regression_policy_loss`，各类 `acc` 只保留为诊断字段；`full_recent_loss` 只保留为 aux tax 诊断字段，不再作为这类实验的主判胜口径
-- 上面这条 `policy_quality` 规则现在已经冻结为项目内唯一有效的 `P1` 口径；任何脚本、文档、人工总结或自动摘要若与它冲突，一律以 `docs/status/p1-selection-canonical.md` 与 `mortal/run_sl_fidelity.py` 为准
+- 上面这条 `policy_quality` 规则现在已经冻结为项目内唯一有效的 `P1` 口径；任何脚本、文档、人工总结或自动摘要若与它冲突，一律以 `docs/status/supervised-mainline.md` 与 `mortal/run_sl_fidelity.py` 为准
 - `2026-03-26` 新增了 `mortal/analyze_selection_heuristics.py` 的 selector 审计：在跨 `2009-2026` 的 `3240` 文件样本和现有多 seed `P1 solo` 结果上，确认 `policy_loss_epsilon = 0.003` 可以视为统计支持；`old_regression_policy_loss_epsilon` 与主门槛解绑，单独固定为 `0.0035`
 - 同一天又做了针对新 selector 语义的 `scenario_factor` 细搜：在正式搜索带 `0.0-0.25` 内，先看 pairwise 稳定性、再用 aggregate winner 一致率做次级筛选；最优点落在 `0.199`，因此把运行时默认值四舍五入到 `0.20`
 - `P1 calibration` 口径进一步升级为两层：

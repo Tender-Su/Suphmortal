@@ -3,13 +3,28 @@ REM Reinforcement learning phase: online PPO self-play training
 REM Resumes from [control].state_file when present; otherwise bootstraps from [online].init_state_file
 REM Set online = true in config.toml before running
 
+if not "%~1"=="" (
+    set "MORTAL_ORACLE_ARM=%~1"
+    if /i "%~1"=="current_config" (
+        if not "%~2"=="" set "MORTAL_ORACLE_ARTIFACT_SUFFIX=%~2"
+    ) else (
+        if "%~2"=="" (
+            set "MORTAL_ORACLE_ARTIFACT_SUFFIX=%~1"
+        ) else (
+            set "MORTAL_ORACLE_ARTIFACT_SUFFIX=%~2"
+        )
+    )
+    echo Oracle experiment arm: %MORTAL_ORACLE_ARM%
+    if defined MORTAL_ORACLE_ARTIFACT_SUFFIX echo Oracle artifact suffix: %MORTAL_ORACLE_ARTIFACT_SUFFIX%
+)
+
 echo Starting online PPO training...
-cd /d "%~dp0..\mortal"
+cd /d "%~dp0.."
 
 set "STATE_FILE="
 set "INIT_STATE_FILE="
-for /f "usebackq delims=" %%I in (`python -c "from config import config; print(config['control']['state_file'])"`) do set "STATE_FILE=%%I"
-for /f "usebackq delims=" %%I in (`python -c "from config import config; import train_online; print(train_online.resolve_online_init_state_file(config))"`) do set "INIT_STATE_FILE=%%I"
+for /f "usebackq delims=" %%I in (`python -c "from mortal.config import config; from mortal.eval.oracle_experiments import apply_oracle_experiment_to_config; apply_oracle_experiment_to_config(config); print(config['control']['state_file'])"`) do set "STATE_FILE=%%I"
+for /f "usebackq delims=" %%I in (`python -c "from mortal.config import config; from mortal.eval.oracle_experiments import apply_oracle_experiment_to_config; apply_oracle_experiment_to_config(config); from mortal.online import train_online; print(train_online.resolve_online_init_state_file(config))"`) do set "INIT_STATE_FILE=%%I"
 if not defined STATE_FILE (
     echo ERROR: Failed to resolve [control].state_file from config.toml
     exit /b 1
@@ -30,7 +45,7 @@ if defined INIT_STATE_FILE (
 
 :RUN_ONLINE
 
-python train_online.py
+python -m mortal.online.train_online
 if errorlevel 1 (
     echo ERROR: Online PPO training failed.
     exit /b 1

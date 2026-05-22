@@ -3,9 +3,9 @@ REM Stage 0: Train GRP (Game Result Predictor)
 REM Run this first before any other training stage
 
 echo Starting GRP training (Stage 0)...
-cd /d "%~dp0..\mortal"
+cd /d "%~dp0.."
 
-python train_grp.py
+python -m mortal.supervised.train_grp
 if errorlevel 1 (
     echo ERROR: GRP training failed.
     exit /b 1

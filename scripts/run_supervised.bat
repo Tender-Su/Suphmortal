@@ -3,9 +3,9 @@ REM Supervised phase: formal supervised training / protocol replay
 REM Default protocol arm is selected inside run_sl_formal.py; extra args are forwarded.
 
 echo Starting formal supervised training...
-cd /d "%~dp0..\mortal"
+cd /d "%~dp0.."
 
-python run_sl_formal.py %*
+python -m mortal.supervised.run_sl_formal %*
 if errorlevel 1 (
     echo ERROR: Formal supervised training failed.
     exit /b 1

@@ -4,14 +4,14 @@
 
 ## 当前状态
 
-- 监督学习阶段已完成，强化学习阶段方案定义进行中
-- canonical winner：`anchor*1.0`，canonical checkpoint：`./checkpoints/sl_canonical.pth`
-- 详见 `docs/status/supervised-verified-status.md`
+- 监督学习阶段已完成，活跃主线是在线 RL。
+- 当前接手摘要见 `docs/agent/handoff.md`。
+- 当前结论以 `docs/status/` 为准，根 README 不复制实验状态。
 
 ## 项目结构
 
 - `libriichi/`：Rust 麻将引擎、规则、特征提取、PyO3 扩展
-- `mortal/`：PyTorch 模型、训练脚本、A/B 工具、在线自博弈
+- `mortal/`：PyTorch 训练包，按 `core / data / supervised / online / eval / research / tests` 分层
 - `scripts/`：项目入口脚本与辅助工具
 - `checkpoints/`：模型权重与训练状态
 - `logs/`：实验日志与正式 run 产物
@@ -50,4 +50,7 @@ python -c "import libriichi; print('OK')"
 
 ## 文档入口
 
-Agent 读取顺序见 `CLAUDE.md`。人类快速导航见 `docs/README.md`。
+- 人类导航：`docs/README.md`
+- Agent 读取顺序：`docs/agent/README.md`
+- Agent 最小入口：`AGENTS.md`
+- `CLAUDE.md` 是兼容入口，应与 `AGENTS.md` 保持为同一文件

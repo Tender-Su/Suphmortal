@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import random
+import shutil
 import statistics
 import subprocess
 import threading
@@ -17,15 +18,16 @@ from typing import Any
 
 import torch
 
-MORTAL_DIR = Path(__file__).resolve().parents[1] / "mortal"
-if str(MORTAL_DIR) not in os.sys.path:
-    os.sys.path.insert(0, str(MORTAL_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in os.sys.path:
+    os.sys.path.insert(0, str(REPO_ROOT))
 
-from toml_utils import load_toml_file, write_toml_file
+from mortal.core.toml_utils import load_toml_file, write_toml_file
 
 
 TRAIN_RE = re.compile(r"TRAIN E1:\s*(\d+)batch .*? ([0-9.]+)batch/s")
 BAD_FILE_RE = re.compile(r"error when reading ([A-Za-z]:\\[^\r\n]+?\.json(?:\.gz)?)")
+POWERSHELL_EXE = shutil.which("pwsh") or shutil.which("powershell") or "pwsh"
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--glob-pattern", default="*.json")
     parser.add_argument("--output-root", default="logs/train_resource_probe")
     parser.add_argument("--python-exe", default=sys_executable())
-    parser.add_argument("--train-script", default="mortal/train_supervised.py")
+    parser.add_argument("--train-script", default="mortal.supervised.train_supervised")
     parser.add_argument("--num-workers", type=int, required=True)
     parser.add_argument("--file-batch-size", type=int, required=True)
     parser.add_argument("--prefetch-factor", type=int, required=True)
@@ -261,7 +263,7 @@ foreach ($entry in $instances.GetEnumerator()) {{
 """
     try:
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
+            [POWERSHELL_EXE, "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             check=False,
@@ -463,7 +465,11 @@ def main() -> None:
 
         env = os.environ.copy()
         env["MORTAL_CFG"] = str(config_path)
-        train_cmd = [args.python_exe, str((repo_root / args.train_script).resolve())]
+        train_target = str(args.train_script)
+        if train_target.endswith(".py") or "\\" in train_target or "/" in train_target:
+            train_cmd = [args.python_exe, str((repo_root / train_target).resolve())]
+        else:
+            train_cmd = [args.python_exe, "-m", train_target]
         proc = subprocess.Popen(
             train_cmd,
             cwd=repo_root,

@@ -1,6 +1,6 @@
 # 2026-03-22 监督学习阶段 进展快照
 
-> 历史快照说明：这份文档记录的是 `2026-03-22` 当时的阶段判断，不再等价于当前实时进度。最新续工口径以 `docs/agent/current-plan.md` 为准；人工核对后的当前状态以 `docs/status/supervised-verified-status.md` 为准；自动摘要以 `docs/status/supervised-fidelity-results.md` 为准；`P1` 的唯一有效选模规范以 `docs/status/p1-selection-canonical.md` 为准。
+> 历史快照说明：这份文档记录的是 `2026-03-22` 当时的阶段判断，不再等价于当前实时进度。最新续工口径以 `docs/agent/handoff.md` 为准；人工核对后的当前状态以 `docs/status/supervised-mainline.md` 为准；自动摘要以 `docs/status/supervised-fidelity-results.md` 为准；`P1` 的唯一有效选模规范以 `docs/status/supervised-mainline.md` 为准。
 > 当前额外说明（`2026-04-04`）：文中出现的 `监督学习阶段 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后。
 
 ## 2026-03-23 补充
@@ -10,7 +10,7 @@
   - `logs/sl_fidelity/sl_fidelity_main/p1_solo_round__s20261817.json`
   - `logs/sl_fidelity/sl_fidelity_main/p1_solo_round__s20262826.json`
 - 当前还没有 `p1_pairwise`、`p1_joint`、`p2` 或 `formal` 目录，因此 `P1 solo` 之后的阶段尚未启动
-- `docs/status/supervised-fidelity-results.md` 的自动摘要当前落后于原始产物；人工核对结论已单独移到 `docs/status/supervised-verified-status.md`
+- `docs/status/supervised-fidelity-results.md` 的自动摘要当前落后于原始产物；人工核对结论已单独移到 `docs/status/supervised-mainline.md`
 
 ## 这份文档解决什么问题
 

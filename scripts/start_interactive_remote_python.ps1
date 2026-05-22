@@ -11,17 +11,43 @@ param(
     [string]$TaskId,
     [Parameter(Mandatory = $true)]
     [string]$RuntimeRoot,
-    [string]$WindowTitle = 'MahjongAI Remote Task'
+    [string]$WindowTitle = 'MahjongAI Remote Task',
+    [switch]$WaitForStartOnly
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($PythonArgsBase64) {
-    $PythonArgsJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($PythonArgsBase64))
+function Convert-ArgsPayloadToList {
+    param(
+        [string]$ArgsJson,
+        [string]$ArgsBase64
+    )
+
+    if ($ArgsBase64) {
+        $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ArgsBase64))
+        if ($decoded.TrimStart().StartsWith('[')) {
+            return @(
+                ConvertFrom-Json -InputObject $decoded | ForEach-Object { [string]$_ }
+            )
+        }
+        if ($decoded.Length -eq 0) {
+            return @()
+        }
+        return @($decoded -split "`0", 0, 'SimpleMatch')
+    }
+
+    if ($ArgsJson) {
+        return @(
+            ConvertFrom-Json -InputObject $ArgsJson | ForEach-Object { [string]$_ }
+        )
+    }
+
+    return @()
 }
 
-if (-not $PythonArgsJson) {
-    throw 'PythonArgsJson/PythonArgsBase64 must provide a JSON string array payload'
+$pythonArgsList = Convert-ArgsPayloadToList -ArgsJson $PythonArgsJson -ArgsBase64 $PythonArgsBase64
+if ($pythonArgsList.Count -eq 0) {
+    throw 'PythonArgsJson/PythonArgsBase64 must provide at least one argument'
 }
 
 function Write-Utf8NoBomFile {
@@ -45,10 +71,12 @@ New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
 $launcherPath = Join-Path $RuntimeRoot 'interactive_launcher.ps1'
 $startedPath = Join-Path $RuntimeRoot 'started.json'
 $donePath = Join-Path $RuntimeRoot 'done.json'
+$stdoutPath = Join-Path $RuntimeRoot 'stdout.log'
+$stderrPath = Join-Path $RuntimeRoot 'stderr.log'
 $taskName = 'MahjongAI-WinnerRefine-' + $TaskId
 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-foreach ($path in @($startedPath, $donePath)) {
+foreach ($path in @($startedPath, $donePath, $stdoutPath, $stderrPath)) {
     if (Test-Path $path) {
         Remove-Item -LiteralPath $path -Force
     }
@@ -57,13 +85,20 @@ foreach ($path in @($startedPath, $donePath)) {
 $repoEscaped = $RepoRoot.Replace("'", "''")
 $pythonEscaped = $PythonExe.Replace("'", "''")
 $scriptEscaped = $PythonScript.Replace("'", "''")
-$argsEscaped = $PythonArgsJson.Replace("'", "''")
+$argsPayloadBase64Escaped = [Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes([string]::Join("`0", $pythonArgsList))
+).Replace("'", "''")
 $startedEscaped = $startedPath.Replace("'", "''")
 $doneEscaped = $donePath.Replace("'", "''")
+$stdoutEscaped = $stdoutPath.Replace("'", "''")
+$stderrEscaped = $stderrPath.Replace("'", "''")
 $windowEscaped = $WindowTitle.Replace("'", "''")
 
 $launcher = @"
 `$ErrorActionPreference = 'Stop'
+if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    `$PSNativeCommandUseErrorActionPreference = `$false
+}
 Set-Location '$repoEscaped'
 Add-Type -TypeDefinition @'
 using System;
@@ -100,17 +135,38 @@ try {
     `$startedPayload = @{
         task_id = '$TaskId'
         started_at = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        stdout_path = '$stdoutEscaped'
+        stderr_path = '$stderrEscaped'
     }
     (`$startedPayload | ConvertTo-Json -Compress) | Set-Content -LiteralPath '$startedEscaped' -Encoding UTF8
     `$Host.UI.RawUI.WindowTitle = '$windowEscaped'
     Disable-ConsoleQuickEdit
+    New-Item -ItemType File -Path '$stdoutEscaped' -Force | Out-Null
+    New-Item -ItemType File -Path '$stderrEscaped' -Force | Out-Null
+    `$pythonArgsPayload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$argsPayloadBase64Escaped'))
     `$pythonArgs = @()
-    foreach (`$item in (ConvertFrom-Json -InputObject '$argsEscaped')) {
-        `$pythonArgs += [string]`$item
+    if (`$pythonArgsPayload.Length -gt 0) {
+        foreach (`$item in (`$pythonArgsPayload -split "`0", 0, 'SimpleMatch')) {
+            `$pythonArgs += [string]`$item
+        }
     }
-    & '$pythonEscaped' '$scriptEscaped' @pythonArgs
-    `$exitCode = if (`$LASTEXITCODE -is [int]) { [int]`$LASTEXITCODE } else { 0 }
-    `$errorText = `$null
+    `$nativeExitCode = 0
+    `$previousErrorActionPreference = `$ErrorActionPreference
+    try {
+        # Direct native invocation is more reliable under ScheduledTask than
+        # Start-Process -NoNewWindow on the laptop host. Keep stderr as plain
+        # logs during the native run and redirect both streams to task files.
+        `$ErrorActionPreference = 'Continue'
+        & '$pythonEscaped' '$scriptEscaped' @pythonArgs 1>> '$stdoutEscaped' 2>> '$stderrEscaped'
+        if (`$LASTEXITCODE -is [int]) {
+            `$nativeExitCode = [int]`$LASTEXITCODE
+        }
+    }
+    finally {
+        `$ErrorActionPreference = `$previousErrorActionPreference
+    }
+    `$exitCode = `$nativeExitCode
+    `$errorText = if (`$nativeExitCode -eq 0) { `$null } else { "python exited with code `$nativeExitCode" }
 }
 catch {
     `$exitCode = 1
@@ -123,6 +179,8 @@ finally {
         finished_at = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         exit_code = `$exitCode
         error = `$errorText
+        stdout_path = '$stdoutEscaped'
+        stderr_path = '$stderrEscaped'
     }
     (`$donePayload | ConvertTo-Json -Compress) | Set-Content -LiteralPath '$doneEscaped' -Encoding UTF8
 }
@@ -138,9 +196,17 @@ catch {
 }
 
 $launcherCmdPath = $launcherPath.Replace('"', '""')
-$windowCmdTitle = $WindowTitle.Replace('"', '""')
-$actionArgs = '/c start "' + $windowCmdTitle + '" /max powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File "' + $launcherCmdPath + '"'
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument $actionArgs
+$shellExe = if (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue) {
+    'pwsh.exe'
+}
+elseif (Get-Command 'powershell.exe' -ErrorAction SilentlyContinue) {
+    'powershell.exe'
+}
+else {
+    throw 'neither pwsh.exe nor powershell.exe is available on the remote machine'
+}
+$actionArgs = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $launcherCmdPath + '"'
+$action = New-ScheduledTaskAction -Execute $shellExe -Argument $actionArgs
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 
@@ -153,6 +219,24 @@ while (-not (Test-Path $startedPath) -and -not (Test-Path $donePath)) {
         throw "interactive task `$taskName did not start within 60 seconds"
     }
     Start-Sleep -Seconds 2
+}
+
+if ($WaitForStartOnly) {
+    $startedPayload = if (Test-Path $startedPath) {
+        Get-Content -LiteralPath $startedPath -Raw | ConvertFrom-Json
+    }
+    else {
+        [pscustomobject]@{
+            task_id = $TaskId
+            started_at = $null
+        }
+    }
+    # Keep the scheduled task registered in wait-for-start mode. Reusing the
+    # same task name on the next launch will clean it up, and unregistering
+    # immediately can tear down the just-started interactive process on some
+    # machines.
+    Write-Output ($startedPayload | ConvertTo-Json -Compress)
+    exit 0
 }
 
 while (-not (Test-Path $donePath)) {

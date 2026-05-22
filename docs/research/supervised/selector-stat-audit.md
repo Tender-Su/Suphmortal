@@ -1,11 +1,11 @@
 # Selector 统计审计
 
-> 当前主线上下文见 `docs/agent/mainline.md` 与 `docs/research/supervised-evolution.md`。
+> 当前主线上下文见 `docs/agent/handoff.md` 与 `docs/research/supervised-evolution.md`。
 > 本文专门回答 selector 哪些部分已经有统计支持。
 
 这份文档记录 `2026-03-26` 对当前 selector 口径做的一次“哪些可以统计化、哪些仍需保留启发式”的核对结果。对应脚本是：
 
-- `mortal/analyze_selection_heuristics.py`
+- `mortal/research/analyze_selection_heuristics.py`
 - 输出：
   - `logs/selection_heuristic_audit.json`
   - `logs/selection_heuristic_audit.md`

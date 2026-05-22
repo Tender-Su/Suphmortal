@@ -11,7 +11,7 @@ class StopStage05FidelityTests(unittest.TestCase):
     def test_matches_explicit_run_name(self):
         command = (
             '"C:\\ProgramData\\anaconda3\\envs\\mortal\\python.exe" '
-            'mortal\\run_sl_fidelity.py --run-name experiment_a'
+            '-m mortal.supervised.run_sl_fidelity --run-name experiment_a'
         )
         self.assertTrue(stop_helper.command_targets_run(command, 'experiment_a'))
         self.assertFalse(stop_helper.command_targets_run(command, 'experiment_b'))
@@ -19,14 +19,14 @@ class StopStage05FidelityTests(unittest.TestCase):
     def test_matches_default_run_name_when_flag_is_omitted(self):
         command = (
             '"C:\\ProgramData\\anaconda3\\envs\\mortal\\python.exe" '
-            'mortal\\run_sl_fidelity.py --skip-formal'
+            '-m mortal.supervised.run_sl_fidelity --skip-formal'
         )
         self.assertTrue(stop_helper.command_targets_run(command, stop_helper.DEFAULT_RUN_NAME))
 
     def test_omitted_run_name_does_not_match_non_default_target(self):
         command = (
             '"C:\\ProgramData\\anaconda3\\envs\\mortal\\python.exe" '
-            'mortal\\run_sl_fidelity.py --skip-formal'
+            '-m mortal.supervised.run_sl_fidelity --skip-formal'
         )
         self.assertFalse(stop_helper.command_targets_run(command, 'custom_run'))
 

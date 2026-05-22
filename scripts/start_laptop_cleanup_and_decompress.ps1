@@ -13,7 +13,7 @@ $sshKey = Join-Path $HOME '.ssh\mahjong_laptop_ed25519'
 
 function Invoke-RemoteScript {
     param([string]$ScriptText)
-    $ScriptText | & ssh -i $sshKey "$User@$HostIp" "powershell -NoProfile -Command -"
+    $ScriptText | & ssh -i $sshKey "$User@$HostIp" "pwsh -NoProfile -Command -"
     if ($LASTEXITCODE -ne 0) {
         throw 'remote command failed'
     }
@@ -68,7 +68,7 @@ Write-Host 'CLEANUP_DONE'
 `$decompBody = @'
 `$ErrorActionPreference = 'Stop'
 Get-CimInstance Win32_Process | Where-Object {
-  (`$_.Name -in @('python.exe', 'powershell.exe')) -and (
+  (`$_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe')) -and (
     (`$_.CommandLine -like '*extract_data.py*') -or (`$_.CommandLine -like '*decompress_dataset_json.py*') -or (`$_.CommandLine -like '*laptop_rebuild_remote_*')
   )
 } | ForEach-Object {
@@ -83,8 +83,8 @@ Set-Content -Path `$decompRunner -Value `$decompBody -Encoding UTF8
 foreach (`$p in @(`$cleanupOut, `$cleanupErr, `$decompOut, `$decompErr)) {
   if (Test-Path `$p) { Remove-Item -LiteralPath `$p -Force }
 }
-`$cleanupProc = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', `$cleanupRunner) -RedirectStandardOutput `$cleanupOut -RedirectStandardError `$cleanupErr -WindowStyle Hidden -PassThru
-`$decompProc = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', `$decompRunner) -RedirectStandardOutput `$decompOut -RedirectStandardError `$decompErr -WindowStyle Hidden -PassThru
+`$cleanupProc = Start-Process pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', `$cleanupRunner) -RedirectStandardOutput `$cleanupOut -RedirectStandardError `$cleanupErr -WindowStyle Hidden -PassThru
+`$decompProc = Start-Process pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', `$decompRunner) -RedirectStandardOutput `$decompOut -RedirectStandardError `$decompErr -WindowStyle Hidden -PassThru
 Start-Sleep -Seconds 2
 Write-Output ('CLEANUP_RUNNER=' + `$cleanupRunner)
 Write-Output ('CLEANUP_OUT=' + `$cleanupOut)

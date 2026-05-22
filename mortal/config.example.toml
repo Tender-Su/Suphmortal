@@ -40,7 +40,19 @@ explore_rate = 1.0
 [test_play]
 enable = false
 games = 3000
+initial_enable = false
+initial_games = 600
 log_dir = '/path/to/test_play'
+
+[repro]
+enabled = false
+seed = 20260415
+strict_cuda = false
+allow_cudnn_benchmark = false
+# Optional fixed online self-play key. If omitted, it is derived from [repro].seed.
+# train_key = 123456789
+# Optional fixed start seed for online self-play batches.
+# train_seed_start = 10000
 
 [supervised]
 state_file = '/path/to/sl_latest.pth'
@@ -58,12 +70,12 @@ file_batch_size = 10
 val_file_batch_size = 8
 prefetch_factor = 3
 val_prefetch_factor = 5
-log_every = 1000
+log_every = 500
 max_epochs = 99
-max_steps = 30000
+max_steps = 60000
 min_epochs = 2
-val_every_steps = 20000
-monitor_val_batches = 512
+val_every_steps = 10000
+monitor_val_batches = 1024
 full_val_every_checks = 0
 old_regression_every_checks = 0
 force_safe_training = false
@@ -77,8 +89,6 @@ min_val_files = 64
 max_train_files = 0
 max_val_files = 0
 seed = 20260308
-enable_oracle = false
-validation_use_oracle = false
 
 [supervised.scheduler]
 type = 'plateau' # plateau | cosine
@@ -91,6 +101,11 @@ cooldown = 0
 min_lr = 1e-6
 final = 1e-5
 max_steps = 0
+
+[supervised.gradient_calibration]
+enabled = true
+split = 'full_recent'
+max_batches = 8
 
 [supervised.rank_aux]
 base_weight = 0.03
@@ -129,6 +144,45 @@ num_blocks = 40
 [env]
 pts = [6.0, 4.0, 2.0, 0.0]
 
+[oracle_critic_pretrain]
+run_name = 'oracle_critic_score_rank_mc_bridge'
+state_file = '/path/to/oracle_critic_latest.pth'
+best_state_file = '/path/to/oracle_critic_best.pth'
+tensorboard_dir = '/path/to/tb_log_oracle_critic'
+metrics_file = '/path/to/oracle_critic_metrics.jsonl'
+file_index = '/path/to/file_index_oracle_critic_json.pth'
+init_state_file = '/path/to/sl_canonical.pth'
+target_mode = 'all_players'
+return_mode = 'score_rank_mc'
+discount_gamma = 0.999
+train_scope = 'oracle_input_value'
+batch_size = 512
+num_workers = 4
+val_num_workers = 0
+file_batch_size = 10
+val_file_batch_size = 8
+prefetch_factor = 3
+val_prefetch_factor = 5
+log_every = 100
+save_every = 1000
+val_every_steps = 2000
+val_batches = 256
+max_steps = 100000
+val_ratio = 0.02
+min_val_files = 64
+max_val_files = 512
+max_train_files = 0
+num_epochs = 1
+seed = 20260416
+zero_sum_weight = 0.01
+
+[oracle_critic_pretrain.scheduler]
+peak = 5e-5
+final = 1e-5
+warm_up_steps = 2000
+max_steps = 100000
+init = 1e-8
+
 ## These hyperparameters are merely the default values and do not imply that they are optimal.
 [policy]
 awr_beta = 1.0
@@ -136,6 +190,14 @@ awr_clip = 100
 entropy_weight = 1e-3
 clip_ratio = 0.2
 dual_clip  = 3.0
+online_action_scope = 'all'
+logit_thres = 0.0
+importance_rho_clip = 0.0
+importance_c_clip = 0.0
+entropy_floor = 0.0
+entropy_floor_start_step = 0
+entropy_target = 0.0   # legacy alias for entropy_floor
+entropy_adjust_rate = 0.0
 
 [aux]
 next_rank_weight = 0.2
@@ -181,16 +243,121 @@ max_steps = 0
 device = 'cuda:0'
 enable_compile = false
 state_file = '/path/to/baseline.pth'
+champion_state_file = '/path/to/baseline_current_champion.pth'
+anchor_state_file = '/path/to/baseline_stable_anchor.pth'
+history_state_files = []
+champion_prob = 0.50
+anchor_prob = 0.25
+history_prob = 0.25
+reload_each_session = true
+# Optional deterministic sampling seed for reproducible smoke runs.
+# pool_seed = 20260414
+
+[baseline.train_presets.validation]
+device = 'cuda:0'
+enable_compile = false
+state_file = './checkpoints/opponent_pool/baseline_anchor_legacy.pth'
+champion_state_file = './checkpoints/opponent_pool/sl_canonical_supervised_champion.pth'
+anchor_state_file = './checkpoints/opponent_pool/baseline_anchor_legacy.pth'
+history_state_files = ['./checkpoints/opponent_pool/rl1_aux_only_500_20260415_best.pth']
+champion_prob = 0.20
+anchor_prob = 0.70
+history_prob = 0.10
+reload_each_session = true
+
+[baseline.train_presets.formal]
+device = 'cuda:0'
+enable_compile = false
+state_file = './checkpoints/opponent_pool/baseline_anchor_legacy.pth'
+champion_state_file = './checkpoints/opponent_pool/rl1_vgi_500_validation_20260416_best.pth'
+anchor_state_file = './checkpoints/opponent_pool/baseline_anchor_legacy.pth'
+history_state_files = [
+  './checkpoints/opponent_pool/sl_canonical_supervised_champion.pth',
+  './checkpoints/opponent_pool/rl1_aux_only_500_20260415_best.pth',
+  './checkpoints/opponent_pool/rl1_mortal_policy_smoke_4k_20260411_best.pth',
+]
+champion_prob = 0.50
+anchor_prob = 0.25
+history_prob = 0.25
+reload_each_session = true
 
 [baseline.test]
 device = 'cuda:0'
 enable_compile = false
 state_file = '/path/to/baseline.pth'
 
+[value]
+enabled = true
+weight = 0.05
+# auto: Oracle critic -> all_players, visible critic -> current_player
+target_mode = 'auto'
+# auto default in code: Oracle critic -> score_rank, visible critic -> grp
+reward_source = 'score_rank'
+zero_sum_weight = 0.01
+oracle_critic = true
+oracle_critic_state_file = '/path/to/oracle_critic_best.pth'
+
+[oracle_guiding]
+actor_enabled = false
+actor_source = 'true'
+schedule = 'linear'
+gamma_start = 1.0
+gamma_end = 0.0
+hold_steps = 0
+decay_steps = 200000
+continuation_lr_scale = 0.1
+importance_weight_threshold = 4.0
+
+[oracle_experiments]
+default_arm = 'current_config'
+suffix_artifacts = true
+
+[oracle_dependency_eval]
+enabled = false
+modes = ['true', 'zero', 'shuffled']
+log_dir = './logs/oracle_dependency'
+
+[search]
+enabled = true
+top_k = 5
+belief_samples = 8
+planner_blend = 0.65
+score_temperature = 0.85
+min_policy_entropy = 1.15
+min_margin = 0.08
+min_opp_tenpai_prob = 0.30
+min_danger_prob = 0.22
+risk_weight = 1.30
+variance_weight = 0.35
+tile_eff_weight = 0.20
+hand_value_weight = 0.18
+call_regret_weight = 0.22
+riichi_bonus = 0.06
+agari_bonus = 0.60
+pass_bonus = 0.05
+safe_discard_bias = 0.08
+hard_entropy_min = 1.05
+hard_margin_max = 0.06
+hard_danger_min = 0.28
+
+[search_distill]
+enabled = true
+weight = 0.03
+hard_only = true
+min_teacher_gap = 0.03
+
 [online]
 history_window = 50
 enable_compile = false
 init_state_file = '/path/to/sl_canonical.pth'
+stop_at_max_steps = true
+
+[online.importance_sampling]
+enabled = true
+max_policy_versions = 8
+drop_untracked_samples = false
+vtrace_mode = 'auto'
+vtrace_min_version_gap = 2
 
 [online.remote]
 host = '127.0.0.1'

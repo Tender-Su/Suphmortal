@@ -4,6 +4,10 @@
 
 ## 当前条目
 
+- `2026-04-10-human-value-in-oracle-ablation.md`
+  - 这轮 actor Oracle 争议里，人类真正的价值为什么在于提出结构性质疑，并把它逼成可证伪实验
+- `2026-04-09-lookahead-oracle-bridge-review.md`
+  - 围绕 Suphx `look-ahead / Oracle actor / distillation / Oracle critic / bridge 初始化` 的集中复盘
 - `2026-04-06-supervised-oracle-retirement.md`
   - 为什么监督学习 Oracle 最终被放弃、这轮讨论里人类与 agent 各自擅长什么
 - `2026-03-30-p1-protocol-decide-closeout.md`

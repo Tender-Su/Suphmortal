@@ -3,17 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 
 
 DEFAULT_RUN_NAME = 'sl_fidelity_main'
+FIDELITY_COMMAND_RE = re.compile(
+    r'(run_sl_fidelity\.py|mortal\.supervised\.run_sl_fidelity|mortal\\supervised\\run_sl_fidelity\.py|mortal/supervised/run_sl_fidelity\.py)'
+)
 RUN_NAME_FLAG_RE = re.compile(r'--run-name(?:\s+|=)(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
 RUN_NAME_FLAG_PRESENT_RE = re.compile(r'--run-name(?:\s|=)')
+POWERSHELL_EXE = shutil.which('pwsh') or shutil.which('powershell') or 'pwsh'
 
 
 def command_targets_run(command_line: str | None, run_name: str) -> bool:
-    if not command_line or 'run_sl_fidelity.py' not in command_line:
+    if not command_line or FIDELITY_COMMAND_RE.search(command_line) is None:
         return False
     match = RUN_NAME_FLAG_RE.search(command_line)
     if match is not None:
@@ -26,12 +31,12 @@ def query_sl_processes() -> list[dict[str, object]]:
     command = (
         "$procs = Get-CimInstance Win32_Process | Where-Object { "
         + "$_.Name -match '^python(\\.exe)?$' -and "
-        + "$_.CommandLine -match 'run_sl_fidelity\\.py' "
+        + "($_.CommandLine -match 'run_sl_fidelity\\.py' -or $_.CommandLine -match 'mortal\\.supervised\\.run_sl_fidelity') "
         + "}; "
         + "$procs | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
     )
     result = subprocess.run(
-        ['powershell', '-NoProfile', '-Command', command],
+        [POWERSHELL_EXE, '-NoProfile', '-Command', command],
         capture_output=True,
         text=True,
         check=False,
