@@ -132,6 +132,53 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             script,
         )
 
+    def test_launch_remote_task_maps_runtime_paths_to_remote_repo(self):
+        worker = formal_dist.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python=r'C:\Python\python.exe',
+            host='mahjong-laptop',
+            repo=r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            ssh_key=None,
+        )
+        task_state = {
+            'task_id': 'formal__anchor',
+            'candidate_arm': 'anchor',
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(
+                formal_dist,
+                'REPO_ROOT',
+                Path(tmp_dir),
+            ),
+            patch.object(
+                formal_dist,
+                'build_remote_interactive_window_command',
+                return_value=[sys.executable, '-c', 'pass'],
+            ) as build_command,
+        ):
+            dispatch_root = Path(tmp_dir) / 'logs' / 'sl_fidelity' / 'run' / 'distributed' / 'formal_dispatch'
+            active = formal_dist.launch_remote_task(
+                worker,
+                run_name='run',
+                task_state=task_state,
+                dispatch_root=dispatch_root,
+                launch_mode='interactive_window',
+                formal_overrides=None,
+            )
+            active.process.wait(timeout=10)
+
+        self.assertIn(
+            r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            str(build_command.call_args.kwargs['remote_result_path']),
+        )
+        self.assertIn(
+            r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            str(build_command.call_args.kwargs['remote_runtime_root']),
+        )
+
     def test_load_source_context_builds_child_run_names_from_explicit_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             fidelity_root = Path(tmp_dir)

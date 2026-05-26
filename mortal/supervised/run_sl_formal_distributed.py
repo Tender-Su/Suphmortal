@@ -973,8 +973,9 @@ def launch_remote_task(
     launch_mode: str,
     formal_overrides: dict[str, int] | None,
 ) -> ActiveTask:
-    remote_results_dir = dispatch_root / 'remote_results'
-    remote_runtime_dir = dispatch_root / 'remote_runtime' / str(task_state['task_id'])
+    remote_dispatch_root = map_repo_path_to_remote(dispatch_root, remote_repo=worker.repo or str(REPO_ROOT))
+    remote_results_dir = remote_dispatch_root / 'remote_results'
+    remote_runtime_dir = remote_dispatch_root / 'remote_runtime' / str(task_state['task_id'])
     local_results_dir = ensure_dir(dispatch_root / 'results')
     logs_dir = ensure_dir(dispatch_root / 'logs')
     remote_result_path = remote_results_dir / f'{task_state["task_id"]}.json'
