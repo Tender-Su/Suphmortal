@@ -26,9 +26,12 @@ function Convert-ArgsPayloadToList {
     if ($ArgsBase64) {
         $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ArgsBase64))
         if ($decoded.TrimStart().StartsWith('[')) {
-            return @(
-                ConvertFrom-Json -InputObject $decoded | ForEach-Object { [string]$_ }
-            )
+            $items = ConvertFrom-Json -InputObject $decoded
+            $result = @()
+            foreach ($item in $items) {
+                $result += [string]$item
+            }
+            return $result
         }
         if ($decoded.Length -eq 0) {
             return @()
@@ -37,9 +40,12 @@ function Convert-ArgsPayloadToList {
     }
 
     if ($ArgsJson) {
-        return @(
-            ConvertFrom-Json -InputObject $ArgsJson | ForEach-Object { [string]$_ }
-        )
+        $items = ConvertFrom-Json -InputObject $ArgsJson
+        $result = @()
+        foreach ($item in $items) {
+            $result += [string]$item
+        }
+        return $result
     }
 
     return @()
