@@ -1253,7 +1253,7 @@ def build_remote_interactive_window_command(
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or DEFAULT_REMOTE_HOST)
-    command.append(ps_command)
+    command.extend(dispatch.remote_powershell_command_args(ps_command))
     return command
 
 
@@ -1396,7 +1396,7 @@ def interrupt_remote_active_task(active: ActiveTask) -> None:
     if active.worker.ssh_key:
         command.extend(['-i', active.worker.ssh_key])
     command.append(active.worker.host or DEFAULT_REMOTE_HOST)
-    command.append(kill_command)
+    command.extend(dispatch.remote_powershell_command_args(kill_command))
     try:
         subprocess.run(
             command,

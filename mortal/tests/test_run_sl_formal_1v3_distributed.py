@@ -343,6 +343,26 @@ class Formal1v3DistributedTests(unittest.TestCase):
         self.assertEqual('laptop', payload['machine_label'])
         self.assertEqual(640, payload['seed_count_per_iter'])
 
+    def test_remote_budget_command_uses_explicit_powershell(self):
+        worker = formal_1v3.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python=r'C:\Python\python.exe',
+            host='mahjong-laptop',
+            repo=r'C:\Users\numbe\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+        )
+
+        command = formal_1v3.build_remote_budget_command(
+            worker,
+            frozen_1v3_cfg={'challenger': {'device': 'cuda:0'}},
+        )
+
+        self.assertEqual('ssh', command[0])
+        self.assertIn('powershell', command)
+        self.assertIn('-NoProfile', command)
+        self.assertIn('-Command', command)
+
     def test_close_call_from_ranking_uses_avg_pt_primary(self):
         close = formal_1v3.close_call_from_ranking(
             [

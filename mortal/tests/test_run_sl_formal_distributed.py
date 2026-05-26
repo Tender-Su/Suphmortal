@@ -95,6 +95,42 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             )
         )
 
+    def test_remote_interactive_window_command_uses_explicit_powershell(self):
+        worker = formal_dist.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python=r'C:\Python\python.exe',
+            host='mahjong-laptop',
+            repo=r'C:\Users\numbe\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+        )
+        command = formal_dist.build_remote_interactive_window_command(
+            worker=worker,
+            run_name='demo_run',
+            task_state={
+                'task_id': 'formal__anchor',
+                'candidate_arm': 'anchor',
+            },
+            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
+            remote_runtime_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\runtime\formal__anchor'),
+            formal_overrides={
+                'num_workers': 4,
+                'file_batch_size': 10,
+                'prefetch_factor': 4,
+                'val_file_batch_size': 7,
+                'val_prefetch_factor': 5,
+            },
+        )
+
+        self.assertEqual('ssh', command[0])
+        self.assertIn('powershell', command)
+        self.assertIn('-NoProfile', command)
+        self.assertIn('-Command', command)
+        self.assertIn(
+            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
+            command[-1],
+        )
+
     def test_load_source_context_builds_child_run_names_from_explicit_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             fidelity_root = Path(tmp_dir)

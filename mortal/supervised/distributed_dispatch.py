@@ -50,6 +50,10 @@ def quote_ps(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def remote_powershell_command_args(script: str) -> list[str]:
+    return ['powershell', '-NoProfile', '-Command', script]
+
+
 def path_to_scp_remote(path: str | Path) -> str:
     text = str(path).replace('\\', '/')
     if len(text) >= 2 and text[1] == ':':
@@ -140,7 +144,7 @@ def build_remote_python_command(
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or DEFAULT_REMOTE_HOST)
-    command.append(ps_command)
+    command.extend(remote_powershell_command_args(ps_command))
     return command
 
 

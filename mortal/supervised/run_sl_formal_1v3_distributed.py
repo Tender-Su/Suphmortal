@@ -111,7 +111,7 @@ def run_remote_powershell(
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or common_dispatch.DEFAULT_REMOTE_HOST)
-    command.append(script)
+    command.extend(dispatch.remote_powershell_command_args(script))
     return subprocess.run(
         command,
         stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
@@ -794,7 +794,7 @@ def build_remote_budget_command(worker: WorkerSpec, *, frozen_1v3_cfg: dict[str,
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or common_dispatch.DEFAULT_REMOTE_HOST)
-    command.append(ps_command)
+    command.extend(dispatch.remote_powershell_command_args(ps_command))
     return command
 
 
@@ -1975,7 +1975,7 @@ def build_remote_interactive_window_command(
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or common_dispatch.DEFAULT_REMOTE_HOST)
-    command.append(ps_command)
+    command.extend(dispatch.remote_powershell_command_args(ps_command))
     return command
 
 

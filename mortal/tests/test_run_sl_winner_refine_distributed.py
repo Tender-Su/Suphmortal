@@ -159,6 +159,9 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py",
             command[-1],
         )
+        self.assertIn('powershell', command)
+        self.assertIn('-NoProfile', command)
+        self.assertIn('-Command', command)
 
     def test_build_remote_interactive_window_command_uses_helper_script(self):
         worker = dispatch_module.WorkerSpec(
@@ -195,6 +198,9 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
             command[-1],
         )
+        self.assertIn('powershell', command)
+        self.assertIn('-NoProfile', command)
+        self.assertIn('-Command', command)
         self.assertIn('-PythonArgsBase64', command[-1])
         self.assertIn('Remove-Item -LiteralPath', command[-1])
 
