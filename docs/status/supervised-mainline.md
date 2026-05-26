@@ -173,6 +173,36 @@
   - 台式机单条约 `4.5 h`
   - 笔记本单条约 `11.2 h`
 
+## Long-ABC v2 计划
+
+- 目标：重新从头训练 `anchor*1.0`，不从 `sl_canonical.pth` 续训。
+- 选择 `anchor*1.0` 的原因：
+  - `anchor` 的辅助头配比来自 P1 坐标搜索：`rank / opp / danger = 0.43 / 0.21 / 0.36`
+  - 它不是临时 baseline，而是当前 `A2x` 协议内的平衡配方
+  - 旧 formal triplet 最终由 `formal_1v3` 选出 `anchor*1.0`
+- 当前训练量判断：
+  - 旧 formal 总量 `90k` steps，batch `1024`
+  - `phase_c/file_index.pth` 训练文件数约 `1.98M`
+  - 抽样估算全训练集约 `1.27M` batch，因此旧 formal 约等于 `0.07 epoch`
+  - 旧 full-recent envelope 的粗拟合显示 `90k` 已接近短窗可见收益平台，但该拟合只覆盖 `0.07 epoch`，容易低估长训收益
+- 第一轮不直接拉满 `1 epoch`；先做能显著验证长训收益曲线的中长窗：
+  - 推荐 `formal_step_scale = 8`
+  - 对应 `phase_a / phase_b / phase_c = 144000 / 96000 / 48000`
+  - 总量 `288k` steps，约 `0.23 epoch`
+- 若第一轮在 `full_recent loss / action_score / selection_score / formal_1v3` 上有明确正收益，再上第二轮：
+  - `formal_step_scale = 17.5`
+  - 对应 `phase_a / phase_b / phase_c = 315000 / 210000 / 105000`
+  - 总量 `630k` steps，约 `0.50 epoch`
+- `formal_step_scale = 35` 已核对：
+  - 对应 `phase_a / phase_b / phase_c = 630000 / 420000 / 210000`
+  - 总量 `1.26M` steps，约 `1 epoch`
+  - 暂作为第三轮或第二轮强信号后的 full run，不作为第一轮默认
+- 调度纪律：
+  - 长训放笔记本跑，使用 formal dispatch 的 `--remote-only`
+  - 台式机继续用当前 `sl_canonical.pth` 做 RL 探索
+  - 长训产物未通过 `formal_1v3` 前不得覆盖 `sl_canonical.pth`
+  - 通过后再发布为第二版 supervised canonical
+
 ## 当前证据路径
 
 - 当前活跃监督学习 source run：

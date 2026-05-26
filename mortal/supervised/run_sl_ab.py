@@ -511,6 +511,7 @@ def transient_training_failure_marker(log_path: Path, *, start_offset: int = 0) 
 def run_training(cfg_path: Path, log_path: Path) -> None:
     env = os.environ.copy()
     env['MORTAL_CFG'] = str(cfg_path)
+    env.setdefault('MORTAL_TQDM_DISABLE', '1')
     affinity = os.environ.get(AFFINITY_ENV_VAR)
     if affinity is not None:
         env[AFFINITY_ENV_VAR] = affinity

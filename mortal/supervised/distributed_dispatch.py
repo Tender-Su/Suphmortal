@@ -81,6 +81,7 @@ def summarize_task_status(tasks: dict[str, dict[str, Any]]) -> dict[str, int]:
 def build_workers(
     *,
     enable_remote: bool,
+    enable_local: bool = True,
     local_python: str,
     local_label: str,
     remote_host: str,
@@ -89,13 +90,15 @@ def build_workers(
     remote_label: str,
     ssh_key: str | None,
 ) -> list[WorkerSpec]:
-    workers = [
-        WorkerSpec(
-            kind='local',
-            label=local_label,
-            python=local_python,
+    workers = []
+    if enable_local:
+        workers.append(
+            WorkerSpec(
+                kind='local',
+                label=local_label,
+                python=local_python,
+            )
         )
-    ]
     if enable_remote:
         workers.append(
             WorkerSpec(
@@ -107,6 +110,8 @@ def build_workers(
                 ssh_key=ssh_key,
             )
         )
+    if not workers:
+        raise ValueError('at least one dispatch worker must be enabled')
     return workers
 
 

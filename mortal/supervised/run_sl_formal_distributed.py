@@ -1166,6 +1166,8 @@ def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
 
 
 def run_dispatch(args: argparse.Namespace) -> int:
+    if args.local_only and args.remote_only:
+        raise ValueError('--local-only and --remote-only are mutually exclusive')
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     lock_path = fidelity.acquire_run_lock(run_dir, args.run_name)
@@ -1198,6 +1200,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
             write_dispatch_state(dispatch_state_path, dispatch_state)
         workers = common_dispatch.build_workers(
             enable_remote=not args.local_only,
+            enable_local=not args.remote_only,
             local_python=args.local_python,
             local_label=args.local_label,
             remote_host=args.remote_host,
@@ -1210,14 +1213,14 @@ def run_dispatch(args: argparse.Namespace) -> int:
             control_state = common_dispatch.load_dispatch_control(dispatch_control_path)
         else:
             control_state = common_dispatch.initialize_dispatch_control_state(
-                local_label=args.local_label,
+                local_label=None if args.remote_only else args.local_label,
                 remote_label=None if args.local_only else args.remote_label,
                 remote_launch_mode=args.remote_launch_mode,
             )
             common_dispatch.write_dispatch_control(dispatch_control_path, control_state)
         if common_dispatch.ensure_control_state_workers(
             control_state=control_state,
-            local_label=args.local_label,
+            local_label=None if args.remote_only else args.local_label,
             remote_label=None if args.local_only else args.remote_label,
             remote_launch_mode=args.remote_launch_mode,
         ):
@@ -1235,7 +1238,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
             control_state = common_dispatch.load_dispatch_control(dispatch_control_path)
             if common_dispatch.ensure_control_state_workers(
                 control_state=control_state,
-                local_label=args.local_label,
+                local_label=None if args.remote_only else args.local_label,
                 remote_label=None if args.local_only else args.remote_label,
                 remote_launch_mode=args.remote_launch_mode,
             ):
@@ -1397,6 +1400,11 @@ def parse_args() -> argparse.Namespace:
     dispatch_cmd.add_argument('--seed-offset', type=int, default=DEFAULT_FORMAL_SEED_OFFSET)
     dispatch_cmd.add_argument('--formal-step-scale', type=float, default=DEFAULT_FORMAL_STEP_SCALE)
     dispatch_cmd.add_argument('--local-only', action='store_true')
+    dispatch_cmd.add_argument(
+        '--remote-only',
+        action='store_true',
+        help='dispatch tasks only to the remote worker; keep the local desktop free',
+    )
     dispatch_cmd.add_argument('--local-python', default=sys.executable)
     dispatch_cmd.add_argument('--local-label', default=common_dispatch.hostname_fallback())
     dispatch_cmd.add_argument('--remote-host', default=common_dispatch.DEFAULT_REMOTE_HOST)

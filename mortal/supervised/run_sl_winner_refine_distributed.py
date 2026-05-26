@@ -165,17 +165,17 @@ def write_dispatch_state(path: Path, payload: dict[str, Any]) -> None:
 
 def initialize_dispatch_control_state(
     *,
-    local_label: str,
+    local_label: str | None,
     remote_label: str | None,
     remote_launch_mode: str,
 ) -> dict[str, Any]:
-    workers = {
-        local_label: {
+    workers = {}
+    if local_label:
+        workers[local_label] = {
             'kind': 'local',
             'paused': False,
             'interrupt_requested': False,
         }
-    }
     if remote_label:
         workers[remote_label] = {
             'kind': 'remote',
@@ -203,24 +203,25 @@ def write_dispatch_control(path: Path, payload: dict[str, Any]) -> None:
 def ensure_control_state_workers(
     *,
     control_state: dict[str, Any],
-    local_label: str,
+    local_label: str | None,
     remote_label: str | None,
     remote_launch_mode: str,
 ) -> bool:
     workers = control_state.setdefault('workers', {})
     changed = False
-    local = workers.get(local_label)
-    if not isinstance(local, dict):
-        workers[local_label] = {
-            'kind': 'local',
-            'paused': False,
-            'interrupt_requested': False,
-        }
-        changed = True
-    else:
-        local.setdefault('kind', 'local')
-        local.setdefault('paused', False)
-        local.setdefault('interrupt_requested', False)
+    if local_label:
+        local = workers.get(local_label)
+        if not isinstance(local, dict):
+            workers[local_label] = {
+                'kind': 'local',
+                'paused': False,
+                'interrupt_requested': False,
+            }
+            changed = True
+        else:
+            local.setdefault('kind', 'local')
+            local.setdefault('paused', False)
+            local.setdefault('interrupt_requested', False)
     if remote_label:
         remote = workers.get(remote_label)
         if not isinstance(remote, dict):
@@ -2314,6 +2315,7 @@ def handle_finished_task(
 def build_workers(
     *,
     enable_remote: bool,
+    enable_local: bool = True,
     local_python: str,
     local_label: str,
     remote_host: str,
@@ -2324,6 +2326,7 @@ def build_workers(
 ) -> list[WorkerSpec]:
     return dispatch.build_workers(
         enable_remote=enable_remote,
+        enable_local=enable_local,
         local_python=local_python,
         local_label=local_label,
         remote_host=remote_host,

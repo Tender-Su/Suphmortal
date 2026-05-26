@@ -48,6 +48,53 @@ def make_candidate_entry(
 
 
 class RunStage05FormalDistributedTests(unittest.TestCase):
+    def test_formal_step_scale_35_matches_one_epoch_long_abc_budget(self):
+        phase_steps = formal_dist.formal.FORMAL_DEFAULTS['phase_steps']
+
+        scaled = {
+            phase: int(round(steps * 35.0))
+            for phase, steps in phase_steps.items()
+        }
+
+        self.assertEqual(
+            {'phase_a': 630000, 'phase_b': 420000, 'phase_c': 210000},
+            scaled,
+        )
+
+    def test_remote_only_builds_only_remote_worker(self):
+        workers = formal_dist.common_dispatch.build_workers(
+            enable_remote=True,
+            enable_local=False,
+            local_python='local-python',
+            local_label='desktop',
+            remote_host='mahjong-laptop',
+            remote_repo=r'C:\Users\numbe\Desktop\MahjongAI',
+            remote_python=r'C:\Users\numbe\miniconda3\envs\mortal\python.exe',
+            remote_label='laptop',
+            ssh_key=None,
+        )
+
+        self.assertEqual(['remote'], [worker.kind for worker in workers])
+        self.assertEqual(['laptop'], [worker.label for worker in workers])
+
+    def test_remote_only_control_state_omits_local_worker(self):
+        control_state = formal_dist.common_dispatch.initialize_dispatch_control_state(
+            local_label=None,
+            remote_label='laptop',
+            remote_launch_mode='interactive_window',
+        )
+
+        self.assertNotIn('desktop', control_state['workers'])
+        self.assertEqual({'laptop'}, set(control_state['workers']))
+        self.assertFalse(
+            formal_dist.common_dispatch.ensure_control_state_workers(
+                control_state=control_state,
+                local_label=None,
+                remote_label='laptop',
+                remote_launch_mode='interactive_window',
+            )
+        )
+
     def test_load_source_context_builds_child_run_names_from_explicit_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             fidelity_root = Path(tmp_dir)

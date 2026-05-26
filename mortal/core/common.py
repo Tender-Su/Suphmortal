@@ -1,3 +1,4 @@
+import os
 import torch
 import socket
 import struct
@@ -8,7 +9,20 @@ from functools import partial
 from tqdm.auto import tqdm as orig_tqdm
 from mortal.config import config
 
-tqdm = partial(orig_tqdm, unit='batch', dynamic_ncols=True, ascii=True)
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+tqdm = partial(
+    orig_tqdm,
+    unit='batch',
+    dynamic_ncols=True,
+    ascii=True,
+    disable=_env_flag('MORTAL_TQDM_DISABLE', False),
+)
 
 def parameter_count(module):
     return sum(p.numel() for p in module.parameters() if p.requires_grad)
