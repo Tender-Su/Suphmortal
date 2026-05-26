@@ -361,7 +361,7 @@ class Formal1v3DistributedTests(unittest.TestCase):
         self.assertEqual('ssh', command[0])
         self.assertIn('powershell', command)
         self.assertIn('-NoProfile', command)
-        self.assertIn('-Command', command)
+        self.assertIn('-EncodedCommand', command)
 
     def test_close_call_from_ranking_uses_avg_pt_primary(self):
         close = formal_1v3.close_call_from_ranking(

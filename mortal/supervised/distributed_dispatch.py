@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import socket
 import subprocess
 import sys
@@ -51,7 +52,12 @@ def quote_ps(value: str) -> str:
 
 
 def remote_powershell_command_args(script: str) -> list[str]:
-    return ['powershell', '-NoProfile', '-Command', script]
+    encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
+    return ['powershell', '-NoProfile', '-EncodedCommand', encoded]
+
+
+def decode_remote_powershell_command_arg(encoded: str) -> str:
+    return base64.b64decode(encoded).decode('utf-16le')
 
 
 def path_to_scp_remote(path: str | Path) -> str:

@@ -155,13 +155,14 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         )
 
         self.assertEqual('ssh', command[0])
+        script = dispatch_module.decode_remote_powershell_command_arg(command[-1])
         self.assertIn(
             r"C:\Users\numbe\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py",
-            command[-1],
+            script,
         )
         self.assertIn('powershell', command)
         self.assertIn('-NoProfile', command)
-        self.assertIn('-Command', command)
+        self.assertIn('-EncodedCommand', command)
 
     def test_build_remote_interactive_window_command_uses_helper_script(self):
         worker = dispatch_module.WorkerSpec(
@@ -194,15 +195,16 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         )
 
         self.assertEqual('ssh', command[0])
-        self.assertIn(
-            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
-            command[-1],
-        )
         self.assertIn('powershell', command)
         self.assertIn('-NoProfile', command)
-        self.assertIn('-Command', command)
-        self.assertIn('-PythonArgsBase64', command[-1])
-        self.assertIn('Remove-Item -LiteralPath', command[-1])
+        self.assertIn('-EncodedCommand', command)
+        script = dispatch_module.decode_remote_powershell_command_arg(command[-1])
+        self.assertIn(
+            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
+            script,
+        )
+        self.assertIn('-PythonArgsBase64', script)
+        self.assertIn('Remove-Item -LiteralPath', script)
 
     def test_handle_finished_json_task_retries_remote_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -382,7 +384,9 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             with patch.object(distributed.subprocess, 'run') as run_mock:
                 distributed.interrupt_remote_active_task(active)
 
-            remote_command = run_mock.call_args_list[0].args[0][-1]
+            remote_command = dispatch_module.decode_remote_powershell_command_arg(
+                run_mock.call_args_list[0].args[0][-1]
+            )
             self.assertIn(r"remote_results\seed1__s1__demo_arm.json", remote_command)
             self.assertIn(r"remote_runtime\seed1__s1__demo_arm", remote_command)
             self.assertIn('Stop-ScheduledTask -TaskName', remote_command)

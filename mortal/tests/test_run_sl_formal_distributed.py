@@ -125,10 +125,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertEqual('ssh', command[0])
         self.assertIn('powershell', command)
         self.assertIn('-NoProfile', command)
-        self.assertIn('-Command', command)
+        self.assertIn('-EncodedCommand', command)
+        script = formal_dist.dispatch.decode_remote_powershell_command_arg(command[-1])
         self.assertIn(
             r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
-            command[-1],
+            script,
         )
 
     def test_load_source_context_builds_child_run_names_from_explicit_candidates(self):
