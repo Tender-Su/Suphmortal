@@ -139,8 +139,10 @@ def build_remote_python_command(
         relative_script = Path(script_path.name)
     remote_script = Path(worker.repo or str(repo_root)) / relative_script
     quoted_args = ' '.join(quote_ps(str(arg)) for arg in command_args)
+    remote_repo = str(worker.repo or repo_root)
     ps_command = (
-        f"Set-Location {quote_ps(worker.repo or str(repo_root))}; "
+        f"Set-Location {quote_ps(remote_repo)}; "
+        f"$env:PYTHONPATH = {quote_ps(remote_repo)} + [System.IO.Path]::PathSeparator + [string]$env:PYTHONPATH; "
         f"& {quote_ps(worker.python or sys.executable)} "
         f"{quote_ps(str(remote_script))} "
         f"{quoted_args} "

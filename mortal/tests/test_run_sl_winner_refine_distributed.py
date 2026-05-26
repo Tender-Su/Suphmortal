@@ -160,6 +160,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py",
             script,
         )
+        self.assertIn('$env:PYTHONPATH', script)
         self.assertIn('powershell', command)
         self.assertIn('-NoProfile', command)
         self.assertIn('-EncodedCommand', command)

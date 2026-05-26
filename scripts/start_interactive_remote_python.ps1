@@ -100,6 +100,13 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
     `$PSNativeCommandUseErrorActionPreference = `$false
 }
 Set-Location '$repoEscaped'
+`$existingPythonPath = [string]`$env:PYTHONPATH
+if (`$existingPythonPath) {
+    `$env:PYTHONPATH = '$repoEscaped' + [System.IO.Path]::PathSeparator + `$existingPythonPath
+}
+else {
+    `$env:PYTHONPATH = '$repoEscaped'
+}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
