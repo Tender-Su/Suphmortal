@@ -29,6 +29,34 @@ class FakeLoaderIterator:
 
 
 class TrainSupervisedResumeAuxTests(unittest.TestCase):
+    def test_sanitize_sys_path_for_spawn_keeps_repo_root_first(self):
+        original_sys_path = list(sys.path)
+        repo_root = str(train_supervised.REPO_ROOT)
+        legacy_entries = [
+            str(train_supervised.MORTAL_ROOT),
+            str(train_supervised.MORTAL_ROOT / 'eval'),
+            str(train_supervised.MORTAL_ROOT / 'core'),
+            str(train_supervised.REPO_ROOT / 'scripts'),
+        ]
+        unrelated = str(Path(tempfile.gettempdir()) / 'mahjongai_extra_path')
+        try:
+            sys.path[:] = [
+                legacy_entries[1],
+                unrelated,
+                repo_root,
+                *legacy_entries,
+            ]
+
+            train_supervised.sanitize_sys_path_for_spawn()
+
+            self.assertEqual(repo_root, sys.path[0])
+            self.assertIn(unrelated, sys.path)
+            for entry in legacy_entries:
+                self.assertNotIn(entry, sys.path)
+            self.assertEqual(1, sys.path.count(repo_root))
+        finally:
+            sys.path[:] = original_sys_path
+
     def test_safe_default_collate_normalizes_numpy_bool_scalars(self):
         batch = [
             (np.bool_(True), np.array([1.0, 2.0], dtype=np.float32)),

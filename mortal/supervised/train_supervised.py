@@ -1,13 +1,39 @@
 import inspect
 import logging
+import sys
 import time
 from os import path
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data._utils.collate import default_collate
 
+from mortal._repo import MORTAL_ROOT, REPO_ROOT
 from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
+
+
+LEGACY_PATHS_FOR_SCRIPT_IMPORTS = {
+    MORTAL_ROOT,
+    MORTAL_ROOT / 'core',
+    MORTAL_ROOT / 'data',
+    MORTAL_ROOT / 'supervised',
+    MORTAL_ROOT / 'online',
+    MORTAL_ROOT / 'eval',
+    MORTAL_ROOT / 'research',
+    REPO_ROOT / 'scripts',
+}
+
+
+def sanitize_sys_path_for_spawn():
+    """Keep Windows DataLoader workers from importing script modules as packages."""
+    repo_text = str(REPO_ROOT)
+    legacy_texts = {str(path) for path in LEGACY_PATHS_FOR_SCRIPT_IMPORTS}
+    filtered = [
+        item for item in sys.path
+        if item and str(Path(item).resolve() if path.isabs(item) else item) not in legacy_texts
+    ]
+    sys.path[:] = [repo_text, *[item for item in filtered if item != repo_text]]
 
 
 def resolve_effective_config_section(config, config_section):
@@ -3451,6 +3477,7 @@ def train(
 
 
 def main():
+    sanitize_sys_path_for_spawn()
     train()
 
 
