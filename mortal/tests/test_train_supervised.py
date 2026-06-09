@@ -183,6 +183,25 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
             )
         )
 
+    def test_best_loss_checkpoint_improvement_is_stricter_than_patience_delta(self):
+        best_loss = 0.4560101177
+        small_but_real_improvement = 0.4559505714
+
+        self.assertTrue(
+            train_supervised.is_strict_loss_improvement(
+                small_but_real_improvement,
+                best_loss,
+            )
+        )
+        self.assertFalse(
+            train_supervised.is_patience_loss_improvement(
+                small_but_real_improvement,
+                best_loss,
+                min_delta=0.0005,
+            )
+        )
+        self.assertFalse(train_supervised.is_strict_loss_improvement(best_loss, best_loss))
+
     def test_make_closeable_batch_iter_returns_iterator_without_prefetch(self):
         loader = FakeLoader()
 

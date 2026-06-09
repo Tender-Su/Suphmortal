@@ -252,6 +252,8 @@ def normalize_numpy_bool_scalars(value):
 
 def safe_default_collate(batch):
     return default_collate([normalize_numpy_bool_scalars(item) for item in batch])
+
+
 def should_run_full_validation_this_check(*, full_val_every_checks, validation_checks, has_full_recent_files):
     if not has_full_recent_files:
         return False
@@ -284,6 +286,14 @@ def should_run_old_regression_after_full_validation(
     has_old_regression_files,
 ):
     return bool(has_old_regression_files) and ran_full_val and old_regression_every_checks <= 0
+
+
+def is_strict_loss_improvement(loss, best_loss):
+    return loss < best_loss
+
+
+def is_patience_loss_improvement(loss, best_loss, *, min_delta):
+    return loss < best_loss - min_delta
 
 
 def make_closeable_batch_iter(loader, *, enable_cuda_prefetch, prefetcher_factory):
@@ -2216,6 +2226,7 @@ def train(
     best_full_recent_action_acc = 0.0
     best_full_recent_action_score = float('-inf')
     best_full_recent_rank_acc = 0.0
+    patience_val_loss = float('inf')
     patience_counter = 0
     num_lr_reductions = 0
     validation_checks = 0
@@ -2234,6 +2245,7 @@ def train(
         nonlocal best_full_recent_action_acc
         nonlocal best_full_recent_action_score
         nonlocal best_full_recent_rank_acc
+        nonlocal patience_val_loss
         nonlocal patience_counter
         nonlocal num_lr_reductions
         nonlocal validation_checks
@@ -2251,6 +2263,7 @@ def train(
         best_full_recent_action_acc = 0.0
         best_full_recent_action_score = float('-inf')
         best_full_recent_rank_acc = 0.0
+        patience_val_loss = float('inf')
         patience_counter = 0
         num_lr_reductions = 0
         validation_checks = 0
@@ -2303,6 +2316,7 @@ def train(
             'best_full_recent_rank_acc',
             best_full_recent_rank_acc,
         )
+        patience_val_loss = state.get('patience_val_loss', best_val_loss)
         patience_counter = state.get('patience_counter', 0)
         num_lr_reductions = state.get('num_lr_reductions', 0)
         validation_checks = state.get('validation_checks', 0)
@@ -3011,6 +3025,7 @@ def train(
         nonlocal best_full_recent_action_score
         nonlocal best_full_recent_rank_acc
         nonlocal last_monitor_recent_metrics
+        nonlocal patience_val_loss
         nonlocal patience_counter
         nonlocal num_lr_reductions
         nonlocal validation_checks
@@ -3094,18 +3109,28 @@ def train(
             f'lr={current_lr:.3e}'
         )
 
-        improved_loss = metrics['loss'] < best_val_loss - early_stopping_min_delta
+        improved_loss = is_strict_loss_improvement(metrics['loss'], best_val_loss)
+        improved_patience_loss = is_patience_loss_improvement(
+            metrics['loss'],
+            patience_val_loss,
+            min_delta=early_stopping_min_delta,
+        )
         improved_acc = metrics['action_acc'] > best_val_action_acc
         improved_action_score = metrics['action_quality_score'] > best_val_action_score
         improved_rank_acc = metrics['rank_acc'] > best_val_rank_acc
 
         if improved_loss:
             best_val_loss = metrics['loss']
+
+        if improved_patience_loss:
+            patience_val_loss = metrics['loss']
             patience_counter = 0
         else:
             patience_counter += 1
             logging.info(
-                f'no monitor-loss improvement: best_val_loss={best_val_loss:.4f} '
+                f'no monitor-loss improvement for patience: '
+                f'patience_val_loss={patience_val_loss:.4f} '
+                f'best_val_loss={best_val_loss:.4f} '
                 f'patience={patience_counter}/{early_stopping_patience_checks}'
             )
         writer.add_scalar('monitor_recent/patience_counter', patience_counter, steps)
@@ -3146,7 +3171,10 @@ def train(
         ):
             run_old_regression_validation(validation_checks)
 
-        improved_selection_loss = selection_metrics['loss'] < best_full_recent_loss - early_stopping_min_delta
+        improved_selection_loss = is_strict_loss_improvement(
+            selection_metrics['loss'],
+            best_full_recent_loss,
+        )
         improved_selection_acc = selection_metrics['macro_action_acc'] > best_full_recent_action_acc
         improved_selection_action_score = selection_metrics['action_quality_score'] > best_full_recent_action_score
         improved_selection_rank_acc = selection_metrics['rank_acc'] > best_full_recent_rank_acc
@@ -3229,6 +3257,7 @@ def train(
             'best_full_recent_action_acc': best_full_recent_action_acc,
             'best_full_recent_action_score': best_full_recent_action_score,
             'best_full_recent_rank_acc': best_full_recent_rank_acc,
+            'patience_val_loss': patience_val_loss,
             'patience_counter': patience_counter,
             'num_lr_reductions': num_lr_reductions,
             'validation_checks': validation_checks,
@@ -3269,6 +3298,13 @@ def train(
         should_stop, _ = run_monitor_validation(start_epoch, reason='resume_baseline')
         if should_stop:
             return
+
+    if max_steps > 0 and steps >= max_steps:
+        logging.info(
+            f'{checkpoint_label} checkpoint already reached max_steps={max_steps:,} '
+            f'(step={steps:,}); skipping training'
+        )
+        return
 
     train_loader = None
     train_batches_on_device = False
