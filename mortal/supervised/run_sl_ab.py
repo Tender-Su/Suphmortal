@@ -165,6 +165,8 @@ TRANSIENT_TRAINING_FAILURE_MARKERS = (
     "Couldn't open shared file mapping",
     'WinError 1455',
     'paging file is too small',
+    'CUDA error: out of memory',
+    'torch.OutOfMemoryError',
 )
 
 
@@ -350,6 +352,12 @@ def scratch_phase_root(
     payload = f'{scratch_token}|{ab_name}|{arm_name}|{phase_name}'.encode('utf-8')
     digest = hashlib.sha1(payload).hexdigest()[:16]
     return AB_SCRATCH_ROOT / digest / phase_name
+
+
+def phase_storage_root_override(phase_name: str) -> Path | None:
+    env_name = f'MORTAL_SL_AB_{phase_name.upper()}_STORAGE_ROOT'
+    value = os.environ.get(env_name, '').strip()
+    return Path(value).resolve() if value else None
 
 
 def load_state_summary(state_path: Path) -> dict:
@@ -752,10 +760,24 @@ def run_arm(
     scratch_token = f'{os.getpid()}_{time.time_ns()}'
     init_state_file = None
     phase_results = {}
-    previous_scratch_phase_name: str | None = None
+    previous_cleanup_phase_name: str | None = None
     for phase_name in phase_order:
         scheduler_type = SCHEDULER_PROFILES[scheduler_profile][phase_name]
         persist_phase_artifacts = phase_name == final_phase_name
+        storage_root_override = phase_storage_root_override(phase_name)
+        storage_root = storage_root_override
+        cleanup_after_handoff = False
+        if storage_root is None:
+            if persist_phase_artifacts:
+                storage_root = None
+            else:
+                storage_root = scratch_phase_root(
+                    ab_name=ab_name,
+                    arm_name=arm_name,
+                    phase_name=phase_name,
+                    scratch_token=scratch_token,
+                )
+                cleanup_after_handoff = True
         phase_result = run_phase(
             base_cfg,
             grouped,
@@ -769,23 +791,14 @@ def run_arm(
             eval_splits=eval_splits,
             init_state_file=init_state_file,
             step_scale=step_scale,
-            storage_root=(
-                None
-                if persist_phase_artifacts
-                else scratch_phase_root(
-                    ab_name=ab_name,
-                    arm_name=arm_name,
-                    phase_name=phase_name,
-                    scratch_token=scratch_token,
-                )
-            ),
+            storage_root=storage_root,
             compact_checkpoints=not persist_phase_artifacts,
         )
         phase_results[phase_name] = phase_result
         init_state_file = phase_result['paths']['best_loss_state_file']
-        if previous_scratch_phase_name is not None:
-            cleanup_phase_artifacts(phase_results[previous_scratch_phase_name])
-        previous_scratch_phase_name = None if persist_phase_artifacts else phase_name
+        if previous_cleanup_phase_name is not None:
+            cleanup_phase_artifacts(phase_results[previous_cleanup_phase_name])
+        previous_cleanup_phase_name = phase_name if cleanup_after_handoff else None
 
     final_best_loss = phase_results[final_phase_name]['best_loss']
     final_best_acc = phase_results[final_phase_name]['best_acc']
