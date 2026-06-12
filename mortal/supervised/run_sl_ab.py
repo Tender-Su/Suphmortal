@@ -163,10 +163,12 @@ BUCKET_SEED_OFFSETS = {
 TRANSIENT_TRAINING_FAILURE_MARKERS = (
     'error code: <1455>',
     "Couldn't open shared file mapping",
+    "Couldn't open shared event",
     'WinError 1455',
     'paging file is too small',
     'CUDA error: out of memory',
     'torch.OutOfMemoryError',
+    'Pin memory thread exited unexpectedly',
 )
 
 
