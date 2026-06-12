@@ -455,6 +455,106 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             self.assertEqual('pending', child_state['formal_1v3']['status'])
             self.assertTrue(result_json.exists())
 
+    def test_execute_single_task_resume_existing_preserves_child_and_ab_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            fidelity_root = root / 'fidelity'
+            ab_root = root / 'sl_ab'
+            fidelity_root.mkdir()
+            ab_root.mkdir()
+            coordinator_run = fidelity_root / 'triplet_formal_run'
+            coordinator_run.mkdir()
+            child_run_dir = fidelity_root / 'triplet_formal_run__arm_a'
+            child_run_dir.mkdir()
+            child_marker = child_run_dir / 'existing_child_marker.txt'
+            child_marker.write_text('keep', encoding='utf-8')
+            ab_dir = ab_root / 'triplet_formal_run__arm_a_formal'
+            ab_dir.mkdir()
+            ab_marker = ab_dir / 'existing_ab_marker.txt'
+            ab_marker.write_text('keep', encoding='utf-8')
+
+            candidate = fidelity.CandidateSpec(
+                arm_name='arm_a',
+                scheduler_profile='cosine',
+                curriculum_profile='broad_to_recent',
+                weight_profile='strong',
+                window_profile='24m_12m',
+                cfg_overrides={},
+                meta={'protocol_arm': 'proto_arm'},
+            )
+            source_context = {
+                'source_run_name': 'source_run',
+                'source_seed': 20260329,
+                'selected_protocol_arm': 'proto_arm',
+                'selected_protocol_arms': ['proto_arm'],
+                'source_refine_front_runner': 'front_runner',
+                'formal_seed': 20262329,
+                'formal_step_scale': 5.0,
+                'candidate_payloads': [
+                    {
+                        **fidelity.candidate_cache_payload(candidate, include_meta=True),
+                        'source_rank': 1,
+                        'child_run_name': 'triplet_formal_run__arm_a',
+                    }
+                ],
+            }
+            dispatch_state = formal_dist.initialize_dispatch_state(
+                run_name='triplet_formal_run',
+                source_context=source_context,
+                local_label='desktop',
+                remote_label=None,
+            )
+            dispatch_root = coordinator_run / 'distributed' / 'formal_dispatch'
+            dispatch_root.mkdir(parents=True, exist_ok=True)
+            (dispatch_root / 'dispatch_state.json').write_text(
+                json.dumps(dispatch_state, ensure_ascii=False, indent=2),
+                encoding='utf-8',
+            )
+
+            def fake_finalize_formal_result(_cfg, result, *, protocol_arm):
+                checkpoint_root = ab_dir / 'checkpoint_compare' / 'phase_c' / 'checkpoints'
+                checkpoint_root.mkdir(parents=True, exist_ok=True)
+                best_loss = checkpoint_root / 'best_loss.pth'
+                best_acc = checkpoint_root / 'best_acc.pth'
+                best_rank = checkpoint_root / 'best_rank.pth'
+                for path in (best_loss, best_acc, best_rank):
+                    path.write_text('ckpt', encoding='utf-8')
+                result.update(
+                    {
+                        'offline_checkpoint_winner': 'best_loss',
+                        'shortlist_checkpoint_types': ['best_loss', 'best_acc', 'best_rank'],
+                        'checkpoint_pack_types': ['best_loss', 'best_acc', 'best_rank'],
+                        'candidates': {
+                            'best_loss': {'path': str(best_loss)},
+                            'best_acc': {'path': str(best_acc)},
+                            'best_rank': {'path': str(best_rank)},
+                        },
+                    }
+                )
+                return result
+
+            result_json = root / 'result.json'
+            with (
+                patch.object(formal_dist.fidelity, 'FIDELITY_ROOT', fidelity_root),
+                patch.object(formal_dist.ab, 'AB_ROOT', ab_root),
+                patch.object(formal_dist.ab, 'build_base_config', return_value={'supervised': {}}),
+                patch.object(formal_dist.ab, 'group_files_by_month', return_value={}),
+                patch.object(formal_dist.ab, 'load_all_files', return_value=[]),
+                patch.object(formal_dist.ab, 'run_ab6_checkpoint', return_value={'winner': 'best_loss'}),
+                patch.object(formal_dist.formal, 'finalize_formal_result', side_effect=fake_finalize_formal_result),
+            ):
+                formal_dist.execute_single_task(
+                    run_name='triplet_formal_run',
+                    candidate_arm='arm_a',
+                    result_json=result_json,
+                    machine_label='desktop',
+                    resume_existing=True,
+                )
+
+            self.assertEqual('keep', child_marker.read_text(encoding='utf-8'))
+            self.assertEqual('keep', ab_marker.read_text(encoding='utf-8'))
+            self.assertTrue(result_json.exists())
+
     def test_rewrite_repo_paths_rehomes_repo_relative_paths(self):
         remote_repo = Path(r'C:\remote\MahjongAI')
         local_repo = Path(r'C:\local\MahjongAI')

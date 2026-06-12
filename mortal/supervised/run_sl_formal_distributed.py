@@ -625,6 +625,7 @@ def execute_single_task(
     prefetch_factor: int | None = None,
     val_file_batch_size: int | None = None,
     val_prefetch_factor: int | None = None,
+    resume_existing: bool = False,
 ) -> dict[str, Any]:
     run_dir = fidelity.FIDELITY_ROOT / run_name
     context = load_dispatch_context(run_dir)
@@ -634,12 +635,14 @@ def execute_single_task(
     candidate_alias = str(context.get('candidate_aliases', {}).get(candidate_arm) or candidate_arm)
     child_run_name = context['candidate_child_run_names'][candidate_arm]
     child_run_dir = fidelity.FIDELITY_ROOT / child_run_name
-    remove_tree_if_exists(child_run_dir)
+    if not resume_existing:
+        remove_tree_if_exists(child_run_dir)
     child_run_dir.mkdir(parents=True, exist_ok=True)
     child_run_lock = fidelity.acquire_run_lock(child_run_dir, child_run_name)
     try:
         ab_dir = ab.AB_ROOT / f'{child_run_name}_formal'
-        remove_tree_if_exists(ab_dir)
+        if not resume_existing:
+            remove_tree_if_exists(ab_dir)
         source_rank = int(context['candidate_source_ranks'].get(candidate_arm, 999))
         state = build_child_run_state(
             coordinator_run_name=run_name,
@@ -1435,6 +1438,11 @@ def parse_args() -> argparse.Namespace:
     run_task.add_argument('--prefetch-factor', type=int)
     run_task.add_argument('--val-file-batch-size', type=int)
     run_task.add_argument('--val-prefetch-factor', type=int)
+    run_task.add_argument(
+        '--resume-existing',
+        action='store_true',
+        help='resume an existing formal child/AB directory instead of deleting it first',
+    )
     run_task.add_argument('--result-json', required=True)
 
     status = subparsers.add_parser('status')
@@ -1466,6 +1474,7 @@ def main() -> None:
             prefetch_factor=args.prefetch_factor,
             val_file_batch_size=args.val_file_batch_size,
             val_prefetch_factor=args.val_prefetch_factor,
+            resume_existing=bool(args.resume_existing),
         )
         print(
             json.dumps(
