@@ -98,6 +98,23 @@ class Stage05ABTests(unittest.TestCase):
                 sl_ab.transient_training_failure_marker(log_path),
             )
 
+    def test_transient_training_failure_marker_handles_cublas_internal_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / 'train.log'
+            log_path.write_text(
+                '\n'.join([
+                    'RuntimeError: CUDA error: CUBLAS_STATUS_INTERNAL_ERROR when calling cublasLtMatmul',
+                    'RuntimeError: matmul failed during warmup',
+                ]),
+                encoding='utf-8',
+                newline='\n',
+            )
+
+            self.assertEqual(
+                'CUBLAS_STATUS_INTERNAL_ERROR',
+                sl_ab.transient_training_failure_marker(log_path),
+            )
+
     def test_transient_training_failure_marker_ignores_previous_attempt_output(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_path = Path(tmp_dir) / 'train.log'

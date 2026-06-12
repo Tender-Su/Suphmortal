@@ -169,6 +169,8 @@ TRANSIENT_TRAINING_FAILURE_MARKERS = (
     'CUDA error: out of memory',
     'torch.OutOfMemoryError',
     'Pin memory thread exited unexpectedly',
+    'CUBLAS_STATUS_INTERNAL_ERROR',
+    'cublasLtMatmul',
 )
 
 
