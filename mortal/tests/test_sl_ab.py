@@ -115,6 +115,23 @@ class Stage05ABTests(unittest.TestCase):
                 sl_ab.transient_training_failure_marker(log_path),
             )
 
+    def test_transient_training_failure_marker_handles_cudnn_host_allocation_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / 'train.log'
+            log_path.write_text(
+                '\n'.join([
+                    'RuntimeError: cuDNN error: CUDNN_STATUS_INTERNAL_ERROR_HOST_ALLOCATION_FAILED',
+                    'Unhandled exception caught in c10/util/AbortHandler.h',
+                ]),
+                encoding='utf-8',
+                newline='\n',
+            )
+
+            self.assertEqual(
+                'CUDNN_STATUS_INTERNAL_ERROR_HOST_ALLOCATION_FAILED',
+                sl_ab.transient_training_failure_marker(log_path),
+            )
+
     def test_transient_training_failure_marker_ignores_previous_attempt_output(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_path = Path(tmp_dir) / 'train.log'
@@ -205,6 +222,50 @@ class Stage05ABTests(unittest.TestCase):
             self.assertEqual(str(latest_path), summary['path'])
             self.assertEqual(375, summary['optimizer_steps'])
             self.assertEqual(3e-4, summary['lr'])
+
+    def test_checkpoint_complete_when_max_steps_reached(self):
+        self.assertTrue(
+            sl_ab.checkpoint_is_complete_for_config(
+                {'steps': 126000, 'validation_checks': 0},
+                {'max_steps': 126000, 'early_stopping_patience_checks': 8},
+            )
+        )
+
+    def test_checkpoint_complete_when_early_stopping_state_reached(self):
+        self.assertTrue(
+            sl_ab.checkpoint_is_complete_for_config(
+                {
+                    'steps': 490000,
+                    'validation_checks': 48,
+                    'patience_counter': 8,
+                    'num_lr_reductions': 0,
+                },
+                {
+                    'max_steps': 1260000,
+                    'min_validation_checks': 2,
+                    'early_stopping_patience_checks': 8,
+                    'early_stopping_min_lr_reductions': 0,
+                },
+            )
+        )
+
+    def test_checkpoint_incomplete_before_budget_or_early_stop(self):
+        self.assertFalse(
+            sl_ab.checkpoint_is_complete_for_config(
+                {
+                    'steps': 126000,
+                    'validation_checks': 12,
+                    'patience_counter': 1,
+                    'num_lr_reductions': 0,
+                },
+                {
+                    'max_steps': 840000,
+                    'min_validation_checks': 2,
+                    'early_stopping_patience_checks': 8,
+                    'early_stopping_min_lr_reductions': 0,
+                },
+            )
+        )
 
     def test_checkpoint_paths_compact_mode_keeps_distinct_best_paths(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

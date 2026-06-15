@@ -171,6 +171,7 @@ TRANSIENT_TRAINING_FAILURE_MARKERS = (
     'Pin memory thread exited unexpectedly',
     'CUBLAS_STATUS_INTERNAL_ERROR',
     'cublasLtMatmul',
+    'CUDNN_STATUS_INTERNAL_ERROR_HOST_ALLOCATION_FAILED',
 )
 
 
@@ -401,6 +402,41 @@ def load_state_summary_with_fallback(state_path: Path, *fallback_paths: Path) ->
         if candidate_path.exists():
             return load_state_summary(candidate_path)
     raise FileNotFoundError(state_path)
+
+
+def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool:
+    steps = int(state.get('steps') or 0)
+    max_steps = int(supervised_cfg.get('max_steps') or 0)
+    if max_steps > 0 and steps >= max_steps:
+        return True
+
+    patience_checks = int(
+        supervised_cfg.get(
+            'early_stopping_patience_checks',
+            supervised_cfg.get('early_stopping_patience', 0),
+        ) or 0
+    )
+    if patience_checks <= 0:
+        return False
+
+    validation_checks = int(state.get('validation_checks') or 0)
+    min_validation_checks = int(supervised_cfg.get('min_validation_checks') or 0)
+    patience_counter = int(state.get('patience_counter') or 0)
+    num_lr_reductions = int(state.get('num_lr_reductions') or 0)
+    min_lr_reductions = int(supervised_cfg.get('early_stopping_min_lr_reductions') or 0)
+    return (
+        validation_checks >= min_validation_checks
+        and patience_counter >= patience_checks
+        and num_lr_reductions >= min_lr_reductions
+    )
+
+
+def existing_phase_checkpoint_is_complete(ckpts: dict[str, Path], supervised_cfg: dict) -> bool:
+    state_file = ckpts['state_file']
+    if not state_file.exists():
+        return False
+    state = torch.load(state_file, map_location='cpu', weights_only=False)
+    return checkpoint_is_complete_for_config(state, supervised_cfg)
 
 
 def score_summary(summary: dict) -> tuple[float, float, float, float]:
@@ -728,7 +764,16 @@ def run_phase(
     cfg_path = exp_dir / 'config.toml'
     log_path = exp_dir / 'train.log'
     write_toml(cfg_path, cfg)
-    run_training(cfg_path, log_path)
+    reused_completed_checkpoint = existing_phase_checkpoint_is_complete(ckpts, cfg['supervised'])
+    if reused_completed_checkpoint:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open('a', encoding='utf-8', newline='\n') as f:
+            f.write(
+                f'\n=== existing completed {phase_name} checkpoint detected; '
+                f'skipping training @ {time.strftime("%Y-%m-%d %H:%M:%S")} ===\n'
+            )
+    else:
+        run_training(cfg_path, log_path)
     summaries = {
         'latest': load_state_summary(ckpts['state_file']),
         'best_loss': load_state_summary_with_fallback(ckpts['best_loss_state_file'], ckpts['state_file']),
@@ -739,6 +784,7 @@ def run_phase(
         'paths': {name: str(path) for name, path in ckpts.items()},
         'log_path': str(log_path),
         'config_path': str(cfg_path),
+        'reused_completed_checkpoint': reused_completed_checkpoint,
     }
     if compact_checkpoints:
         compact_checkpoint_artifacts(ckpts)
