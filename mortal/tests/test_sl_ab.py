@@ -132,6 +132,23 @@ class Stage05ABTests(unittest.TestCase):
                 sl_ab.transient_training_failure_marker(log_path),
             )
 
+    def test_transient_training_failure_marker_handles_cudnn_execution_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / 'train.log'
+            log_path.write_text(
+                '\n'.join([
+                    'RuntimeError: cuDNN error: CUDNN_STATUS_EXECUTION_FAILED',
+                    'Unhandled exception caught in c10/util/AbortHandler.h',
+                ]),
+                encoding='utf-8',
+                newline='\n',
+            )
+
+            self.assertEqual(
+                'CUDNN_STATUS_EXECUTION_FAILED',
+                sl_ab.transient_training_failure_marker(log_path),
+            )
+
     def test_transient_training_failure_marker_ignores_previous_attempt_output(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_path = Path(tmp_dir) / 'train.log'
