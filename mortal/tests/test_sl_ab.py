@@ -284,83 +284,120 @@ class Stage05ABTests(unittest.TestCase):
             )
         )
 
-    def test_checkpoint_paths_compact_mode_keeps_distinct_best_paths(self):
+    def test_checkpoint_paths_keep_distinct_metric_winners_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             exp_dir = Path(tmp_dir) / 'exp'
-            storage_root = Path(tmp_dir) / 'scratch'
+            ckpts = sl_ab.checkpoint_paths(exp_dir)
 
-            ckpts = sl_ab.checkpoint_paths(
-                exp_dir,
-                storage_root=storage_root,
-                compact_checkpoints=True,
+            self.assertEqual(exp_dir / 'checkpoints' / 'best_loss.pth', ckpts['best_loss_state_file'])
+            self.assertEqual(exp_dir / 'checkpoints' / 'best_action_score.pth', ckpts['best_acc_state_file'])
+            self.assertEqual(exp_dir / 'checkpoints' / 'best_rank.pth', ckpts['best_rank_state_file'])
+            self.assertEqual(exp_dir / 'file_index.pth', ckpts['file_index'])
+            self.assertEqual(exp_dir / 'phase_manifest.json', ckpts['manifest_file'])
+            self.assertTrue((exp_dir / 'checkpoints').exists())
+            self.assertTrue((exp_dir / 'tb').exists())
+
+    def test_semantic_config_digest_ignores_runtime_and_artifact_paths(self):
+        base = {
+            'control': {'batch_size': 128},
+            'supervised': {
+                'max_steps': 100,
+                'state_file': 'one/latest.pth',
+                'num_workers': 2,
+                'prefetch_factor': 2,
+            },
+        }
+        changed_runtime = {
+            'control': {'batch_size': 128},
+            'supervised': {
+                'max_steps': 100,
+                'state_file': 'two/latest.pth',
+                'num_workers': 8,
+                'prefetch_factor': 6,
+            },
+        }
+        changed_semantics = {
+            'control': {'batch_size': 128},
+            'supervised': {
+                'max_steps': 200,
+                'state_file': 'two/latest.pth',
+                'num_workers': 8,
+                'prefetch_factor': 6,
+            },
+        }
+
+        self.assertEqual(
+            sl_ab.semantic_config_digest(base),
+            sl_ab.semantic_config_digest(changed_runtime),
+        )
+        self.assertNotEqual(
+            sl_ab.semantic_config_digest(base),
+            sl_ab.semantic_config_digest(changed_semantics),
+        )
+
+    def test_validate_existing_phase_artifacts_accepts_exact_plan(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_a')
+            plan = {'plan_id': 'plan-a', 'phase_name': 'phase_a'}
+            sl_ab.atomic_write_json(
+                ckpts['manifest_file'],
+                {'plan': plan, 'status': 'running'},
+            )
+            torch.save(
+                {
+                    'checkpoint_id': 'checkpoint-a',
+                    'run_provenance': plan,
+                    'steps': 50,
+                },
+                ckpts['state_file'],
             )
 
-            self.assertEqual(storage_root / 'checkpoints' / 'best_loss.pth', ckpts['best_loss_state_file'])
-            self.assertEqual(storage_root / 'checkpoints' / 'best_action_score.pth', ckpts['best_acc_state_file'])
-            self.assertEqual(storage_root / 'checkpoints' / 'best_rank.pth', ckpts['best_rank_state_file'])
-            self.assertEqual(storage_root / 'file_index.pth', ckpts['file_index'])
-            self.assertTrue((storage_root / 'checkpoints').exists())
-            self.assertTrue((storage_root / 'tb').exists())
+            state = sl_ab.validate_existing_phase_artifacts(ckpts, plan)
 
-    def test_compact_checkpoint_artifacts_removes_non_loss_metric_files(self):
+            self.assertEqual('checkpoint-a', state['checkpoint_id'])
+
+    def test_validate_existing_phase_artifacts_rejects_wrong_plan(self):
+        import torch
+
         with tempfile.TemporaryDirectory() as tmp_dir:
-            scratch_root = Path(tmp_dir)
-            ckpts = sl_ab.checkpoint_paths(
-                scratch_root / 'exp',
-                storage_root=scratch_root,
-                compact_checkpoints=True,
+            ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_a')
+            sl_ab.atomic_write_json(
+                ckpts['manifest_file'],
+                {'plan': {'plan_id': 'old-plan'}, 'status': 'completed'},
             )
-            for checkpoint_path in (
-                ckpts['best_loss_state_file'],
-                ckpts['best_acc_state_file'],
-                ckpts['best_rank_state_file'],
-            ):
-                checkpoint_path.write_text('placeholder', encoding='utf-8', newline='\n')
+            torch.save(
+                {
+                    'checkpoint_id': 'old-checkpoint',
+                    'run_provenance': {'plan_id': 'old-plan'},
+                    'steps': 100,
+                },
+                ckpts['state_file'],
+            )
 
-            sl_ab.compact_checkpoint_artifacts(ckpts)
+            with self.assertRaisesRegex(RuntimeError, 'plan mismatch'):
+                sl_ab.validate_existing_phase_artifacts(
+                    ckpts,
+                    {'plan_id': 'new-plan'},
+                )
 
-            self.assertTrue(ckpts['best_loss_state_file'].exists())
-            self.assertFalse(ckpts['best_acc_state_file'].exists())
-            self.assertFalse(ckpts['best_rank_state_file'].exists())
+    def test_validate_existing_phase_artifacts_rejects_legacy_checkpoint(self):
+        import torch
 
-    def test_cleanup_phase_artifacts_only_removes_scratch_roots(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            original_scratch_root = sl_ab.AB_SCRATCH_ROOT
-            try:
-                sl_ab.AB_SCRATCH_ROOT = Path(tmp_dir) / 'scratch_base'
-                scratch_phase = sl_ab.AB_SCRATCH_ROOT / 'token' / 'phase_a'
-                scratch_phase.mkdir(parents=True, exist_ok=True)
-                (scratch_phase / 'marker.txt').write_text('scratch', encoding='utf-8', newline='\n')
-                scratch_result = {
-                    'artifact_root': str(scratch_phase),
-                    'artifacts_retained': True,
-                }
+            ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_a')
+            torch.save({'steps': 100}, ckpts['state_file'])
 
-                persistent_root = Path(tmp_dir) / 'logs' / 'phase_c'
-                persistent_root.mkdir(parents=True, exist_ok=True)
-                (persistent_root / 'marker.txt').write_text('persistent', encoding='utf-8', newline='\n')
-                persistent_result = {
-                    'artifact_root': str(persistent_root),
-                    'artifacts_retained': True,
-                }
+            with self.assertRaisesRegex(RuntimeError, 'predates phase provenance'):
+                sl_ab.validate_existing_phase_artifacts(
+                    ckpts,
+                    {'plan_id': 'new-plan'},
+                )
 
-                sl_ab.cleanup_phase_artifacts(scratch_result)
-                sl_ab.cleanup_phase_artifacts(persistent_result)
-
-                self.assertFalse(scratch_phase.exists())
-                self.assertFalse(scratch_result['artifacts_retained'])
-                self.assertEqual(str(scratch_phase.resolve()), scratch_result['cleaned_artifact_root'])
-                self.assertTrue(persistent_root.exists())
-                self.assertTrue(persistent_result['artifacts_retained'])
-                self.assertNotIn('cleaned_artifact_root', persistent_result)
-            finally:
-                sl_ab.AB_SCRATCH_ROOT = original_scratch_root
-
-    def test_run_arm_cleans_previous_scratch_phase_after_successful_handoff(self):
+    def test_run_arm_uses_policy_selected_checkpoint_as_parent(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            original_scratch_root = sl_ab.AB_SCRATCH_ROOT
-            sl_ab.AB_SCRATCH_ROOT = tmp_path / 'scratch_base'
             phase_roots: dict[str, Path] = {}
 
             def fake_run_phase(
@@ -378,88 +415,284 @@ class Stage05ABTests(unittest.TestCase):
                 init_state_file,
                 step_scale,
                 storage_root=None,
-                compact_checkpoints=False,
+                allow_early_stopping=True,
             ):
                 root = storage_root or (tmp_path / 'persistent' / phase_name)
                 root.mkdir(parents=True, exist_ok=True)
                 best_loss = root / 'checkpoints' / 'best_loss.pth'
+                best_acc = root / 'checkpoints' / 'best_action_score.pth'
+                best_rank = root / 'checkpoints' / 'best_rank.pth'
                 best_loss.parent.mkdir(parents=True, exist_ok=True)
                 best_loss.write_text(phase_name, encoding='utf-8', newline='\n')
+                best_acc.write_text(phase_name, encoding='utf-8', newline='\n')
+                best_rank.write_text(phase_name, encoding='utf-8', newline='\n')
+                manifest = root / 'phase_manifest.json'
+                manifest.write_text(
+                    '{"plan": {"plan_id": "unit"}, "status": "completed"}',
+                    encoding='utf-8',
+                    newline='\n',
+                )
                 phase_roots[phase_name] = root
                 if phase_name == 'phase_a':
                     self.assertIsNone(init_state_file)
                 elif phase_name == 'phase_b':
-                    self.assertEqual(str(phase_roots['phase_a'] / 'checkpoints' / 'best_loss.pth'), init_state_file)
+                    self.assertEqual(str(phase_roots['phase_a'] / 'checkpoints' / 'best_action_score.pth'), init_state_file)
                 elif phase_name == 'phase_c':
-                    self.assertEqual(str(phase_roots['phase_b'] / 'checkpoints' / 'best_loss.pth'), init_state_file)
+                    self.assertEqual(str(phase_roots['phase_b'] / 'checkpoints' / 'best_action_score.pth'), init_state_file)
+                loss_metrics = {
+                    'loss': 0.1000,
+                    'action_quality_score': 0.3,
+                    'selection_quality_score': 0.3,
+                    'rank_acc': 0.2,
+                }
+                action_metrics = {
+                    'loss': 0.1002,
+                    'action_quality_score': 0.5,
+                    'selection_quality_score': 0.5,
+                    'rank_acc': 0.3,
+                }
+                rank_metrics = {
+                    'loss': 0.2,
+                    'action_quality_score': 0.6,
+                    'selection_quality_score': 0.6,
+                    'rank_acc': 0.8,
+                }
                 return {
                     'latest': {'phase': phase_name},
-                    'best_loss': {'phase': phase_name, 'last_full_recent_metrics': {'loss': 0.1, 'action_quality_score': 0.5, 'rank_acc': 0.2}},
-                    'best_acc': {'phase': phase_name},
-                    'best_rank': {'phase': phase_name},
+                    'best_loss': {
+                        'phase': phase_name,
+                        'checkpoint_id': f'{phase_name}-loss',
+                        'path': str(best_loss),
+                        'last_full_recent_metrics': loss_metrics,
+                    },
+                    'best_acc': {
+                        'phase': phase_name,
+                        'checkpoint_id': f'{phase_name}-action',
+                        'path': str(best_acc),
+                        'last_full_recent_metrics': action_metrics,
+                    },
+                    'best_rank': {
+                        'phase': phase_name,
+                        'checkpoint_id': f'{phase_name}-rank',
+                        'path': str(best_rank),
+                        'last_full_recent_metrics': rank_metrics,
+                    },
                     'artifact_root': str(root.resolve()),
                     'artifacts_retained': True,
                     'paths': {
                         'best_loss_state_file': str(best_loss),
+                        'manifest_file': str(manifest),
                     },
                     'log_path': str(root / 'train.log'),
                     'config_path': str(root / 'config.toml'),
                 }
 
+            with (
+                patch.object(sl_ab, 'run_phase', side_effect=fake_run_phase),
+                patch.object(sl_ab, 'phase_storage_root_override', return_value=None),
+            ):
+                result = sl_ab.run_arm(
+                    base_cfg={},
+                    grouped={},
+                    ab_name='unit_ab',
+                    arm_name='unit_arm',
+                    scheduler_profile='cosine',
+                    curriculum_profile='broad_to_recent',
+                    weight_profile='strong',
+                    window_profile='24m_12m',
+                    seed=123,
+                    eval_splits={
+                        'monitor_recent_files': [],
+                        'full_recent_files': [],
+                        'old_regression_files': [],
+                    },
+                    step_scale=1.0,
+                )
+
+            self.assertEqual(
+                'best_acc',
+                result['phase_results']['phase_a']['handoff']['checkpoint_type'],
+            )
+            self.assertEqual(
+                'best_acc',
+                result['phase_results']['phase_b']['handoff']['checkpoint_type'],
+            )
+            self.assertTrue(phase_roots['phase_a'].exists())
+            self.assertTrue(phase_roots['phase_b'].exists())
+            self.assertTrue(phase_roots['phase_c'].exists())
+
+    def test_run_arm_reuses_exact_lineage_and_rejects_changed_parent(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_ab_root = sl_ab.AB_ROOT
+            sl_ab.AB_ROOT = Path(tmp_dir) / 'sl_ab'
+            training_calls = []
+            plans = {}
+
+            def fake_run_training(cfg_path, log_path):
+                cfg = sl_ab.load_toml_file(cfg_path)
+                supervised = cfg['supervised']
+                provenance = supervised['run_provenance']
+                phase_name = provenance['phase_name']
+                training_calls.append(phase_name)
+                plans[phase_name] = provenance
+                state = {
+                    'checkpoint_id': f'{phase_name}-winner',
+                    'run_provenance': provenance,
+                    'steps': supervised['max_steps'],
+                    'optimizer_steps': supervised['max_steps'],
+                    'epoch': 0,
+                    'timestamp': 1.0,
+                    'optimizer': {'param_groups': [{'lr': 1e-5}]},
+                    'last_full_recent_metrics': {
+                        'loss': 0.1,
+                        'action_quality_score': 0.5,
+                        'selection_quality_score': 0.5,
+                        'rank_acc': 0.2,
+                    },
+                }
+                for key in (
+                    'state_file',
+                    'best_loss_state_file',
+                    'best_acc_state_file',
+                    'best_rank_state_file',
+                ):
+                    checkpoint_path = Path(supervised[key])
+                    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(state, checkpoint_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text('completed\n', encoding='utf-8', newline='\n')
+
+            grouped = {
+                '200901': ['early.json.gz'],
+                '202101': ['mid.json.gz'],
+                '202401': ['recent.json.gz'],
+            }
+            eval_splits = {
+                'monitor_recent_files': ['monitor.json.gz'],
+                'full_recent_files': ['full.json.gz'],
+                'old_regression_files': ['old.json.gz'],
+            }
+            screening_overrides = {
+                'phase_steps': {
+                    'phase_a': 1,
+                    'phase_b': 1,
+                    'phase_c': 1,
+                },
+                'phase_train_pool': {
+                    'phase_a': 3,
+                    'phase_b': 3,
+                    'phase_c': 3,
+                },
+            }
+
+            def run_unit_arm():
+                return sl_ab.run_arm(
+                    base_cfg={'control': {'batch_size': 128}},
+                    grouped=grouped,
+                    ab_name='lineage_ab',
+                    arm_name='lineage_arm',
+                    scheduler_profile='cosine',
+                    curriculum_profile='broad_to_recent',
+                    weight_profile='strong',
+                    window_profile='24m_12m',
+                    seed=123,
+                    eval_splits=eval_splits,
+                    step_scale=1.0,
+                    allow_early_stopping=False,
+                )
+
             try:
-                with patch.object(sl_ab, 'run_phase', side_effect=fake_run_phase):
-                    result = sl_ab.run_arm(
-                        base_cfg={},
-                        grouped={},
-                        ab_name='unit_ab',
-                        arm_name='unit_arm',
-                        scheduler_profile='cosine',
-                        curriculum_profile='broad_to_recent',
-                        weight_profile='strong',
-                        window_profile='24m_12m',
-                        seed=123,
-                        eval_splits={
-                            'monitor_recent_files': [],
-                            'full_recent_files': [],
-                            'old_regression_files': [],
-                        },
-                        step_scale=1.0,
+                with (
+                    patch.dict(
+                        sl_ab.BASE_SCREENING,
+                        screening_overrides,
+                        clear=False,
+                    ),
+                    patch.object(
+                        sl_ab,
+                        'phase_storage_root_override',
+                        return_value=None,
+                    ),
+                    patch.object(
+                        sl_ab,
+                        'run_training',
+                        side_effect=fake_run_training,
+                    ),
+                ):
+                    first = run_unit_arm()
+                    second = run_unit_arm()
+
+                    self.assertEqual(
+                        ['phase_a', 'phase_b', 'phase_c'],
+                        training_calls,
+                    )
+                    self.assertEqual(
+                        'phase_a-winner',
+                        plans['phase_b']['parent_checkpoint_id'],
+                    )
+                    self.assertEqual(
+                        'phase_b-winner',
+                        plans['phase_c']['parent_checkpoint_id'],
+                    )
+                    self.assertTrue(
+                        second['phase_results']['phase_a'][
+                            'reused_completed_checkpoint'
+                        ]
                     )
 
-                self.assertFalse(phase_roots['phase_a'].exists())
-                self.assertFalse(phase_roots['phase_b'].exists())
-                self.assertTrue(phase_roots['phase_c'].exists())
-                self.assertFalse(result['phase_results']['phase_a']['artifacts_retained'])
-                self.assertFalse(result['phase_results']['phase_b']['artifacts_retained'])
-                self.assertTrue(result['phase_results']['phase_c']['artifacts_retained'])
-                self.assertEqual(str(phase_roots['phase_a'].resolve()), result['phase_results']['phase_a']['cleaned_artifact_root'])
-                self.assertEqual(str(phase_roots['phase_b'].resolve()), result['phase_results']['phase_b']['cleaned_artifact_root'])
+                    phase_a_handoff = Path(
+                        first['phase_results']['phase_a']['handoff']['path']
+                    )
+                    tampered = torch.load(
+                        phase_a_handoff,
+                        map_location='cpu',
+                        weights_only=False,
+                    )
+                    tampered['checkpoint_id'] = 'phase_a-replaced'
+                    torch.save(tampered, phase_a_handoff)
+
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        'phase artifact plan mismatch',
+                    ):
+                        run_unit_arm()
             finally:
-                sl_ab.AB_SCRATCH_ROOT = original_scratch_root
+                sl_ab.AB_ROOT = original_ab_root
 
-    def test_scratch_phase_root_is_stable_for_same_inputs(self):
-        phase_a = sl_ab.scratch_phase_root(
-            ab_name='demo_ab',
-            arm_name='demo_arm',
-            phase_name='phase_a',
-            scratch_token='token123',
-        )
-        phase_a_repeat = sl_ab.scratch_phase_root(
-            ab_name='demo_ab',
-            arm_name='demo_arm',
-            phase_name='phase_a',
-            scratch_token='token123',
-        )
-        phase_b = sl_ab.scratch_phase_root(
-            ab_name='demo_ab',
-            arm_name='demo_arm',
-            phase_name='phase_b',
-            scratch_token='token123',
-        )
+    def test_formal_checkpoint_run_disables_loss_only_early_stopping(self):
+        fake_result = {
+            'final': {
+                name: {
+                    'last_full_recent_metrics': {
+                        'loss': 0.1,
+                        'action_quality_score': 0.5,
+                        'selection_quality_score': 0.5,
+                        'rank_acc': 0.2,
+                    },
+                }
+                for name in ('best_loss', 'best_acc', 'best_rank', 'latest')
+            },
+        }
+        with (
+            patch.object(sl_ab, 'build_eval_splits', return_value={}),
+            patch.object(sl_ab, 'run_arm', return_value=fake_result) as run_arm_mock,
+            patch.object(sl_ab, 'save_results'),
+        ):
+            sl_ab.run_ab6_checkpoint(
+                {},
+                {},
+                seed=1,
+                scheduler_profile='cosine',
+                curriculum_profile='broad_to_recent',
+                weight_profile='strong',
+                window_profile='24m_12m',
+                step_scale=140,
+                ab_name='s140',
+            )
 
-        self.assertEqual(phase_a, phase_a_repeat)
-        self.assertNotEqual(phase_a, phase_b)
-        self.assertIn('mahjongai_sl_ab', str(phase_a))
+        self.assertFalse(run_arm_mock.call_args.kwargs['allow_early_stopping'])
 
 
 if __name__ == '__main__':

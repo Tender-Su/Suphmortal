@@ -1,7 +1,10 @@
 import inspect
 import logging
+import os
 import sys
 import time
+import uuid
+from copy import deepcopy
 from os import path
 from pathlib import Path
 
@@ -238,6 +241,54 @@ def ensure_init_state_file_exists(init_state_file, *, cfg_prefix):
         raise FileNotFoundError(f'{cfg_prefix}.init_state_file does not exist: {init_state_file}')
 
 
+def validate_checkpoint_provenance(state, expected_provenance, *, cfg_prefix):
+    if not expected_provenance:
+        return
+    actual_provenance = state.get('run_provenance')
+    if actual_provenance != expected_provenance:
+        expected_plan = expected_provenance.get('plan_id')
+        actual_plan = (
+            actual_provenance.get('plan_id')
+            if isinstance(actual_provenance, dict)
+            else None
+        )
+        raise RuntimeError(
+            f'{cfg_prefix}.state_file provenance mismatch: '
+            f'expected plan_id={expected_plan!r}, actual plan_id={actual_plan!r}. '
+            'Refusing to resume a checkpoint from another phase or training plan.'
+        )
+
+
+def validate_init_checkpoint_identity(state, expected_provenance, *, cfg_prefix):
+    if not expected_provenance:
+        return
+    expected_parent_id = expected_provenance.get('parent_checkpoint_id')
+    if not expected_parent_id:
+        return
+    actual_parent_id = state.get('checkpoint_id')
+    if actual_parent_id != expected_parent_id:
+        raise RuntimeError(
+            f'{cfg_prefix}.init_state_file checkpoint mismatch: '
+            f'expected checkpoint_id={expected_parent_id!r}, '
+            f'actual checkpoint_id={actual_parent_id!r}. '
+            'Refusing to initialize from a different parent checkpoint.'
+        )
+
+
+def atomic_torch_save(state, target):
+    target_path = Path(target)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_name(
+        f'.{target_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp'
+    )
+    try:
+        torch.save(state, temp_path)
+        os.replace(temp_path, target_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def normalize_numpy_bool_scalars(value):
     if isinstance(value, np.bool_):
         return bool(value)
@@ -396,6 +447,9 @@ def train(
         raise KeyError(f'missing config section: {config_section}')
     supervised_cfg = config[config_section]
     cfg_prefix = config_section
+    run_provenance = deepcopy(supervised_cfg.get('run_provenance') or {})
+    if not isinstance(run_provenance, dict):
+        raise ValueError(f'{cfg_prefix}.run_provenance must be a table')
 
     batch_size = supervised_cfg.get('batch_size', config['control']['batch_size'])
     opt_step_every = config['control']['opt_step_every']
@@ -2217,6 +2271,8 @@ def train(
 
     steps = 0
     optimizer_steps = 0
+    skipped_optimizer_steps = 0
+    nonfinite_batches = 0
     start_epoch = 0
     best_val_loss = float('inf')
     best_val_action_acc = 0.0
@@ -2275,6 +2331,11 @@ def train(
 
     if path.exists(state_file):
         state = torch.load(state_file, weights_only=False, map_location=device)
+        validate_checkpoint_provenance(
+            state,
+            run_provenance,
+            cfg_prefix=cfg_prefix,
+        )
         validate_exact_resume_heads(state)
         load_optional_head_states(state)
         optimizer_loaded = load_optimizer_state_compat(
@@ -2297,6 +2358,8 @@ def train(
             opt_step_every=opt_step_every,
             default=optimizer_steps,
         )
+        skipped_optimizer_steps = int(state.get('skipped_optimizer_steps') or 0)
+        nonfinite_batches = int(state.get('nonfinite_batches') or 0)
         epoch_complete = loaded_epoch_complete
         start_epoch = state['epoch'] + 1 if epoch_complete else state['epoch']
         best_val_loss = state.get('best_val_loss', best_val_loss)
@@ -2335,6 +2398,11 @@ def train(
     elif init_state_file:
         ensure_init_state_file_exists(init_state_file, cfg_prefix=cfg_prefix)
         state = torch.load(init_state_file, weights_only=False, map_location=device)
+        validate_init_checkpoint_identity(
+            state,
+            run_provenance,
+            cfg_prefix=cfg_prefix,
+        )
         bridge_info = load_brain_state_with_input_bridge(mortal, state['mortal'])
         policy_net.load_state_dict(state['policy_net'])
         if state.get('aux_net') is not None:
@@ -3235,6 +3303,8 @@ def train(
 
     def build_state(epoch, *, epoch_complete):
         return {
+            'checkpoint_id': uuid.uuid4().hex,
+            'run_provenance': deepcopy(run_provenance),
             'mortal': mortal.state_dict(),
             'policy_net': policy_net.state_dict(),
             'aux_net': aux_net.state_dict(),
@@ -3246,6 +3316,8 @@ def train(
             'scaler': scaler.state_dict(),
             'steps': steps,
             'optimizer_steps': optimizer_steps,
+            'skipped_optimizer_steps': skipped_optimizer_steps,
+            'nonfinite_batches': nonfinite_batches,
             'epoch': epoch,
             'epoch_complete': epoch_complete,
             'timestamp': datetime.now().timestamp(),
@@ -3274,7 +3346,7 @@ def train(
 
     def save_latest_state(epoch, *, epoch_complete, reason):
         state = build_state(epoch, epoch_complete=epoch_complete)
-        torch.save(state, state_file)
+        atomic_torch_save(state, state_file)
         logging.info(
             f'saved latest {checkpoint_label} checkpoint to {state_file} '
             f'({reason}, step={steps:,}, optimizer_steps={optimizer_steps:,}, epoch={epoch + 1})'
@@ -3282,7 +3354,7 @@ def train(
         return state
 
     def save_named_state(state, checkpoint_path, *, label):
-        torch.save(state, checkpoint_path)
+        atomic_torch_save(state, checkpoint_path)
         logging.info(f'saved {label} to {checkpoint_path}')
 
     if (
@@ -3344,6 +3416,38 @@ def train(
             stop_due_to_budget = True
         return should_stop or stop_due_to_budget
 
+    def apply_optimizer_step():
+        nonlocal optimizer_steps, skipped_optimizer_steps
+        if max_grad_norm > 0:
+            scaler.unscale_(optimizer)
+            params = chain.from_iterable(
+                group['params']
+                for group in optimizer.param_groups
+            )
+            clip_grad_norm_(params, max_grad_norm)
+        scale_before = float(scaler.get_scale())
+        scaler.step(optimizer)
+        scaler.update()
+        scale_after = float(scaler.get_scale())
+        optimizer.zero_grad(set_to_none=True)
+        if scaler.is_enabled() and scale_after < scale_before:
+            skipped_optimizer_steps += 1
+            logging.warning(
+                'GradScaler skipped optimizer update at step=%s '
+                '(scale %.3e -> %.3e, skipped=%s)',
+                steps,
+                scale_before,
+                scale_after,
+                skipped_optimizer_steps,
+            )
+            return False
+        optimizer_steps += 1
+        if scheduler_type == 'cosine':
+            scheduler.step()
+        else:
+            update_warmup_lr()
+        return True
+
     for epoch in range(start_epoch, max_epochs):
         mortal.train()
         policy_net.train()
@@ -3374,6 +3478,23 @@ def train(
                 compute_sliced_metrics=False,
                 training=True,
             )
+            if not bool(torch.isfinite(total_loss.detach()).item()):
+                nonfinite_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                accum = 0
+                running = init_metric_dict(
+                    include_detailed_metrics=False,
+                    include_sliced_metrics=False,
+                )
+                running['batches'] = 0
+                logging.error(
+                    'skipping non-finite training batch before backward '
+                    '(epoch=%s step=%s count=%s)',
+                    epoch + 1,
+                    steps,
+                    nonfinite_batches,
+                )
+                continue
             scaler.scale(total_loss / opt_step_every).backward()
 
             merge_metrics(running, batch_metrics)
@@ -3382,18 +3503,7 @@ def train(
             steps += 1
             accum += 1
             if accum % opt_step_every == 0:
-                if max_grad_norm > 0:
-                    scaler.unscale_(optimizer)
-                    params = chain.from_iterable(group['params'] for group in optimizer.param_groups)
-                    clip_grad_norm_(params, max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-                optimizer_steps += 1
-                if scheduler_type == 'cosine':
-                    scheduler.step()
-                else:
-                    update_warmup_lr()
+                apply_optimizer_step()
                 if handle_post_optimizer_step(epoch):
                     break
 
@@ -3461,20 +3571,14 @@ def train(
                 log_opponent_acc('train_opp', running['opponent_stats'], steps)
                 log_danger_metrics('train_danger', running['danger_stats'], steps)
                 writer.flush()
+                running = init_metric_dict(
+                    include_detailed_metrics=False,
+                    include_sliced_metrics=False,
+                )
+                running['batches'] = 0
 
         if accum % opt_step_every != 0:
-            if max_grad_norm > 0:
-                scaler.unscale_(optimizer)
-                params = chain.from_iterable(group['params'] for group in optimizer.param_groups)
-                clip_grad_norm_(params, max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
-            optimizer_steps += 1
-            if scheduler_type == 'cosine':
-                scheduler.step()
-            else:
-                update_warmup_lr()
+            apply_optimizer_step()
             handle_post_optimizer_step(epoch)
 
         release_train_loader()

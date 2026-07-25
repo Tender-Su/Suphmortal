@@ -80,6 +80,49 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
                 cfg_prefix='supervised',
             )
 
+    def test_exact_resume_requires_matching_provenance(self):
+        provenance = {'plan_id': 'phase-a'}
+        train_supervised.validate_checkpoint_provenance(
+            {'run_provenance': provenance},
+            provenance,
+            cfg_prefix='supervised',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'provenance mismatch'):
+            train_supervised.validate_checkpoint_provenance(
+                {'run_provenance': {'plan_id': 'old-phase'}},
+                provenance,
+                cfg_prefix='supervised',
+            )
+
+    def test_phase_init_requires_exact_parent_checkpoint(self):
+        provenance = {
+            'plan_id': 'phase-b',
+            'parent_checkpoint_id': 'phase-a-winner',
+        }
+        train_supervised.validate_init_checkpoint_identity(
+            {'checkpoint_id': 'phase-a-winner'},
+            provenance,
+            cfg_prefix='supervised',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'checkpoint mismatch'):
+            train_supervised.validate_init_checkpoint_identity(
+                {'checkpoint_id': 'different-phase-a'},
+                provenance,
+                cfg_prefix='supervised',
+            )
+
+    def test_atomic_torch_save_replaces_checkpoint_without_temp_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / 'checkpoints' / 'latest.pth'
+
+            train_supervised.atomic_torch_save({'value': 1}, target)
+            train_supervised.atomic_torch_save({'value': 2}, target)
+
+            self.assertEqual(2, torch.load(target, weights_only=True)['value'])
+            self.assertEqual([], list(target.parent.glob('*.tmp')))
+
     def test_full_validation_zero_disables_monitor_checks(self):
         self.assertFalse(
             train_supervised.should_run_full_validation_this_check(

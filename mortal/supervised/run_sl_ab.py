@@ -7,10 +7,8 @@ import math
 import os
 import random
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -34,7 +32,28 @@ BASE_CFG_PATH = MORTAL_DIR / 'config.toml'
 BASE_INDEX_PATH = MORTAL_DIR / 'checkpoints' / 'file_index_supervised_json.pth'
 AB_ROOT = REPO_ROOT / 'logs' / 'sl_ab'
 AB_ROOT.mkdir(parents=True, exist_ok=True)
-AB_SCRATCH_ROOT = Path(tempfile.gettempdir()) / 'mahjongai_sl_ab'
+PHASE_PLAN_SCHEMA_VERSION = 1
+
+PROVENANCE_IGNORED_SUPERVISED_KEYS = {
+    'state_file',
+    'best_state_file',
+    'best_loss_state_file',
+    'best_acc_state_file',
+    'best_rank_state_file',
+    'tensorboard_dir',
+    'file_index',
+    'init_state_file',
+    'run_provenance',
+    'num_workers',
+    'file_batch_size',
+    'val_file_batch_size',
+    'prefetch_factor',
+    'val_prefetch_factor',
+    'rayon_num_threads',
+    'worker_torch_num_threads',
+    'worker_torch_num_interop_threads',
+    'force_safe_training',
+}
 
 
 BASE_SCREENING = {
@@ -300,7 +319,6 @@ def checkpoint_paths(
     exp_dir: Path,
     *,
     storage_root: Path | None = None,
-    compact_checkpoints: bool = False,
 ) -> dict[str, Path]:
     artifact_root = storage_root or exp_dir
     ckpt_dir = artifact_root / 'checkpoints'
@@ -308,8 +326,6 @@ def checkpoint_paths(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     tb_dir.mkdir(parents=True, exist_ok=True)
     best_loss_state_file = ckpt_dir / 'best_loss.pth'
-    # Even in compact mode, keep metric winners isolated during training so later
-    # best-acc / best-rank saves cannot overwrite the best-loss handoff checkpoint.
     best_acc_state_file = ckpt_dir / 'best_action_score.pth'
     best_rank_state_file = ckpt_dir / 'best_rank.pth'
     return {
@@ -320,44 +336,8 @@ def checkpoint_paths(
         'best_rank_state_file': best_rank_state_file,
         'tensorboard_dir': tb_dir,
         'file_index': artifact_root / 'file_index.pth',
+        'manifest_file': artifact_root / 'phase_manifest.json',
     }
-
-
-def compact_checkpoint_artifacts(ckpts: dict[str, Path]) -> None:
-    best_loss_path = ckpts['best_loss_state_file']
-    for checkpoint_key in ('best_acc_state_file', 'best_rank_state_file'):
-        checkpoint_path = ckpts[checkpoint_key]
-        if checkpoint_path == best_loss_path or not checkpoint_path.exists():
-            continue
-        checkpoint_path.unlink()
-
-
-def cleanup_phase_artifacts(phase_result: dict) -> None:
-    artifact_root_value = phase_result.get('artifact_root')
-    if not artifact_root_value:
-        return
-
-    artifact_root = Path(str(artifact_root_value)).resolve()
-    scratch_root = AB_SCRATCH_ROOT.resolve()
-    if artifact_root == scratch_root or scratch_root not in artifact_root.parents:
-        return
-
-    if artifact_root.exists():
-        shutil.rmtree(artifact_root)
-    phase_result['artifacts_retained'] = False
-    phase_result['cleaned_artifact_root'] = str(artifact_root)
-
-
-def scratch_phase_root(
-    *,
-    ab_name: str,
-    arm_name: str,
-    phase_name: str,
-    scratch_token: str,
-) -> Path:
-    payload = f'{scratch_token}|{ab_name}|{arm_name}|{phase_name}'.encode('utf-8')
-    digest = hashlib.sha1(payload).hexdigest()[:16]
-    return AB_SCRATCH_ROOT / digest / phase_name
 
 
 def phase_storage_root_override(phase_name: str) -> Path | None:
@@ -377,6 +357,8 @@ def load_state_summary(state_path: Path) -> dict:
         refresh_selection_quality_score(last_full_recent_metrics)
     return {
         'path': str(state_path),
+        'checkpoint_id': state.get('checkpoint_id'),
+        'run_provenance': state.get('run_provenance'),
         'steps': state.get('steps'),
         'optimizer_steps': state.get('optimizer_steps'),
         'epoch': state.get('epoch'),
@@ -430,14 +412,183 @@ def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool
         and patience_counter >= patience_checks
         and num_lr_reductions >= min_lr_reductions
     )
+def stable_digest(value) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
 
 
-def existing_phase_checkpoint_is_complete(ckpts: dict[str, Path], supervised_cfg: dict) -> bool:
-    state_file = ckpts['state_file']
-    if not state_file.exists():
-        return False
-    state = torch.load(state_file, map_location='cpu', weights_only=False)
-    return checkpoint_is_complete_for_config(state, supervised_cfg)
+def semantic_config_digest(cfg: dict) -> str:
+    semantic_cfg = deepcopy(cfg)
+    supervised_cfg = semantic_cfg.get('supervised')
+    if isinstance(supervised_cfg, dict):
+        for key in PROVENANCE_IGNORED_SUPERVISED_KEYS:
+            supervised_cfg.pop(key, None)
+    return stable_digest(semantic_cfg)
+
+
+def checkpoint_identity(state_path: str | Path) -> dict:
+    checkpoint_path = Path(state_path).resolve()
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f'missing phase handoff checkpoint: {checkpoint_path}')
+    state = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    checkpoint_id = state.get('checkpoint_id')
+    provenance = state.get('run_provenance')
+    if (
+        not checkpoint_id
+        or not isinstance(provenance, dict)
+        or not provenance.get('plan_id')
+    ):
+        raise RuntimeError(
+            f'checkpoint {checkpoint_path} has no immutable provenance. '
+            'Legacy checkpoints cannot be reused as an automatic phase handoff; '
+            'start a new run or perform an explicit one-time migration.'
+        )
+    return {
+        'path': str(checkpoint_path),
+        'checkpoint_id': str(checkpoint_id),
+        'plan_id': provenance.get('plan_id'),
+        'steps': int(state.get('steps') or 0),
+        'timestamp': state.get('timestamp'),
+    }
+
+
+def build_phase_plan(
+    *,
+    ab_name: str,
+    arm_name: str,
+    phase_name: str,
+    scheduler_type: str,
+    weight_profile: str,
+    window_profile: str,
+    seed: int,
+    step_scale: float,
+    max_steps: int,
+    train_files: list[str],
+    eval_splits: dict[str, list[str]],
+    cfg: dict,
+    init_state_file: str | None,
+) -> dict:
+    parent = checkpoint_identity(init_state_file) if init_state_file else None
+    plan = {
+        'schema_version': PHASE_PLAN_SCHEMA_VERSION,
+        'ab_name': ab_name,
+        'arm_name': arm_name,
+        'phase_name': phase_name,
+        'scheduler_type': scheduler_type,
+        'weight_profile': weight_profile,
+        'window_profile': window_profile,
+        'training_seed': int(seed),
+        'file_order_seed': int(phase_seed(seed, phase_name)),
+        'step_scale': float(step_scale),
+        'max_steps': int(max_steps),
+        'train_files_digest': stable_digest(list(train_files)),
+        'monitor_recent_files_digest': stable_digest(
+            list(eval_splits['monitor_recent_files'])
+        ),
+        'full_recent_files_digest': stable_digest(
+            list(eval_splits['full_recent_files'])
+        ),
+        'old_regression_files_digest': stable_digest(
+            list(eval_splits['old_regression_files'])
+        ),
+        'semantic_config_digest': semantic_config_digest(cfg),
+        'parent_checkpoint_id': parent['checkpoint_id'] if parent else '',
+        'parent_plan_id': parent['plan_id'] if parent else '',
+    }
+    plan['plan_id'] = stable_digest(plan)
+    return plan
+
+
+def load_json_file(path: Path) -> dict:
+    return json.loads(path.read_text(encoding='utf-8-sig'))
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
+    try:
+        temp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding='utf-8',
+            newline='\n',
+        )
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def record_phase_handoff(manifest_path: Path, handoff: dict) -> None:
+    manifest = load_json_file(manifest_path)
+    manifest['handoff'] = handoff
+    manifest['updated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    atomic_write_json(manifest_path, manifest)
+
+
+def atomic_torch_save(payload, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
+    try:
+        torch.save(payload, temp_path)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def validate_existing_phase_artifacts(
+    ckpts: dict[str, Path],
+    expected_plan: dict,
+) -> dict | None:
+    manifest_path = ckpts['manifest_file']
+    latest_path = ckpts['state_file']
+    manifest = load_json_file(manifest_path) if manifest_path.exists() else None
+    if manifest is not None:
+        actual_plan_id = (manifest.get('plan') or {}).get('plan_id')
+        if actual_plan_id != expected_plan['plan_id']:
+            raise RuntimeError(
+                f'phase artifact plan mismatch under {manifest_path.parent}: '
+                f'expected plan_id={expected_plan["plan_id"]}, '
+                f'actual plan_id={actual_plan_id}. '
+                'Use a new run name or an empty storage root; existing artifacts '
+                'will not be overwritten.'
+            )
+    if not latest_path.exists():
+        orphaned = [
+            path
+            for key, path in ckpts.items()
+            if key.endswith('_state_file') and path.exists()
+        ]
+        if orphaned:
+            raise RuntimeError(
+                f'phase artifacts under {latest_path.parent.parent} contain named '
+                f'checkpoints but no latest checkpoint: {orphaned}'
+            )
+        return None
+    if manifest is None:
+        raise RuntimeError(
+            f'checkpoint {latest_path} predates phase provenance manifests. '
+            'Refusing unsafe automatic reuse.'
+        )
+    state = torch.load(latest_path, map_location='cpu', weights_only=False)
+    actual_plan = state.get('run_provenance')
+    if actual_plan != expected_plan:
+        actual_plan_id = (
+            actual_plan.get('plan_id')
+            if isinstance(actual_plan, dict)
+            else None
+        )
+        raise RuntimeError(
+            f'checkpoint provenance mismatch at {latest_path}: '
+            f'expected plan_id={expected_plan["plan_id"]}, '
+            f'actual plan_id={actual_plan_id}.'
+        )
+    return state
 
 
 def score_summary(summary: dict) -> tuple[float, float, float, float]:
@@ -522,11 +673,16 @@ def build_base_config() -> dict:
 
 
 def write_toml(path: Path, data: dict) -> None:
-    write_toml_file(path, data)
+    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
+    try:
+        write_toml_file(temp_path, data)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def write_index(path: Path, *, train_files: list[str], monitor_recent_files: list[str], full_recent_files: list[str], old_regression_files: list[str], meta: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         'train_files': train_files,
         'monitor_recent_files': monitor_recent_files,
@@ -534,7 +690,7 @@ def write_index(path: Path, *, train_files: list[str], monitor_recent_files: lis
         'old_regression_files': old_regression_files,
         'meta': meta,
     }
-    torch.save(payload, path)
+    atomic_torch_save(payload, path)
 
 
 def read_log_tail(path: Path, max_bytes: int = 131072, *, start_offset: int = 0) -> str:
@@ -648,6 +804,7 @@ def make_phase_overrides(
     max_steps: int,
     scheduler_type: str,
     init_state_file: str | None,
+    allow_early_stopping: bool,
 ) -> dict:
     warm_up_steps = min(
         2000 if phase_name == 'phase_a' else 1000,
@@ -690,9 +847,9 @@ def make_phase_overrides(
         'old_regression_every_checks': BASE_SCREENING['old_regression_every_checks'],
         'force_safe_training': BASE_SCREENING.get('force_safe_training', False),
         'min_validation_checks': 2,
-        'early_stopping_patience': 8,
-        'early_stopping_patience_checks': 8,
-        'early_stopping_min_delta': 0.0005,
+        'early_stopping_patience': 8 if allow_early_stopping else 0,
+        'early_stopping_patience_checks': 8 if allow_early_stopping else 0,
+        'early_stopping_min_delta': 0.0005 if allow_early_stopping else 0.0,
         'early_stopping_min_lr_reductions': 2 if scheduler_type == 'plateau' else 0,
         'seed': seed,
         'scheduler': scheduler_overrides,
@@ -717,13 +874,12 @@ def run_phase(
     init_state_file: str | None,
     step_scale: float,
     storage_root: Path | None = None,
-    compact_checkpoints: bool = False,
+    allow_early_stopping: bool = True,
 ) -> dict:
     exp_dir = AB_ROOT / ab_name / arm_name / phase_name
     ckpts = checkpoint_paths(
         exp_dir,
         storage_root=storage_root,
-        compact_checkpoints=compact_checkpoints,
     )
     max_steps = max(1, int(round(BASE_SCREENING['phase_steps'][phase_name] * step_scale)))
     pool_size = BASE_SCREENING['phase_train_pool'][phase_name]
@@ -735,6 +891,37 @@ def run_phase(
         pool_size=pool_size,
         seed=phase_seed(seed, phase_name),
     )
+    cfg = merge_dict(
+        base_cfg,
+        make_phase_overrides(
+            ckpts,
+            seed=seed,
+            phase_name=phase_name,
+            max_steps=max_steps,
+            scheduler_type=scheduler_type,
+            init_state_file=init_state_file,
+            allow_early_stopping=allow_early_stopping,
+        ),
+    )
+    cfg_path = exp_dir / 'config.toml'
+    log_path = exp_dir / 'train.log'
+    phase_plan = build_phase_plan(
+        ab_name=ab_name,
+        arm_name=arm_name,
+        phase_name=phase_name,
+        scheduler_type=scheduler_type,
+        weight_profile=weight_profile,
+        window_profile=window_profile,
+        seed=seed,
+        step_scale=step_scale,
+        max_steps=max_steps,
+        train_files=train_files,
+        eval_splits=eval_splits,
+        cfg=cfg,
+        init_state_file=init_state_file,
+    )
+    cfg['supervised']['run_provenance'] = phase_plan
+    existing_state = validate_existing_phase_artifacts(ckpts, phase_plan)
     write_index(
         ckpts['file_index'],
         train_files=train_files,
@@ -749,23 +936,23 @@ def run_phase(
             'weight_profile': weight_profile,
             'window_profile': window_profile,
             'train_files': len(train_files),
+            'plan_id': phase_plan['plan_id'],
         },
     )
-    cfg = merge_dict(
-        base_cfg,
-        make_phase_overrides(
-            ckpts,
-            seed=seed,
-            phase_name=phase_name,
-            max_steps=max_steps,
-            scheduler_type=scheduler_type,
-            init_state_file=init_state_file,
-        ),
-    )
-    cfg_path = exp_dir / 'config.toml'
-    log_path = exp_dir / 'train.log'
     write_toml(cfg_path, cfg)
-    reused_completed_checkpoint = existing_phase_checkpoint_is_complete(ckpts, cfg['supervised'])
+    manifest = {
+        'schema_version': PHASE_PLAN_SCHEMA_VERSION,
+        'plan': phase_plan,
+        'status': 'running',
+        'config_path': str(cfg_path.resolve()),
+        'file_index_path': str(ckpts['file_index'].resolve()),
+        'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    atomic_write_json(ckpts['manifest_file'], manifest)
+    reused_completed_checkpoint = (
+        existing_state is not None
+        and checkpoint_is_complete_for_config(existing_state, cfg['supervised'])
+    )
     if reused_completed_checkpoint:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open('a', encoding='utf-8', newline='\n') as f:
@@ -786,9 +973,30 @@ def run_phase(
         'log_path': str(log_path),
         'config_path': str(cfg_path),
         'reused_completed_checkpoint': reused_completed_checkpoint,
+        'phase_plan': phase_plan,
     }
-    if compact_checkpoints:
-        compact_checkpoint_artifacts(ckpts)
+    latest_state = torch.load(
+        ckpts['state_file'],
+        map_location='cpu',
+        weights_only=False,
+    )
+    phase_complete = checkpoint_is_complete_for_config(
+        latest_state,
+        cfg['supervised'],
+    )
+    manifest.update({
+        'status': 'completed' if phase_complete else 'incomplete',
+        'reused_completed_checkpoint': reused_completed_checkpoint,
+        'latest_checkpoint_id': summaries['latest']['checkpoint_id'],
+        'latest_steps': summaries['latest']['steps'],
+        'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    })
+    atomic_write_json(ckpts['manifest_file'], manifest)
+    if not phase_complete:
+        raise RuntimeError(
+            f'{phase_name} exited without satisfying its completion policy; '
+            f'see {log_path}'
+        )
     return summaries
 
 
@@ -805,30 +1013,15 @@ def run_arm(
     seed: int,
     eval_splits: dict[str, list[str]],
     step_scale: float,
+    allow_early_stopping: bool = True,
 ) -> dict:
     phase_order = CURRICULUM_PROFILES[curriculum_profile]
     final_phase_name = phase_order[-1]
-    scratch_token = f'{os.getpid()}_{time.time_ns()}'
     init_state_file = None
     phase_results = {}
-    previous_cleanup_phase_name: str | None = None
     for phase_name in phase_order:
         scheduler_type = SCHEDULER_PROFILES[scheduler_profile][phase_name]
-        persist_phase_artifacts = phase_name == final_phase_name
         storage_root_override = phase_storage_root_override(phase_name)
-        storage_root = storage_root_override
-        cleanup_after_handoff = False
-        if storage_root is None:
-            if persist_phase_artifacts:
-                storage_root = None
-            else:
-                storage_root = scratch_phase_root(
-                    ab_name=ab_name,
-                    arm_name=arm_name,
-                    phase_name=phase_name,
-                    scratch_token=scratch_token,
-                )
-                cleanup_after_handoff = True
         phase_result = run_phase(
             base_cfg,
             grouped,
@@ -842,14 +1035,30 @@ def run_arm(
             eval_splits=eval_splits,
             init_state_file=init_state_file,
             step_scale=step_scale,
-            storage_root=storage_root,
-            compact_checkpoints=not persist_phase_artifacts,
+            storage_root=storage_root_override,
+            allow_early_stopping=allow_early_stopping,
+        )
+        handoff_candidates = {
+            'best_loss': phase_result['best_loss'],
+            'best_acc': phase_result['best_acc'],
+            'best_rank': phase_result['best_rank'],
+        }
+        handoff_winner, handoff_selection = select_checkpoint_candidate(
+            handoff_candidates
+        )
+        handoff_summary = handoff_candidates[handoff_winner]
+        phase_result['handoff'] = {
+            'checkpoint_type': handoff_winner,
+            'checkpoint_id': handoff_summary['checkpoint_id'],
+            'path': handoff_summary['path'],
+            'selection': handoff_selection,
+        }
+        record_phase_handoff(
+            Path(phase_result['paths']['manifest_file']),
+            phase_result['handoff'],
         )
         phase_results[phase_name] = phase_result
-        init_state_file = phase_result['paths']['best_loss_state_file']
-        if previous_cleanup_phase_name is not None:
-            cleanup_phase_artifacts(phase_results[previous_cleanup_phase_name])
-        previous_cleanup_phase_name = phase_name if cleanup_after_handoff else None
+        init_state_file = handoff_summary['path']
 
     final_best_loss = phase_results[final_phase_name]['best_loss']
     final_best_acc = phase_results[final_phase_name]['best_acc']
@@ -1115,6 +1324,7 @@ def run_ab6_checkpoint(base_cfg: dict, grouped: dict[str, list[str]], seed: int,
         seed=seed,
         eval_splits=eval_splits,
         step_scale=step_scale,
+        allow_early_stopping=False,
     )
     final = result['final']
     candidates = {
