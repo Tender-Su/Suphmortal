@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -131,6 +133,27 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
             script,
         )
+        self.assertIn('-WaitForStartOnly', script)
+
+    def test_task_command_is_resume_safe_by_default(self):
+        command = formal_dist.build_task_command_args(
+            run_name='demo_run',
+            task_state={'candidate_arm': 'anchor'},
+            machine_label='laptop',
+        )
+
+        self.assertEqual(1, command.count('--resume-existing'))
+
+    def test_task_storage_key_is_stable_short_and_collision_resistant_enough_for_paths(self):
+        key = formal_dist.task_storage_key(
+            'formal__C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00516_o000135_d000804'
+        )
+
+        self.assertEqual(16, len(key))
+        self.assertEqual(key, formal_dist.task_storage_key(
+            'formal__C_A2x_cosine_broad_to_recent_strong_24m_12m__W_r00516_o000135_d000804'
+        ))
+        self.assertNotEqual(key, formal_dist.task_storage_key('formal__different'))
 
     def test_launch_remote_task_maps_runtime_paths_to_remote_repo(self):
         worker = formal_dist.WorkerSpec(
@@ -178,6 +201,309 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
             str(build_command.call_args.kwargs['remote_runtime_root']),
         )
+        self.assertTrue(task_state['remote_detached'])
+        self.assertEqual(1, task_state['attempts'])
+        self.assertIn('attempt_001_', task_state['remote_runtime_root'])
+        self.assertIn('attempt_001_', task_state['remote_result_path'])
+        self.assertIn('attempt_001_', task_state['log_path'])
+        self.assertTrue(task_state['remote_task_name'].startswith('MahjongAI-WinnerRefine-'))
+
+    def test_launch_remote_task_persists_identity_before_start(self):
+        worker = formal_dist.WorkerSpec(
+            kind='remote',
+            label='laptop',
+            python='python',
+            host='mahjong-laptop',
+            repo=r'C:\runner',
+            ssh_key=None,
+        )
+        task_state = {'task_id': 'formal__anchor', 'candidate_arm': 'anchor'}
+        snapshots = []
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(formal_dist, 'REPO_ROOT', Path(tmp_dir)),
+            patch.object(
+                formal_dist,
+                'build_remote_interactive_window_command',
+                return_value=[sys.executable, '-c', 'pass'],
+            ),
+        ):
+            active = formal_dist.launch_remote_task(
+                worker,
+                run_name='run',
+                task_state=task_state,
+                dispatch_root=Path(tmp_dir) / 'dispatch',
+                launch_mode='interactive_window',
+                formal_overrides=None,
+                persist_state=lambda: snapshots.append(dict(task_state)),
+            )
+            active.process.wait(timeout=10)
+
+        self.assertEqual(1, len(snapshots))
+        self.assertEqual('running', snapshots[0]['status'])
+        self.assertEqual(task_state['remote_launch_id'], snapshots[0]['remote_launch_id'])
+        self.assertEqual(task_state['remote_result_path'], snapshots[0]['remote_result_path'])
+
+    def test_reset_running_tasks_preserves_recoverable_remote_task(self):
+        task = {
+            'status': 'running',
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        dispatch_state = {'formal': {'tasks': {'task': task}}}
+
+        formal_dist.reset_running_tasks_for_resume(dispatch_state)
+
+        self.assertEqual('running', task['status'])
+        self.assertIn('coordinator_recovered_at', task)
+        self.assertEqual('laptop', task['worker_label'])
+
+    def test_reset_running_tasks_requeues_nonrecoverable_task(self):
+        task = {
+            'status': 'running',
+            'worker_label': 'desktop',
+            'remote_launch_mode': 'ssh_inline',
+        }
+        dispatch_state = {'formal': {'tasks': {'task': task}}}
+
+        formal_dist.reset_running_tasks_for_resume(dispatch_state)
+
+        self.assertEqual('pending', task['status'])
+        self.assertNotIn('worker_label', task)
+
+    def test_detached_launch_transport_failure_waits_for_remote_probe(self):
+        task = {'status': 'running', 'remote_detached': True}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        process = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(255)'])
+        process.wait(timeout=10)
+        active = formal_dist.ActiveTask(
+            worker=worker,
+            stage_name='formal',
+            task_id='task',
+            task_state=task,
+            process=process,
+            log_path=Path('task.log'),
+            local_result_path=Path('result.json'),
+        )
+
+        formal_dist.handle_finished_task(active=active, max_attempts=3)
+
+        self.assertEqual('running', task['status'])
+        self.assertIn('code 255', task['remote_launch_transport_error'])
+
+    def test_remote_probe_unreachable_never_consumes_retry(self):
+        task = {'status': 'running', 'attempts': 2}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        with patch.object(
+            formal_dist,
+            'probe_remote_task',
+            return_value={'reachable': False, 'status': 'unreachable', 'error': 'offline'},
+        ):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('running', task['status'])
+        self.assertEqual(2, task['attempts'])
+        self.assertEqual('offline', task['remote_probe_error'])
+
+    def test_remote_orphan_requires_repeated_confirmation_before_retry(self):
+        task = {'status': 'running', 'attempts': 1}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {'reachable': True, 'status': 'orphaned', 'result_exists': False}
+        with patch.object(formal_dist, 'probe_remote_task', return_value=probe):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+            self.assertEqual('running', task['status'])
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(1, task['attempts'])
+
+    def test_remote_nonzero_done_retries_without_deleting_artifact_metadata(self):
+        task = {
+            'status': 'running',
+            'attempts': 1,
+            'remote_runtime_root': r'C:\runtime\attempt_001',
+            'remote_result_path': r'C:\results\attempt_001.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {
+            'reachable': True,
+            'status': 'done',
+            'result_exists': False,
+            'done_exit_code': 1,
+            'done_error': 'CUDA failure',
+        }
+        with patch.object(formal_dist, 'probe_remote_task', return_value=probe):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(r'C:\runtime\attempt_001', task['remote_runtime_root'])
+        self.assertEqual(r'C:\results\attempt_001.json', task['remote_result_path'])
+        self.assertIn('CUDA failure', task['error'])
+
+    def test_parse_remote_probe_output_ignores_powershell_noise(self):
+        payload = formal_dist.parse_remote_probe_output(
+            '#< CLIXML\nnoise\n{"status":"running","process_ids":[123]}\n'
+        )
+
+        self.assertEqual('running', payload['status'])
+        self.assertEqual([123], payload['process_ids'])
+
+    def test_remote_result_completion_closes_running_task(self):
+        task = {
+            'status': 'running',
+            'remote_result_path': r'C:\remote\result.json',
+            'local_result_path': r'C:\local\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        payload = {
+            'child_run_name': 'child',
+            'offline_checkpoint_winner': 'best_loss',
+            'completed_at': '2026-08-01 12:00:00',
+        }
+        with (
+            patch.object(formal_dist, 'fetch_remote_result_file'),
+            patch.object(formal_dist, 'load_task_result', return_value=payload),
+            patch.object(formal_dist, 'sync_remote_task_outputs'),
+        ):
+            completed, error = formal_dist.try_complete_remote_task(worker, task)
+
+        self.assertTrue(completed)
+        self.assertIsNone(error)
+        self.assertEqual('completed', task['status'])
+        self.assertEqual('remote_result_json', task['completion_source'])
+        self.assertEqual('child', task['child_run_name'])
+
+    def test_successful_remote_exit_waits_for_transient_result_sync_failure(self):
+        task = {'status': 'running', 'attempts': 2}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {
+            'reachable': True,
+            'status': 'done',
+            'result_exists': True,
+            'done_exit_code': 0,
+        }
+        with (
+            patch.object(formal_dist, 'probe_remote_task', return_value=probe),
+            patch.object(formal_dist, 'try_complete_remote_task', return_value=(False, 'scp offline')),
+        ):
+            for _ in range(formal_dist.REMOTE_MISSING_CONFIRM_POLLS + 1):
+                formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('running', task['status'])
+        self.assertEqual(2, task['attempts'])
+        self.assertEqual('scp offline', task['remote_result_error'])
+
+    def test_operator_interrupt_handles_detached_remote_task(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'attempts': 2,
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        control_state = {
+            'workers': {
+                'laptop': {
+                    'paused': True,
+                    'interrupt_requested': True,
+                }
+            }
+        }
+        with patch.object(formal_dist, 'interrupt_persisted_remote_task', return_value=True):
+            changed = formal_dist.apply_formal_worker_control_requests(
+                control_state=control_state,
+                active={},
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(1, task['attempts'])
+        self.assertFalse(control_state['workers']['laptop']['interrupt_requested'])
+
+    def test_coordinator_restart_keeps_detached_running_task_nonterminal(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fidelity_root = Path(tmp_dir) / 'fidelity'
+            run_dir = fidelity_root / 'coordinator'
+            dispatch_root = run_dir / 'distributed' / 'formal_dispatch'
+            dispatch_root.mkdir(parents=True)
+            task = {
+                'task_id': 'formal__anchor',
+                'candidate_arm': 'anchor',
+                'status': 'running',
+                'attempts': 1,
+                'worker_label': 'laptop',
+                'remote_launch_mode': 'interactive_window',
+                'remote_runtime_root': r'C:\runtime',
+                'remote_result_path': r'C:\result.json',
+            }
+            state = {
+                'status': 'running',
+                'stage': 'formal',
+                'formal': {'tasks': {'formal__anchor': task}},
+            }
+            formal_dist.write_dispatch_state(dispatch_root / 'dispatch_state.json', state)
+            control = formal_dist.common_dispatch.initialize_dispatch_control_state(
+                local_label=None,
+                remote_label='laptop',
+                remote_launch_mode='interactive_window',
+            )
+            formal_dist.common_dispatch.write_dispatch_control(
+                dispatch_root / 'dispatch_control.json',
+                control,
+            )
+            worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+            args = SimpleNamespace(
+                local_only=False,
+                remote_only=True,
+                run_name='coordinator',
+                source_run_name='unused',
+                candidate_arm=['anchor'],
+                seed_offset=2000,
+                formal_step_scale=140.0,
+                local_python='python',
+                local_label='desktop',
+                remote_host='laptop',
+                remote_repo=r'C:\runner',
+                remote_python='python',
+                remote_label='laptop',
+                ssh_key=None,
+                remote_launch_mode='interactive_window',
+                remote_num_workers=4,
+                remote_file_batch_size=10,
+                remote_prefetch_factor=4,
+                remote_val_file_batch_size=7,
+                remote_val_prefetch_factor=5,
+                max_attempts=3,
+                poll_seconds=15.0,
+            )
+
+            with (
+                patch.object(formal_dist.fidelity, 'FIDELITY_ROOT', fidelity_root),
+                patch.object(formal_dist.fidelity, 'acquire_run_lock', return_value=run_dir / 'lock'),
+                patch.object(formal_dist.fidelity, 'release_run_lock'),
+                patch.object(formal_dist.common_dispatch, 'build_workers', return_value=[worker]),
+                patch.object(formal_dist, 'poll_running_remote_tasks', return_value=False),
+                patch.object(formal_dist, 'launch_task_for_worker') as launch_task,
+                patch.object(formal_dist.time, 'sleep', side_effect=KeyboardInterrupt),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    formal_dist.run_dispatch(args)
+
+            persisted = json.loads(
+                (dispatch_root / 'dispatch_state.json').read_text(encoding='utf-8')
+            )
+            persisted_task = persisted['formal']['tasks']['formal__anchor']
+            self.assertEqual('running', persisted['status'])
+            self.assertEqual('formal', persisted['stage'])
+            self.assertEqual('running', persisted_task['status'])
+            self.assertIn('coordinator_recovered_at', persisted_task)
+            launch_task.assert_not_called()
 
     def test_load_source_context_builds_child_run_names_from_explicit_candidates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -455,7 +781,7 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             self.assertEqual('pending', child_state['formal_1v3']['status'])
             self.assertTrue(result_json.exists())
 
-    def test_execute_single_task_resume_existing_preserves_child_and_ab_dirs(self):
+    def test_execute_single_task_preserves_child_and_ab_dirs_by_default(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             fidelity_root = root / 'fidelity'
@@ -548,7 +874,6 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
                     candidate_arm='arm_a',
                     result_json=result_json,
                     machine_label='desktop',
-                    resume_existing=True,
                 )
 
             self.assertEqual('keep', child_marker.read_text(encoding='utf-8'))

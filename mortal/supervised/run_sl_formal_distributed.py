@@ -3,16 +3,18 @@ from __future__ import annotations
 import argparse
 import atexit
 import base64
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
 import time
 import traceback
+import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import mortal.supervised.distributed_dispatch as dispatch
 import mortal.supervised.run_sl_ab as ab
@@ -35,7 +37,20 @@ DEFAULT_REMOTE_FORMAL_FILE_BATCH_SIZE = 10
 DEFAULT_REMOTE_FORMAL_PREFETCH_FACTOR = 4
 DEFAULT_REMOTE_FORMAL_VAL_FILE_BATCH_SIZE = 7
 DEFAULT_REMOTE_FORMAL_VAL_PREFETCH_FACTOR = 5
-REMOTE_INTERACTIVE_TASK_NAME_PREFIX = 'MahjongAI-Formal-'
+REMOTE_MISSING_CONFIRM_POLLS = 8
+REMOTE_ORPHAN_CONFIRM_POLLS = 2
+REMOTE_COMMAND_TIMEOUT_SECONDS = 60
+REMOTE_TREE_TRANSFER_TIMEOUT_SECONDS = 3600
+SSH_CONNECTION_OPTIONS = (
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=10',
+    '-o',
+    'ServerAliveInterval=10',
+    '-o',
+    'ServerAliveCountMax=3',
+)
 
 WorkerSpec = dispatch.WorkerSpec
 ActiveTask = dispatch.ActiveTask
@@ -103,6 +118,10 @@ def build_child_run_name(coordinator_run_name: str, candidate_arm: str) -> str:
 
 def build_task_id(*, candidate_arm: str) -> str:
     return f'formal__{candidate_arm}'
+
+
+def task_storage_key(task_id: str) -> str:
+    return hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:16]
 
 
 def dedupe_candidate_arms(candidate_arms: list[str]) -> list[str]:
@@ -625,7 +644,6 @@ def execute_single_task(
     prefetch_factor: int | None = None,
     val_file_batch_size: int | None = None,
     val_prefetch_factor: int | None = None,
-    resume_existing: bool = False,
 ) -> dict[str, Any]:
     run_dir = fidelity.FIDELITY_ROOT / run_name
     context = load_dispatch_context(run_dir)
@@ -635,14 +653,10 @@ def execute_single_task(
     candidate_alias = str(context.get('candidate_aliases', {}).get(candidate_arm) or candidate_arm)
     child_run_name = context['candidate_child_run_names'][candidate_arm]
     child_run_dir = fidelity.FIDELITY_ROOT / child_run_name
-    if not resume_existing:
-        remove_tree_if_exists(child_run_dir)
     child_run_dir.mkdir(parents=True, exist_ok=True)
     child_run_lock = fidelity.acquire_run_lock(child_run_dir, child_run_name)
     try:
         ab_dir = ab.AB_ROOT / f'{child_run_name}_formal'
-        if not resume_existing:
-            remove_tree_if_exists(ab_dir)
         source_rank = int(context['candidate_source_ranks'].get(candidate_arm, 999))
         state = build_child_run_state(
             coordinator_run_name=run_name,
@@ -782,19 +796,24 @@ def run_remote_powershell(
     script: str,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    command = ['ssh']
+    command = ['ssh', *SSH_CONNECTION_OPTIONS]
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or common_dispatch.DEFAULT_REMOTE_HOST)
     command.extend(dispatch.remote_powershell_command_args(script))
-    return subprocess.run(
-        command,
-        stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
-        stderr=subprocess.STDOUT if capture_output else subprocess.DEVNULL,
-        text=True,
-        check=False,
-        cwd=str(REPO_ROOT),
-    )
+    try:
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if capture_output else subprocess.DEVNULL,
+            text=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout if isinstance(exc.stdout, str) else ''
+        return subprocess.CompletedProcess(command, 124, output)
 
 
 def ensure_remote_parent_dir(worker: WorkerSpec, remote_path: Path) -> None:
@@ -829,18 +848,22 @@ def map_remote_repo_path_to_local(remote_path: str | Path, *, remote_repo: str |
 
 def copy_local_file_to_remote(worker: WorkerSpec, *, local_path: Path, remote_path: Path) -> None:
     ensure_remote_parent_dir(worker, remote_path)
-    command = ['scp']
+    command = ['scp', *SSH_CONNECTION_OPTIONS]
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.extend([str(local_path), f'{worker.host}:{path_to_scp_remote(remote_path)}'])
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-        cwd=str(REPO_ROOT),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'timed out copying {local_path} to {remote_path}') from exc
     if completed.returncode != 0:
         raise RuntimeError(
             f'failed to copy {local_path} to {remote_path}: {completed.stdout.strip()}'
@@ -850,22 +873,58 @@ def copy_local_file_to_remote(worker: WorkerSpec, *, local_path: Path, remote_pa
 def fetch_remote_tree(worker: WorkerSpec, *, remote_path: Path, local_path: Path) -> None:
     remove_tree_if_exists(local_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    command = ['scp']
+    command = ['scp', *SSH_CONNECTION_OPTIONS]
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.extend(['-r', f'{worker.host}:{path_to_scp_remote(remote_path)}', str(local_path.parent)])
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-        cwd=str(REPO_ROOT),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            timeout=REMOTE_TREE_TRANSFER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'timed out syncing remote tree {remote_path} -> {local_path}') from exc
     if completed.returncode != 0:
         raise RuntimeError(
             f'failed to sync remote tree {remote_path} -> {local_path}: {completed.stdout.strip()}'
         )
+
+
+def fetch_remote_result_file(
+    worker: WorkerSpec,
+    *,
+    remote_result_path: str | Path,
+    local_result_path: Path,
+) -> None:
+    local_result_path.parent.mkdir(parents=True, exist_ok=True)
+    command = ['scp', *SSH_CONNECTION_OPTIONS]
+    if worker.ssh_key:
+        command.extend(['-i', worker.ssh_key])
+    command.extend(
+        [
+            f'{worker.host}:{path_to_scp_remote(remote_result_path)}',
+            str(local_result_path),
+        ]
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'timed out fetching remote result {remote_result_path}') from exc
+    if completed.returncode != 0:
+        raise RuntimeError(f'failed to fetch remote result {remote_result_path}: {completed.stdout.strip()}')
 
 
 def sync_remote_dispatch_state(*, worker: WorkerSpec, dispatch_state_path: Path) -> Path:
@@ -905,6 +964,7 @@ def build_task_command_args(
         str(task_state['candidate_arm']),
         '--machine-label',
         machine_label,
+        '--resume-existing',
     ]
     if formal_overrides:
         command_args.extend(
@@ -932,6 +992,7 @@ def build_remote_interactive_window_command(
     remote_result_path: Path,
     remote_runtime_root: Path,
     formal_overrides: dict[str, int] | None,
+    launch_task_id: str | None = None,
 ) -> list[str]:
     python_args = build_task_command_args(
         run_name=run_name,
@@ -947,19 +1008,20 @@ def build_remote_interactive_window_command(
     )
     repo_root = Path(worker.repo or str(REPO_ROOT))
     window_title = f'MahjongAI formal {task_state["task_id"]}'
+    helper_task_id = launch_task_id or str(task_state['task_id'])
     python_args_base64 = base64.b64encode(json.dumps(python_args, ensure_ascii=True).encode('utf-8')).decode('ascii')
     ps_command = (
-        f"if (Test-Path {quote_ps(str(remote_result_path))}) {{ Remove-Item -LiteralPath {quote_ps(str(remote_result_path))} -Force }}; "
         f"& {quote_ps(str(repo_root / 'scripts' / 'start_interactive_remote_python.ps1'))} "
         f"-RepoRoot {quote_ps(str(repo_root))} "
         f"-PythonExe {quote_ps(worker.python or sys.executable)} "
         f"-PythonScript {quote_ps(str(repo_root / SCRIPT_RELATIVE_PATH))} "
         f"-PythonArgsBase64 {quote_ps(python_args_base64)} "
-        f"-TaskId {quote_ps(str(task_state['task_id']))} "
+        f"-TaskId {quote_ps(helper_task_id)} "
         f"-RuntimeRoot {quote_ps(str(remote_runtime_root))} "
-        f"-WindowTitle {quote_ps(window_title)}"
+        f"-WindowTitle {quote_ps(window_title)} "
+        "-WaitForStartOnly"
     )
-    command = ['ssh']
+    command = ['ssh', *SSH_CONNECTION_OPTIONS]
     if worker.ssh_key:
         command.extend(['-i', worker.ssh_key])
     command.append(worker.host or common_dispatch.DEFAULT_REMOTE_HOST)
@@ -975,17 +1037,21 @@ def launch_remote_task(
     dispatch_root: Path,
     launch_mode: str,
     formal_overrides: dict[str, int] | None,
+    persist_state: Callable[[], None] | None = None,
 ) -> ActiveTask:
+    attempt = int(task_state.get('attempts', 0)) + 1
+    launch_id = uuid.uuid4().hex
+    attempt_tag = f'attempt_{attempt:03d}_{launch_id[:12]}'
+    task_id = str(task_state['task_id'])
+    task_key = task_storage_key(task_id)
+    launch_task_id = f'formal_{task_key}_{attempt:03d}_{launch_id[:8]}'
+    # Attempt-scoped paths prevent stale result/done files from being mistaken
+    # for the current launch and keep every failure log available for audit.
     remote_dispatch_root = map_repo_path_to_remote(dispatch_root, remote_repo=worker.repo or str(REPO_ROOT))
-    remote_results_dir = remote_dispatch_root / 'remote_results'
-    remote_runtime_dir = remote_dispatch_root / 'remote_runtime' / str(task_state['task_id'])
-    local_results_dir = ensure_dir(dispatch_root / 'results')
-    logs_dir = ensure_dir(dispatch_root / 'logs')
-    remote_result_path = remote_results_dir / f'{task_state["task_id"]}.json'
-    local_result_path = local_results_dir / f'{task_state["task_id"]}.json'
-    log_path = logs_dir / f'{task_state["task_id"]}__{worker.label}.log'
-    if local_result_path.exists():
-        local_result_path.unlink()
+    remote_result_path = remote_dispatch_root / 'remote_results' / task_key / f'{attempt_tag}.json'
+    remote_runtime_dir = remote_dispatch_root / 'remote_runtime' / task_key / attempt_tag
+    local_result_path = ensure_dir(dispatch_root / 'results' / task_key) / f'{attempt_tag}.json'
+    log_path = ensure_dir(dispatch_root / 'logs' / task_key) / f'{attempt_tag}__{worker.label}.log'
     if launch_mode == 'ssh_inline':
         command = dispatch.build_remote_python_command(
             worker=worker,
@@ -1006,10 +1072,32 @@ def launch_remote_task(
             remote_result_path=remote_result_path,
             remote_runtime_root=remote_runtime_dir,
             formal_overrides=formal_overrides,
+            launch_task_id=launch_task_id,
         )
     else:
         raise ValueError(f'unsupported remote launch mode `{launch_mode}`')
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    task_state['status'] = 'running'
+    task_state['attempts'] = attempt
+    task_state['worker_label'] = worker.label
+    task_state['local_result_path'] = str(local_result_path)
+    task_state['log_path'] = str(log_path)
+    task_state['remote_result_path'] = str(remote_result_path)
+    task_state['remote_launch_mode'] = launch_mode
+    task_state['remote_runtime_root'] = str(remote_runtime_dir)
+    task_state['remote_detached'] = launch_mode == 'interactive_window'
+    task_state['remote_task_key'] = task_key
+    task_state['remote_launch_id'] = launch_id
+    task_state['remote_launch_task_id'] = launch_task_id
+    task_state['remote_task_name'] = (
+        f'{common_dispatch.REMOTE_INTERACTIVE_TASK_NAME_PREFIX}{launch_task_id}'
+    )
+    task_state['started_at'] = fidelity.ts_now()
+    task_state.pop('finished_at', None)
+    task_state.pop('remote_missing_polls', None)
+    task_state.pop('remote_done_result_polls', None)
+    if persist_state is not None:
+        persist_state()
+
     log_handle = log_path.open('w', encoding='utf-8', newline='\n')
     process = subprocess.Popen(
         command,
@@ -1019,16 +1107,6 @@ def launch_remote_task(
         text=True,
     )
     log_handle.close()
-    task_state['status'] = 'running'
-    task_state['attempts'] = int(task_state.get('attempts', 0)) + 1
-    task_state['worker_label'] = worker.label
-    task_state['local_result_path'] = str(local_result_path)
-    task_state['log_path'] = str(log_path)
-    task_state['remote_result_path'] = str(remote_result_path)
-    task_state['remote_launch_mode'] = launch_mode
-    task_state['remote_runtime_root'] = str(remote_runtime_dir)
-    task_state['remote_task_name'] = f'{REMOTE_INTERACTIVE_TASK_NAME_PREFIX}{task_state["task_id"]}'
-    task_state['started_at'] = fidelity.ts_now()
     return ActiveTask(
         worker=worker,
         stage_name='formal',
@@ -1083,6 +1161,7 @@ def launch_task_for_worker(
     task_state: dict[str, Any],
     dispatch_root: Path,
     control_state: dict[str, Any],
+    dispatch_state: dict[str, Any],
     dispatch_state_path: Path,
     remote_formal_overrides: dict[str, int],
 ) -> ActiveTask:
@@ -1102,7 +1181,267 @@ def launch_task_for_worker(
         dispatch_root=dispatch_root,
         launch_mode=str(worker_control.get('launch_mode') or common_dispatch.DEFAULT_REMOTE_LAUNCH_MODE),
         formal_overrides=remote_formal_overrides,
+        persist_state=lambda: write_dispatch_state(dispatch_state_path, dispatch_state),
     )
+
+
+def parse_remote_probe_output(output: str) -> dict[str, Any]:
+    for raw_line in reversed(output.splitlines()):
+        line = raw_line.lstrip('\ufeff').strip()
+        if not line.startswith('{') or not line.endswith('}'):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and str(payload.get('status') or ''):
+            return payload
+    raise RuntimeError(f'remote status probe returned no JSON payload: {output.strip()}')
+
+
+def probe_remote_task(worker: WorkerSpec, task_state: dict[str, Any]) -> dict[str, Any]:
+    runtime_root = str(task_state.get('remote_runtime_root') or '')
+    remote_result_path = str(task_state.get('remote_result_path') or '')
+    task_name = str(task_state.get('remote_task_name') or '')
+    if not runtime_root or not remote_result_path:
+        return {
+            'reachable': True,
+            'status': 'missing_metadata',
+            'error': 'running remote task is missing runtime/result metadata',
+        }
+    script = (
+        f"$runtimeRoot = {quote_ps(runtime_root)}; "
+        f"$resultPath = {quote_ps(remote_result_path)}; "
+        f"$taskName = {quote_ps(task_name)}; "
+        "$startedPath = Join-Path $runtimeRoot 'started.json'; "
+        "$donePath = Join-Path $runtimeRoot 'done.json'; "
+        "$startedExists = Test-Path -LiteralPath $startedPath; "
+        "$doneExists = Test-Path -LiteralPath $donePath; "
+        "$resultExists = Test-Path -LiteralPath $resultPath; "
+        "$doneExitCode = $null; $doneError = $null; "
+        "if ($doneExists) { try { $done = Get-Content -LiteralPath $donePath -Raw | ConvertFrom-Json; "
+        "$doneExitCode = $done.exit_code; $doneError = $done.error } catch { $doneError = [string]$_ } }; "
+        "$targets = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Name -in @('python.exe','powershell.exe','pwsh.exe','cmd.exe') } | "
+        "Where-Object { ($_.CommandLine -like ('*' + $runtimeRoot + '*')) -or "
+        "($_.CommandLine -like ('*' + $resultPath + '*')) }); "
+        "$scheduledState = $null; if ($taskName) { try { "
+        "$scheduledState = [string](Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State } catch {} }; "
+        "$status = if ($doneExists) { 'done' } elseif ($targets.Count -gt 0 -or $scheduledState -eq 'Running') { "
+        "'running' } elseif ($startedExists) { 'orphaned' } else { 'not_started' }; "
+        "[ordered]@{ status = $status; started_exists = $startedExists; done_exists = $doneExists; "
+        "result_exists = $resultExists; done_exit_code = $doneExitCode; done_error = $doneError; "
+        "process_ids = @($targets | ForEach-Object { $_.ProcessId }); scheduled_state = $scheduledState } "
+        "| ConvertTo-Json -Compress -Depth 4"
+    )
+    completed = run_remote_powershell(worker, script=script, capture_output=True)
+    if completed.returncode != 0:
+        return {
+            'reachable': False,
+            'status': 'unreachable',
+            'error': completed.stdout.strip() or f'ssh exited with code {completed.returncode}',
+        }
+    try:
+        payload = parse_remote_probe_output(completed.stdout)
+    except Exception as exc:
+        return {
+            'reachable': False,
+            'status': 'unreadable',
+            'error': str(exc),
+        }
+    payload['reachable'] = True
+    return payload
+
+
+def try_complete_remote_task(worker: WorkerSpec, task_state: dict[str, Any]) -> tuple[bool, str | None]:
+    remote_result_path = str(task_state.get('remote_result_path') or '')
+    local_result_path_text = str(task_state.get('local_result_path') or '')
+    if not remote_result_path or not local_result_path_text:
+        return False, 'running remote task is missing result paths'
+    local_result_path = Path(local_result_path_text)
+    try:
+        fetch_remote_result_file(
+            worker,
+            remote_result_path=remote_result_path,
+            local_result_path=local_result_path,
+        )
+        payload = load_task_result(local_result_path)
+        sync_remote_task_outputs(worker=worker, task_payload=payload)
+    except Exception as exc:
+        if local_result_path.exists():
+            try:
+                local_result_path.unlink()
+            except OSError:
+                pass
+        return False, str(exc)
+    task_state['child_run_name'] = str(payload['child_run_name'])
+    task_state['offline_checkpoint_winner'] = str(payload.get('offline_checkpoint_winner') or '')
+    task_state['status'] = 'completed'
+    task_state['finished_at'] = str(payload.get('completed_at') or fidelity.ts_now())
+    task_state['completion_source'] = 'remote_result_json'
+    task_state.pop('error', None)
+    task_state.pop('remote_probe_error', None)
+    task_state.pop('remote_result_error', None)
+    return True, None
+
+
+def poll_remote_task(
+    *,
+    worker: WorkerSpec,
+    task_state: dict[str, Any],
+    max_attempts: int,
+) -> bool:
+    probe = probe_remote_task(worker, task_state)
+    task_state['last_remote_probe_at'] = fidelity.ts_now()
+    task_state['last_remote_probe_status'] = str(probe.get('status') or 'unknown')
+    if not bool(probe.get('reachable')):
+        task_state['remote_probe_error'] = str(probe.get('error') or 'remote worker is unreachable')
+        return True
+    task_state.pop('remote_probe_error', None)
+
+    if bool(probe.get('result_exists')):
+        completed, error = try_complete_remote_task(worker, task_state)
+        if completed:
+            return True
+        task_state['remote_result_error'] = str(error or 'remote result validation failed')
+
+    status = str(probe.get('status') or '')
+    if status == 'running':
+        task_state.pop('remote_missing_polls', None)
+        task_state.pop('remote_done_result_polls', None)
+        return True
+    if status == 'done':
+        exit_code = probe.get('done_exit_code')
+        if exit_code is not None and int(exit_code) != 0:
+            dispatch.mark_task_failed(
+                task_state,
+                f'remote training exited with code {exit_code}: {probe.get("done_error") or "unknown error"}',
+                max_attempts=max_attempts,
+                finished_at=fidelity.ts_now(),
+            )
+            return True
+        done_polls = int(task_state.get('remote_done_result_polls', 0)) + 1
+        task_state['remote_done_result_polls'] = done_polls
+        if done_polls >= REMOTE_MISSING_CONFIRM_POLLS and not bool(probe.get('result_exists')):
+            dispatch.mark_task_failed(
+                task_state,
+                'remote task exited successfully but did not publish a result JSON',
+                max_attempts=max_attempts,
+                finished_at=fidelity.ts_now(),
+            )
+        return True
+
+    missing_polls = int(task_state.get('remote_missing_polls', 0)) + 1
+    task_state['remote_missing_polls'] = missing_polls
+    threshold = REMOTE_ORPHAN_CONFIRM_POLLS if status == 'orphaned' else REMOTE_MISSING_CONFIRM_POLLS
+    if missing_polls >= threshold:
+        dispatch.mark_task_failed(
+            task_state,
+            f'remote task is no longer running ({status or "unknown"})',
+            max_attempts=max_attempts,
+            finished_at=fidelity.ts_now(),
+        )
+    return True
+
+
+def poll_running_remote_tasks(
+    *,
+    stage_state: dict[str, Any],
+    workers_by_label: dict[str, WorkerSpec],
+    active_task_ids: set[str],
+    max_attempts: int,
+) -> bool:
+    changed = False
+    for task_state in stage_state.get('tasks', {}).values():
+        task_id = str(task_state.get('task_id') or '')
+        if str(task_state.get('status')) != 'running' or task_id in active_task_ids:
+            continue
+        if str(task_state.get('remote_launch_mode') or '') != 'interactive_window':
+            continue
+        worker_label = str(task_state.get('worker_label') or '')
+        worker = workers_by_label.get(worker_label)
+        if worker is None or worker.kind != 'remote':
+            task_state['remote_probe_error'] = f'missing remote worker `{worker_label}` for running task'
+            changed = True
+            continue
+        changed |= poll_remote_task(worker=worker, task_state=task_state, max_attempts=max_attempts)
+    return changed
+
+
+def interrupt_persisted_remote_task(worker: WorkerSpec, task_state: dict[str, Any]) -> bool:
+    runtime_root = str(task_state.get('remote_runtime_root') or '')
+    remote_result_path = str(task_state.get('remote_result_path') or '')
+    task_name = str(task_state.get('remote_task_name') or '')
+    if not runtime_root or not remote_result_path:
+        task_state['remote_interrupt_error'] = 'running remote task is missing runtime/result metadata'
+        return False
+    script = (
+        f"$runtimeRoot = {quote_ps(runtime_root)}; "
+        f"$resultPath = {quote_ps(remote_result_path)}; "
+        f"$taskName = {quote_ps(task_name)}; "
+        "if ($taskName) { try { Stop-ScheduledTask -TaskName $taskName "
+        "-ErrorAction SilentlyContinue | Out-Null } catch {} }; "
+        "$targets = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Name -in @('python.exe','powershell.exe','pwsh.exe','cmd.exe') } | "
+        "Where-Object { ($_.ProcessId -ne $PID) -and (($_.CommandLine -like ('*' + $runtimeRoot + '*')) -or "
+        "($_.CommandLine -like ('*' + $resultPath + '*'))) }); "
+        "foreach ($target in $targets) { taskkill /PID $target.ProcessId /T /F | Out-Null }; "
+        "if ($taskName) { try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false "
+        "-ErrorAction SilentlyContinue | Out-Null } catch {} }"
+    )
+    completed = run_remote_powershell(worker, script=script, capture_output=True)
+    if completed.returncode != 0:
+        task_state['remote_interrupt_error'] = (
+            completed.stdout.strip() or f'remote interrupt exited with code {completed.returncode}'
+        )
+        return False
+    task_state.pop('remote_interrupt_error', None)
+    return True
+
+
+def apply_formal_worker_control_requests(
+    *,
+    control_state: dict[str, Any],
+    active: dict[str, ActiveTask],
+    stage_state: dict[str, Any],
+    workers_by_label: dict[str, WorkerSpec],
+) -> bool:
+    changed = common_dispatch.apply_worker_control_requests(control_state=control_state, active=active)
+    for worker_label, control in control_state.get('workers', {}).items():
+        if not isinstance(control, dict) or not bool(control.get('interrupt_requested')):
+            continue
+        if worker_label in active:
+            continue
+        running_tasks = [
+            task
+            for task in stage_state.get('tasks', {}).values()
+            if str(task.get('status')) == 'running'
+            and str(task.get('worker_label') or '') == worker_label
+        ]
+        if not running_tasks:
+            control['interrupt_requested'] = False
+            changed = True
+            continue
+        worker = workers_by_label.get(worker_label)
+        if worker is None or worker.kind != 'remote':
+            continue
+        interrupted_all = True
+        for task_state in running_tasks:
+            if str(task_state.get('remote_launch_mode') or '') != 'interactive_window':
+                interrupted_all = False
+                continue
+            if not interrupt_persisted_remote_task(worker, task_state):
+                interrupted_all = False
+                continue
+            common_dispatch.reset_task_after_operator_interrupt(
+                task_state,
+                note=f'worker `{worker_label}` paused by operator',
+            )
+            changed = True
+        if interrupted_all:
+            control['interrupt_requested'] = False
+            changed = True
+    return changed
 
 
 def handle_finished_task(
@@ -1112,6 +1451,17 @@ def handle_finished_task(
 ) -> None:
     task_state = active.task_state
     return_code = active.process.returncode
+    if active.worker.kind == 'remote' and bool(task_state.get('remote_detached')):
+        # The SSH helper only confirms launch. Its transport exit does not prove
+        # that the independently scheduled training process stopped.
+        if return_code == 0:
+            task_state['remote_launch_confirmed_at'] = fidelity.ts_now()
+            task_state.pop('remote_launch_transport_error', None)
+        else:
+            task_state['remote_launch_transport_error'] = (
+                f'launch SSH exited with code {return_code}; remote runtime will be probed before retry'
+            )
+        return
     if return_code != 0:
         dispatch.mark_task_failed(
             task_state,
@@ -1161,6 +1511,15 @@ def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
         return
     for task in stage_state.get('tasks', {}).values():
         if str(task.get('status')) == 'running':
+            if (
+                str(task.get('remote_launch_mode') or '') == 'interactive_window'
+                and str(task.get('remote_runtime_root') or '')
+                and str(task.get('remote_result_path') or '')
+            ):
+                # A restarted coordinator adopts persisted interactive work and
+                # lets the remote probe decide whether it is alive, done, or lost.
+                task['coordinator_recovered_at'] = fidelity.ts_now()
+                continue
             task['status'] = 'pending'
             task.pop('started_at', None)
             task.pop('worker_label', None)
@@ -1183,6 +1542,16 @@ def run_dispatch(args: argparse.Namespace) -> int:
         if dispatch_state_path.exists():
             dispatch_state = load_dispatch_state(dispatch_state_path)
             reset_running_tasks_for_resume(dispatch_state)
+            existing_stage = dispatch_state.get('formal', {})
+            if (
+                not common_dispatch.stage_all_tasks_completed(existing_stage)
+                and not common_dispatch.stage_any_task_failed(existing_stage)
+            ):
+                dispatch_state['status'] = 'running'
+                dispatch_state['stage'] = 'formal'
+                dispatch_state.pop('error', None)
+                dispatch_state.pop('traceback', None)
+            write_dispatch_state(dispatch_state_path, dispatch_state)
         else:
             candidate_arms = dedupe_candidate_arms(list(args.candidate_arm or []))
             if not candidate_arms:
@@ -1202,6 +1571,11 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 remote_label=None if args.local_only else args.remote_label,
             )
             write_dispatch_state(dispatch_state_path, dispatch_state)
+        dispatch_state['coordinator_status'] = 'running'
+        dispatch_state['coordinator_started_at'] = fidelity.ts_now()
+        dispatch_state.pop('coordinator_error', None)
+        dispatch_state.pop('coordinator_traceback', None)
+        write_dispatch_state(dispatch_state_path, dispatch_state)
         workers = common_dispatch.build_workers(
             enable_remote=not args.local_only,
             enable_local=not args.remote_only,
@@ -1213,6 +1587,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
             remote_label=args.remote_label,
             ssh_key=args.ssh_key,
         )
+        workers_by_label = {worker.label: worker for worker in workers}
         if dispatch_control_path.exists():
             control_state = common_dispatch.load_dispatch_control(dispatch_control_path)
         else:
@@ -1239,6 +1614,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
         }
         active: dict[str, ActiveTask] = {}
         while True:
+            state_changed = False
             control_state = common_dispatch.load_dispatch_control(dispatch_control_path)
             if common_dispatch.ensure_control_state_workers(
                 control_state=control_state,
@@ -1247,26 +1623,46 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 remote_launch_mode=args.remote_launch_mode,
             ):
                 common_dispatch.write_dispatch_control(dispatch_control_path, control_state)
-            if common_dispatch.apply_worker_control_requests(control_state=control_state, active=active):
-                write_dispatch_state(dispatch_state_path, dispatch_state)
+            if apply_formal_worker_control_requests(
+                control_state=control_state,
+                active=active,
+                stage_state=dispatch_state['formal'],
+                workers_by_label=workers_by_label,
+            ):
+                state_changed = True
                 common_dispatch.write_dispatch_control(dispatch_control_path, control_state)
 
+            finished_labels = []
             for worker_label, active_task in list(active.items()):
                 if active_task.process.poll() is None:
                     continue
                 handle_finished_task(active=active_task, max_attempts=args.max_attempts)
+                finished_labels.append(worker_label)
+                state_changed = True
+            for worker_label in finished_labels:
                 active.pop(worker_label, None)
-                write_dispatch_state(dispatch_state_path, dispatch_state)
 
             stage_state = dispatch_state['formal']
+            if poll_running_remote_tasks(
+                stage_state=stage_state,
+                workers_by_label=workers_by_label,
+                active_task_ids={active_task.task_id for active_task in active.values()},
+                max_attempts=args.max_attempts,
+            ):
+                state_changed = True
+            if state_changed:
+                write_dispatch_state(dispatch_state_path, dispatch_state)
+
             if common_dispatch.stage_any_task_failed(stage_state):
                 dispatch_state['status'] = 'failed'
                 dispatch_state['stage'] = 'failed'
+                dispatch_state['coordinator_status'] = 'failed'
                 write_dispatch_state(dispatch_state_path, dispatch_state)
                 raise RuntimeError('formal dispatch exhausted retries')
             if common_dispatch.stage_all_tasks_completed(stage_state):
                 dispatch_state['status'] = 'completed'
                 dispatch_state['stage'] = 'completed'
+                dispatch_state['coordinator_status'] = 'completed'
                 dispatch_state['completed_children'] = [
                     {
                         'candidate_arm': str(task.get('candidate_arm') or ''),
@@ -1279,8 +1675,13 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 write_dispatch_state(dispatch_state_path, dispatch_state)
                 break
 
+            running_worker_labels = {
+                str(task.get('worker_label') or '')
+                for task in stage_state.get('tasks', {}).values()
+                if str(task.get('status')) == 'running'
+            }
             for worker in workers:
-                if worker.label in active:
+                if worker.label in active or worker.label in running_worker_labels:
                     continue
                 worker_control = common_dispatch.worker_control_entry(control_state, worker.label)
                 if bool(worker_control.get('paused')):
@@ -1295,17 +1696,23 @@ def run_dispatch(args: argparse.Namespace) -> int:
                     task_state=task_state,
                     dispatch_root=dispatch_root,
                     control_state=control_state,
+                    dispatch_state=dispatch_state,
                     dispatch_state_path=dispatch_state_path,
                     remote_formal_overrides=remote_formal_overrides,
                 )
                 write_dispatch_state(dispatch_state_path, dispatch_state)
 
             if not active and common_dispatch.find_next_pending_task(stage_state) is None:
-                dispatch_state['status'] = 'completed'
-                dispatch_state['stage'] = 'completed'
-                write_dispatch_state(dispatch_state_path, dispatch_state)
-                break
+                time.sleep(float(args.poll_seconds))
+                continue
             time.sleep(args.poll_seconds)
+    except Exception as exc:
+        if 'dispatch_state' in locals():
+            dispatch_state['coordinator_status'] = 'failed'
+            dispatch_state['coordinator_error'] = str(exc)
+            dispatch_state['coordinator_traceback'] = traceback.format_exc()
+            write_dispatch_state(dispatch_state_path, dispatch_state)
+        raise
     finally:
         fidelity.release_run_lock(lock_path)
     return 0
@@ -1344,6 +1751,13 @@ def print_status(args: argparse.Namespace) -> int:
                 'status': task.get('status'),
                 'attempts': task.get('attempts'),
                 'worker_label': task.get('worker_label'),
+                'started_at': task.get('started_at'),
+                'last_remote_probe_at': task.get('last_remote_probe_at'),
+                'last_remote_probe_status': task.get('last_remote_probe_status'),
+                'remote_probe_error': task.get('remote_probe_error'),
+                'remote_launch_id': task.get('remote_launch_id'),
+                'remote_runtime_root': task.get('remote_runtime_root'),
+                'error': task.get('error'),
                 'formal_status': formal_status,
                 'offline_checkpoint_winner': offline_checkpoint_winner,
             }
@@ -1356,6 +1770,8 @@ def print_status(args: argparse.Namespace) -> int:
         'formal_step_scale': dispatch_state.get('formal_step_scale'),
         'status': dispatch_state.get('status'),
         'stage': dispatch_state.get('stage'),
+        'coordinator_status': dispatch_state.get('coordinator_status'),
+        'coordinator_error': dispatch_state.get('coordinator_error'),
         'candidate_alias_to_arm': dispatch_state.get('candidate_alias_to_arm', {}),
         'tasks': common_dispatch.summarize_dispatch_task_status(dispatch_state.get('formal', {})),
         'workers': control_state.get('workers', {}),
@@ -1441,7 +1857,7 @@ def parse_args() -> argparse.Namespace:
     run_task.add_argument(
         '--resume-existing',
         action='store_true',
-        help='resume an existing formal child/AB directory instead of deleting it first',
+        help='compatibility flag; formal child/AB artifacts are always preserved and validated',
     )
     run_task.add_argument('--result-json', required=True)
 
@@ -1474,7 +1890,6 @@ def main() -> None:
             prefetch_factor=args.prefetch_factor,
             val_file_batch_size=args.val_file_batch_size,
             val_prefetch_factor=args.val_prefetch_factor,
-            resume_existing=bool(args.resume_existing),
         )
         print(
             json.dumps(
