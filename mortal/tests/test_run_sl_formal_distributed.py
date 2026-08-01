@@ -63,6 +63,19 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             scaled,
         )
 
+    def test_formal_step_scale_140_matches_full_s140_budget(self):
+        phase_steps = formal_dist.formal.FORMAL_DEFAULTS['phase_steps']
+
+        scaled = {
+            phase: int(round(steps * 140.0))
+            for phase, steps in phase_steps.items()
+        }
+
+        self.assertEqual(
+            {'phase_a': 2520000, 'phase_b': 1680000, 'phase_c': 840000},
+            scaled,
+        )
+
     def test_remote_only_builds_only_remote_worker(self):
         workers = formal_dist.common_dispatch.build_workers(
             enable_remote=True,
@@ -261,6 +274,46 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertIn('coordinator_recovered_at', task)
         self.assertEqual('laptop', task['worker_label'])
 
+    def test_reset_running_tasks_preserves_recoverable_ssh_inline_task(self):
+        task = {
+            'status': 'running',
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'ssh_inline',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        dispatch_state = {
+            'remote_label': 'laptop',
+            'formal': {'tasks': {'task': task}},
+        }
+
+        formal_dist.reset_running_tasks_for_resume(dispatch_state)
+
+        self.assertEqual('running', task['status'])
+        self.assertIn('coordinator_recovered_at', task)
+
+    def test_poll_running_remote_tasks_supports_ssh_inline(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'ssh_inline',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+
+        with patch.object(formal_dist, 'poll_remote_task', return_value=True) as poll:
+            changed = formal_dist.poll_running_remote_tasks(
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+                active_task_ids=set(),
+                max_attempts=3,
+            )
+
+        self.assertTrue(changed)
+        poll.assert_called_once_with(worker=worker, task_state=task, max_attempts=3)
+
     def test_reset_running_tasks_requeues_nonrecoverable_task(self):
         task = {
             'status': 'running',
@@ -273,6 +326,62 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
 
         self.assertEqual('pending', task['status'])
         self.assertNotIn('worker_label', task)
+
+    def test_reset_running_tasks_does_not_adopt_local_task_with_stale_remote_metadata(self):
+        task = {
+            'status': 'running',
+            'worker_label': 'desktop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\stale-runtime',
+            'remote_result_path': r'C:\stale-result.json',
+        }
+        dispatch_state = {
+            'remote_label': 'laptop',
+            'formal': {'tasks': {'task': task}},
+        }
+
+        formal_dist.reset_running_tasks_for_resume(dispatch_state)
+
+        self.assertEqual('pending', task['status'])
+        self.assertNotIn('worker_label', task)
+
+    def test_launch_local_task_clears_stale_remote_attempt_metadata(self):
+        worker = formal_dist.WorkerSpec(kind='local', label='desktop', python=sys.executable)
+        task = {
+            'task_id': 'formal__anchor',
+            'candidate_arm': 'anchor',
+            'status': 'pending',
+            'error': 'old remote failure',
+            'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\stale-runtime',
+            'remote_result_path': r'C:\stale-result.json',
+            'remote_task_name': 'MahjongAI-WinnerRefine-stale',
+        }
+
+        def fake_launch(_worker, *, task_state, **_kwargs):
+            task_state['status'] = 'running'
+            task_state['attempts'] = 2
+            task_state['worker_label'] = 'desktop'
+            task_state['pid'] = 123
+            return SimpleNamespace(task_state=task_state)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(formal_dist.dispatch, 'launch_json_task', side_effect=fake_launch),
+        ):
+            formal_dist.launch_local_task(
+                worker,
+                run_name='run',
+                task_state=task,
+                dispatch_root=Path(tmp_dir),
+            )
+
+        self.assertEqual('running', task['status'])
+        self.assertEqual(123, task['pid'])
+        self.assertEqual('run', task['run_name'])
+        self.assertNotIn('error', task)
+        for key in formal_dist.REMOTE_TASK_METADATA_FIELDS:
+            self.assertNotIn(key, task)
 
     def test_detached_launch_transport_failure_waits_for_remote_probe(self):
         task = {'status': 'running', 'remote_detached': True}
@@ -295,7 +404,13 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertIn('code 255', task['remote_launch_transport_error'])
 
     def test_remote_probe_unreachable_never_consumes_retry(self):
-        task = {'status': 'running', 'attempts': 2}
+        task = {
+            'status': 'running',
+            'attempts': 2,
+            'remote_missing_polls': 1,
+            'remote_missing_status': 'orphaned',
+            'remote_done_result_polls': 1,
+        }
         worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
         with patch.object(
             formal_dist,
@@ -306,7 +421,40 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
 
         self.assertEqual('running', task['status'])
         self.assertEqual(2, task['attempts'])
+        self.assertNotIn('remote_missing_polls', task)
+        self.assertNotIn('remote_missing_status', task)
+        self.assertNotIn('remote_done_result_polls', task)
         self.assertEqual('offline', task['remote_probe_error'])
+
+    def test_running_probe_clears_stale_terminal_state_and_records_evidence(self):
+        task = {
+            'status': 'running',
+            'attempts': 2,
+            'error': 'previous transport exited 255',
+            'finished_at': '2026-08-01 06:24:03',
+            'remote_launch_transport_error': 'ssh exited 255',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {
+            'reachable': True,
+            'status': 'running',
+            'result_exists': False,
+            'process_ids': [12928, 28128],
+            'scheduled_tasks': [
+                {'task_name': 'MahjongAI-WinnerRefine-formal__anchor', 'state': 'Running'}
+            ],
+        }
+
+        with patch.object(formal_dist, 'probe_remote_task', return_value=probe):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('running', task['status'])
+        self.assertNotIn('error', task)
+        self.assertNotIn('finished_at', task)
+        self.assertNotIn('remote_launch_transport_error', task)
+        self.assertIn('remote_launch_recovered_at', task)
+        self.assertEqual([12928, 28128], task['last_remote_process_ids'])
+        self.assertEqual(probe['scheduled_tasks'], task['last_remote_scheduled_tasks'])
 
     def test_remote_orphan_requires_repeated_confirmation_before_retry(self):
         task = {'status': 'running', 'attempts': 1}
@@ -319,6 +467,23 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
 
         self.assertEqual('pending', task['status'])
         self.assertEqual(1, task['attempts'])
+
+    def test_remote_missing_confirmation_resets_when_status_changes(self):
+        task = {
+            'status': 'running',
+            'attempts': 1,
+            'remote_missing_polls': formal_dist.REMOTE_MISSING_CONFIRM_POLLS - 1,
+            'remote_missing_status': 'not_started',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {'reachable': True, 'status': 'orphaned', 'result_exists': False}
+
+        with patch.object(formal_dist, 'probe_remote_task', return_value=probe):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('running', task['status'])
+        self.assertEqual('orphaned', task['remote_missing_status'])
+        self.assertEqual(1, task['remote_missing_polls'])
 
     def test_remote_nonzero_done_retries_without_deleting_artifact_metadata(self):
         task = {
@@ -342,6 +507,26 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertEqual(r'C:\runtime\attempt_001', task['remote_runtime_root'])
         self.assertEqual(r'C:\results\attempt_001.json', task['remote_result_path'])
         self.assertIn('CUDA failure', task['error'])
+
+    def test_invalid_done_exit_code_retries_without_crashing_coordinator(self):
+        task = {'status': 'running', 'attempts': 1}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {
+            'reachable': True,
+            'status': 'done',
+            'result_exists': False,
+            'done_exit_code': 'not-an-int',
+        }
+
+        with (
+            patch.object(formal_dist, 'probe_remote_task', return_value=probe),
+            patch.object(formal_dist, 'cleanup_remote_task_registration') as cleanup,
+        ):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('pending', task['status'])
+        self.assertIn('invalid done exit code', task['error'])
+        cleanup.assert_called_once_with(worker, task)
 
     def test_parse_remote_probe_output_ignores_powershell_noise(self):
         payload = formal_dist.parse_remote_probe_output(
@@ -368,10 +553,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             patch.object(formal_dist, 'load_task_result', return_value=payload),
             patch.object(formal_dist, 'sync_remote_task_outputs'),
         ):
-            completed, error = formal_dist.try_complete_remote_task(worker, task)
+            completion = formal_dist.try_complete_remote_task(worker, task)
 
-        self.assertTrue(completed)
-        self.assertIsNone(error)
+        self.assertTrue(completion.completed)
+        self.assertIsNone(completion.error)
+        self.assertFalse(completion.invalid_result)
         self.assertEqual('completed', task['status'])
         self.assertEqual('remote_result_json', task['completion_source'])
         self.assertEqual('child', task['child_run_name'])
@@ -387,7 +573,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         }
         with (
             patch.object(formal_dist, 'probe_remote_task', return_value=probe),
-            patch.object(formal_dist, 'try_complete_remote_task', return_value=(False, 'scp offline')),
+            patch.object(
+                formal_dist,
+                'try_complete_remote_task',
+                return_value=formal_dist.RemoteCompletionAttempt(error='scp offline'),
+            ),
         ):
             for _ in range(formal_dist.REMOTE_MISSING_CONFIRM_POLLS + 1):
                 formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
@@ -403,6 +593,8 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             'attempts': 2,
             'worker_label': 'laptop',
             'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
         }
         worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
         control_state = {
@@ -681,6 +873,10 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             {'arm_a', 'arm_b'},
             {task['candidate_arm'] for task in dispatch_state['formal']['tasks'].values()},
         )
+        for task in dispatch_state['formal']['tasks'].values():
+            self.assertEqual('triplet_formal_run', task['run_name'])
+            self.assertEqual(2001, task['formal_seed'])
+            self.assertEqual(5.0, task['formal_step_scale'])
 
     def test_execute_single_task_writes_child_state_and_result_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -776,7 +972,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
 
             self.assertEqual('triplet_formal_run__arm_a', payload['child_run_name'])
             self.assertEqual('best_loss', payload['offline_checkpoint_winner'])
-            child_state = json.loads((fidelity_root / 'triplet_formal_run__arm_a' / 'state.json').read_text(encoding='utf-8'))
+            child_state = json.loads(
+                (fidelity_root / 'triplet_formal_run__arm_a' / 'state.json').read_text(
+                    encoding='utf-8'
+                )
+            )
             self.assertEqual('completed', child_state['formal']['status'])
             self.assertEqual('pending', child_state['formal_1v3']['status'])
             self.assertTrue(result_json.exists())
@@ -898,6 +1098,566 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             rewritten['state'],
         )
         self.assertEqual(r'D:\dataset\file.json.gz', rewritten['nested']['outside'])
+
+    def test_fetch_remote_tree_preserves_existing_tree_on_scp_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            local_path = root / 'child'
+            local_path.mkdir()
+            marker = local_path / 'marker.txt'
+            marker.write_text('keep', encoding='utf-8')
+            worker = formal_dist.WorkerSpec(
+                kind='remote',
+                label='laptop',
+                python='python',
+                host='mahjong-laptop',
+            )
+
+            with patch.object(
+                formal_dist.subprocess,
+                'run',
+                return_value=subprocess.CompletedProcess([], 1, 'network down'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'network down'):
+                    formal_dist.fetch_remote_tree(
+                        worker,
+                        remote_path=Path(r'C:\runner\child'),
+                        local_path=local_path,
+                    )
+
+            self.assertEqual('keep', marker.read_text(encoding='utf-8'))
+            self.assertEqual([], list(root.glob('.child.sync-*')))
+
+    def test_fetch_remote_tree_installs_complete_tree_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            local_path = root / 'child'
+            local_path.mkdir()
+            (local_path / 'old.txt').write_text('old', encoding='utf-8')
+            remote_path = Path(r'C:\runner\child')
+            worker = formal_dist.WorkerSpec(
+                kind='remote',
+                label='laptop',
+                python='python',
+                host='mahjong-laptop',
+            )
+
+            def fake_scp(command, **_kwargs):
+                staged_tree = Path(command[-1]) / remote_path.name
+                staged_tree.mkdir()
+                (staged_tree / 'new.txt').write_text('new', encoding='utf-8')
+                return subprocess.CompletedProcess(command, 0, '')
+
+            with patch.object(formal_dist.subprocess, 'run', side_effect=fake_scp):
+                formal_dist.fetch_remote_tree(
+                    worker,
+                    remote_path=remote_path,
+                    local_path=local_path,
+                )
+
+            self.assertFalse((local_path / 'old.txt').exists())
+            self.assertEqual('new', (local_path / 'new.txt').read_text(encoding='utf-8'))
+            self.assertFalse((root / '.child.sync-backup').exists())
+            self.assertEqual([], list(root.glob('.child.sync-*')))
+
+    def test_install_staged_tree_restores_old_tree_when_install_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            local_path = root / 'child'
+            local_path.mkdir()
+            (local_path / 'old.txt').write_text('old', encoding='utf-8')
+            missing_staged_tree = root / 'missing-staged-tree'
+
+            with self.assertRaises(FileNotFoundError):
+                formal_dist.install_staged_tree(
+                    staged_tree=missing_staged_tree,
+                    local_path=local_path,
+                )
+
+            self.assertEqual('old', (local_path / 'old.txt').read_text(encoding='utf-8'))
+            self.assertFalse((root / '.child.sync-backup').exists())
+
+    def test_load_task_result_rejects_unknown_schema(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_path = Path(tmp_dir) / 'result.json'
+            result_path.write_text(
+                json.dumps(
+                    {
+                        'schema_version': formal_dist.TASK_RESULT_SCHEMA_VERSION + 1,
+                        'round_kind': formal_dist.ROUND_KIND_FORMAL,
+                    }
+                ),
+                encoding='utf-8',
+            )
+
+            with self.assertRaisesRegex(RuntimeError, 'unsupported schema version'):
+                formal_dist.load_task_result(result_path)
+
+    def test_task_result_identity_checks_seed_and_scale(self):
+        task = {
+            'run_name': 'run',
+            'candidate_arm': 'anchor',
+            'child_run_name': 'child',
+            'formal_seed': 2001,
+            'formal_step_scale': 140.0,
+        }
+        payload = {
+            'run_name': 'run',
+            'candidate_arm': 'anchor',
+            'child_run_name': 'child',
+            'formal_seed': 2002,
+            'formal_step_scale': 140.0,
+        }
+
+        with self.assertRaisesRegex(RuntimeError, 'formal_seed'):
+            formal_dist.validate_task_result_identity(payload, task)
+
+    def test_remote_result_identity_mismatch_is_not_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task = {
+                'status': 'running',
+                'run_name': 'expected_run',
+                'candidate_arm': 'expected_arm',
+                'child_run_name': 'expected_child',
+                'remote_result_path': r'C:\remote\result.json',
+                'local_result_path': str(Path(tmp_dir) / 'result.json'),
+            }
+            worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+            wrong_payload = {
+                'run_name': 'wrong_run',
+                'candidate_arm': 'expected_arm',
+                'child_run_name': 'expected_child',
+            }
+
+            with (
+                patch.object(formal_dist, 'fetch_remote_result_file'),
+                patch.object(formal_dist, 'load_task_result', return_value=wrong_payload),
+                patch.object(formal_dist, 'sync_remote_task_outputs') as sync_outputs,
+            ):
+                completion = formal_dist.try_complete_remote_task(worker, task)
+
+            self.assertFalse(completion.completed)
+            self.assertTrue(completion.invalid_result)
+            self.assertIn('identity mismatch', str(completion.error))
+            self.assertEqual('running', task['status'])
+            sync_outputs.assert_not_called()
+
+    def test_invalid_remote_result_retries_instead_of_polling_forever(self):
+        task = {'status': 'running', 'attempts': 1}
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        probe = {
+            'reachable': True,
+            'status': 'done',
+            'result_exists': True,
+            'done_exit_code': 0,
+        }
+        completion = formal_dist.RemoteCompletionAttempt(
+            error='task result identity mismatch',
+            invalid_result=True,
+        )
+
+        with (
+            patch.object(formal_dist, 'probe_remote_task', return_value=probe),
+            patch.object(formal_dist, 'try_complete_remote_task', return_value=completion),
+            patch.object(formal_dist, 'cleanup_remote_task_registration') as cleanup,
+        ):
+            formal_dist.poll_remote_task(worker=worker, task_state=task, max_attempts=3)
+
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(1, task['attempts'])
+        self.assertIn('invalid result', task['error'])
+        cleanup.assert_called_once_with(worker, task)
+
+    def test_operator_interrupt_stops_detached_task_during_launch_handshake(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'attempts': 2,
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_detached': True,
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        active_task = SimpleNamespace(worker=worker, task_state=task)
+        active = {'laptop': active_task}
+        control_state = {
+            'workers': {
+                'laptop': {'paused': True, 'interrupt_requested': True},
+            }
+        }
+
+        with (
+            patch.object(formal_dist.common_dispatch, 'interrupt_local_active_task') as stop_transport,
+            patch.object(formal_dist, 'interrupt_persisted_remote_task', return_value=True) as stop_remote,
+        ):
+            changed = formal_dist.apply_formal_worker_control_requests(
+                control_state=control_state,
+                active=active,
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual({}, active)
+        stop_transport.assert_called_once_with(active_task)
+        stop_remote.assert_called_once_with(worker, task)
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(1, task['attempts'])
+        self.assertFalse(control_state['workers']['laptop']['interrupt_requested'])
+
+    def test_operator_interrupt_uses_verified_stop_for_active_ssh_inline_task(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'attempts': 2,
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'ssh_inline',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        active_task = SimpleNamespace(worker=worker, task_state=task)
+        active = {'laptop': active_task}
+        control_state = {
+            'workers': {
+                'laptop': {'paused': True, 'interrupt_requested': True},
+            }
+        }
+
+        with (
+            patch.object(formal_dist.common_dispatch, 'interrupt_local_active_task') as stop_transport,
+            patch.object(formal_dist, 'interrupt_persisted_remote_task', return_value=True) as stop_remote,
+        ):
+            formal_dist.apply_formal_worker_control_requests(
+                control_state=control_state,
+                active=active,
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+            )
+
+        stop_transport.assert_called_once_with(active_task)
+        stop_remote.assert_called_once_with(worker, task)
+        self.assertEqual('pending', task['status'])
+
+    def test_operator_interrupt_keeps_request_when_detached_worker_is_unreachable(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'attempts': 2,
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_detached': True,
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        active_task = SimpleNamespace(worker=worker, task_state=task)
+        active = {'laptop': active_task}
+        control_state = {
+            'workers': {
+                'laptop': {'paused': True, 'interrupt_requested': True},
+            }
+        }
+
+        with (
+            patch.object(formal_dist.common_dispatch, 'interrupt_local_active_task'),
+            patch.object(formal_dist, 'interrupt_persisted_remote_task', return_value=False),
+        ):
+            changed = formal_dist.apply_formal_worker_control_requests(
+                control_state=control_state,
+                active=active,
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual({}, active)
+        self.assertEqual('running', task['status'])
+        self.assertEqual(2, task['attempts'])
+        self.assertTrue(control_state['workers']['laptop']['interrupt_requested'])
+    def test_interrupt_persisted_remote_task_verifies_remote_process_stopped(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+            'remote_task_name': 'MahjongAI-Formal-formal__anchor',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+
+        with (
+            patch.object(
+                formal_dist,
+                'run_remote_powershell',
+                return_value=subprocess.CompletedProcess([], 0, ''),
+            ) as run_remote,
+            patch.object(
+                formal_dist,
+                'probe_remote_task',
+                return_value={'reachable': True, 'status': 'running', 'result_exists': False},
+            ),
+        ):
+            interrupted = formal_dist.interrupt_persisted_remote_task(worker, task)
+
+        self.assertFalse(interrupted)
+        self.assertIn('still running', task['remote_interrupt_error'])
+        interrupt_script = run_remote.call_args.kwargs['script']
+        self.assertIn('MahjongAI-Formal-formal__anchor', interrupt_script)
+        self.assertIn('MahjongAI-WinnerRefine-formal__anchor', interrupt_script)
+
+    def test_operator_interrupt_accepts_task_that_finished_during_stop(self):
+        task = {
+            'task_id': 'formal__anchor',
+            'status': 'running',
+            'attempts': 2,
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        control_state = {
+            'workers': {
+                'laptop': {'paused': True, 'interrupt_requested': True},
+            }
+        }
+
+        def finish_during_stop(_worker, task_state):
+            task_state['status'] = 'completed'
+            return True
+
+        with patch.object(
+            formal_dist,
+            'interrupt_persisted_remote_task',
+            side_effect=finish_during_stop,
+        ):
+            changed = formal_dist.apply_formal_worker_control_requests(
+                control_state=control_state,
+                active={},
+                stage_state={'tasks': {'formal__anchor': task}},
+                workers_by_label={'laptop': worker},
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual('completed', task['status'])
+        self.assertEqual(2, task['attempts'])
+        self.assertFalse(control_state['workers']['laptop']['interrupt_requested'])
+
+    def test_probe_remote_task_treats_wmi_failure_as_unknown(self):
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        task = {
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        probe_payload = {
+            'status': 'orphaned',
+            'started_exists': True,
+            'done_exists': False,
+            'result_exists': False,
+            'process_probe_error': 'access denied',
+        }
+
+        with patch.object(
+            formal_dist,
+            'run_remote_powershell',
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(probe_payload)),
+        ):
+            result = formal_dist.probe_remote_task(worker, task)
+
+        self.assertFalse(result['reachable'])
+        self.assertEqual('unreadable', result['status'])
+        self.assertIn('access denied', result['error'])
+
+    def test_probe_remote_task_uses_done_marker_when_wmi_probe_fails(self):
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        task = {
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        probe_payload = {
+            'status': 'done',
+            'started_exists': True,
+            'done_exists': True,
+            'result_exists': True,
+            'process_probe_error': 'access denied',
+        }
+
+        with patch.object(
+            formal_dist,
+            'run_remote_powershell',
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(probe_payload)),
+        ):
+            result = formal_dist.probe_remote_task(worker, task)
+
+        self.assertTrue(result['reachable'])
+        self.assertEqual('done', result['status'])
+
+    def test_probe_remote_task_checks_legacy_and_helper_task_names(self):
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        task = {
+            'task_id': 'formal__anchor',
+            'remote_task_name': 'MahjongAI-Formal-formal__anchor',
+            'remote_runtime_root': r'C:\runtime',
+            'remote_result_path': r'C:\result.json',
+        }
+        payload = {
+            'status': 'running',
+            'started_exists': True,
+            'done_exists': False,
+            'result_exists': False,
+            'process_ids': [123],
+            'process_probe_error': None,
+        }
+
+        with patch.object(
+            formal_dist,
+            'run_remote_powershell',
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(payload)),
+        ) as run_remote:
+            result = formal_dist.probe_remote_task(worker, task)
+
+        self.assertTrue(result['reachable'])
+        probe_script = run_remote.call_args.kwargs['script']
+        self.assertIn('MahjongAI-Formal-formal__anchor', probe_script)
+        self.assertIn('MahjongAI-WinnerRefine-formal__anchor', probe_script)
+        self.assertIn('$_.ProcessId -ne $PID', probe_script)
+
+    def test_remote_launch_preparation_failure_keeps_task_pending(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fidelity_root = Path(tmp_dir) / 'fidelity'
+            run_dir = fidelity_root / 'coordinator'
+            dispatch_root = run_dir / 'distributed' / 'formal_dispatch'
+            dispatch_root.mkdir(parents=True)
+            task = {
+                'task_id': 'formal__anchor',
+                'candidate_arm': 'anchor',
+                'child_run_name': 'child',
+                'status': 'pending',
+                'attempts': 0,
+            }
+            state = {
+                'status': 'running',
+                'stage': 'formal',
+                'formal': {'tasks': {'formal__anchor': task}},
+            }
+            formal_dist.write_dispatch_state(dispatch_root / 'dispatch_state.json', state)
+            control = formal_dist.common_dispatch.initialize_dispatch_control_state(
+                local_label=None,
+                remote_label='laptop',
+                remote_launch_mode='interactive_window',
+            )
+            formal_dist.common_dispatch.write_dispatch_control(
+                dispatch_root / 'dispatch_control.json',
+                control,
+            )
+            worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+            args = SimpleNamespace(
+                local_only=False,
+                remote_only=True,
+                run_name='coordinator',
+                source_run_name='unused',
+                candidate_arm=['anchor'],
+                seed_offset=2000,
+                formal_step_scale=140.0,
+                local_python='python',
+                local_label='desktop',
+                remote_host='laptop',
+                remote_repo=r'C:\runner',
+                remote_python='python',
+                remote_label='laptop',
+                ssh_key=None,
+                remote_launch_mode='interactive_window',
+                remote_num_workers=4,
+                remote_file_batch_size=10,
+                remote_prefetch_factor=4,
+                remote_val_file_batch_size=7,
+                remote_val_prefetch_factor=5,
+                max_attempts=3,
+                poll_seconds=15.0,
+            )
+
+            with (
+                patch.object(formal_dist.fidelity, 'FIDELITY_ROOT', fidelity_root),
+                patch.object(formal_dist.fidelity, 'acquire_run_lock', return_value=run_dir / 'lock'),
+                patch.object(formal_dist.fidelity, 'release_run_lock'),
+                patch.object(formal_dist.common_dispatch, 'build_workers', return_value=[worker]),
+                patch.object(formal_dist, 'poll_running_remote_tasks', return_value=False),
+                patch.object(
+                    formal_dist,
+                    'launch_task_for_worker',
+                    side_effect=RuntimeError('ssh offline'),
+                ) as launch_task,
+                patch.object(formal_dist.time, 'sleep', side_effect=KeyboardInterrupt),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    formal_dist.run_dispatch(args)
+
+            persisted = json.loads(
+                (dispatch_root / 'dispatch_state.json').read_text(encoding='utf-8')
+            )
+            persisted_task = persisted['formal']['tasks']['formal__anchor']
+            self.assertEqual('running', persisted['coordinator_status'])
+            self.assertEqual('pending', persisted_task['status'])
+            self.assertEqual(0, persisted_task['attempts'])
+            self.assertEqual('ssh offline', persisted_task['remote_launch_error'])
+            self.assertEqual(1, persisted_task['remote_launch_error_count'])
+            launch_task.assert_called_once()
+
+    def test_cleanup_remote_task_unregisters_attempt_scoped_scheduled_task(self):
+        worker = formal_dist.WorkerSpec(kind='remote', label='laptop', python='python')
+        task = {
+            'task_id': 'formal__anchor',
+            'remote_task_name': 'MahjongAI-Formal-formal__anchor',
+        }
+
+        with patch.object(
+            formal_dist,
+            'run_remote_powershell',
+            return_value=subprocess.CompletedProcess([], 0, ''),
+        ) as run_remote:
+            cleaned = formal_dist.cleanup_remote_task_registration(worker, task)
+
+        self.assertTrue(cleaned)
+        self.assertIn('remote_task_cleaned_at', task)
+        self.assertNotIn('remote_cleanup_error', task)
+        self.assertEqual(
+            [
+                'MahjongAI-Formal-formal__anchor',
+                'MahjongAI-WinnerRefine-formal__anchor',
+            ],
+            task['remote_task_cleaned_names'],
+        )
+        cleanup_script = run_remote.call_args.kwargs['script']
+        self.assertIn('MahjongAI-Formal-formal__anchor', cleanup_script)
+        self.assertIn('MahjongAI-WinnerRefine-formal__anchor', cleanup_script)
+
+    def test_remote_scheduled_task_names_support_legacy_and_attempt_state(self):
+        legacy = {
+            'task_id': 'formal__anchor',
+            'remote_task_name': 'MahjongAI-Formal-formal__anchor',
+        }
+        current = {
+            'task_id': 'formal__anchor',
+            'remote_launch_task_id': 'formal_deadbeef_002_12345678',
+            'remote_task_name': 'MahjongAI-WinnerRefine-attempt-specific',
+        }
+
+        self.assertEqual(
+            [
+                'MahjongAI-Formal-formal__anchor',
+                'MahjongAI-WinnerRefine-formal__anchor',
+            ],
+            formal_dist.remote_scheduled_task_names(legacy),
+        )
+        self.assertEqual(
+            [
+                'MahjongAI-WinnerRefine-attempt-specific',
+                'MahjongAI-WinnerRefine-formal_deadbeef_002_12345678',
+            ],
+            formal_dist.remote_scheduled_task_names(current),
+        )
 
 
 if __name__ == '__main__':
