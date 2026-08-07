@@ -221,7 +221,11 @@ else {
 $actionArgs = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $launcherCmdPath + '"'
 $action = New-ScheduledTaskAction -Execute $shellExe -Argument $actionArgs
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName

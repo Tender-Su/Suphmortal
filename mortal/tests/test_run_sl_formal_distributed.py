@@ -148,6 +148,12 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         )
         self.assertIn('-WaitForStartOnly', script)
 
+    def test_remote_task_launcher_has_no_execution_time_limit(self):
+        launcher_path = Path(__file__).resolve().parents[2] / 'scripts' / 'start_interactive_remote_python.ps1'
+        launcher = launcher_path.read_text(encoding='utf-8')
+
+        self.assertIn('-ExecutionTimeLimit ([TimeSpan]::Zero)', launcher)
+
     def test_task_command_is_resume_safe_by_default(self):
         command = formal_dist.build_task_command_args(
             run_name='demo_run',
