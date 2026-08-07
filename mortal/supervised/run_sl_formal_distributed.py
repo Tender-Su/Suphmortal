@@ -1856,6 +1856,45 @@ def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
             task.pop('log_path', None)
 
 
+def reopen_retriable_failed_tasks_for_resume(
+    dispatch_state: dict[str, Any],
+    *,
+    max_attempts: int,
+) -> bool:
+    stage_state = dispatch_state.get('formal')
+    if not isinstance(stage_state, dict):
+        return False
+    changed = False
+    for task in stage_state.get('tasks', {}).values():
+        attempts = int(task.get('attempts', 0))
+        if str(task.get('status')) != 'failed' or attempts >= max_attempts:
+            continue
+        reopened_at = fidelity.ts_now()
+        task.setdefault('recovered_failures', []).append(
+            {
+                'reopened_at': reopened_at,
+                'attempts': attempts,
+                'error': task.get('error'),
+                'finished_at': task.get('finished_at'),
+                'remote_task_name': task.get('remote_task_name'),
+                'remote_runtime_root': task.get('remote_runtime_root'),
+                'remote_result_path': task.get('remote_result_path'),
+                'last_remote_probe_status': task.get('last_remote_probe_status'),
+            }
+        )
+        clear_task_attempt_observations(task)
+        clear_remote_task_metadata(task)
+        task.pop('pid', None)
+        task.pop('worker_label', None)
+        task.pop('started_at', None)
+        task.pop('local_result_path', None)
+        task.pop('log_path', None)
+        task['status'] = 'pending'
+        task['retry_reopened_at'] = reopened_at
+        changed = True
+    return changed
+
+
 def run_dispatch(args: argparse.Namespace) -> int:
     if args.local_only and args.remote_only:
         raise ValueError('--local-only and --remote-only are mutually exclusive')
@@ -1870,6 +1909,10 @@ def run_dispatch(args: argparse.Namespace) -> int:
         if dispatch_state_path.exists():
             dispatch_state = load_dispatch_state(dispatch_state_path)
             reset_running_tasks_for_resume(dispatch_state)
+            reopen_retriable_failed_tasks_for_resume(
+                dispatch_state,
+                max_attempts=args.max_attempts,
+            )
             existing_stage = dispatch_state.get('formal', {})
             if (
                 not common_dispatch.stage_all_tasks_completed(existing_stage)

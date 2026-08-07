@@ -298,6 +298,59 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertEqual('running', task['status'])
         self.assertIn('coordinator_recovered_at', task)
 
+    def test_reopen_failed_task_when_operator_raises_max_attempts(self):
+        task = {
+            'status': 'failed',
+            'attempts': 3,
+            'error': 'remote task is no longer running (orphaned)',
+            'finished_at': '2026-08-07 06:25:55',
+            'worker_label': 'laptop',
+            'remote_launch_mode': 'interactive_window',
+            'remote_runtime_root': r'C:\runtime\attempt_003',
+            'remote_result_path': r'C:\results\attempt_003.json',
+            'remote_task_name': 'MahjongAI-formal-attempt-003',
+            'last_remote_probe_status': 'orphaned',
+        }
+        dispatch_state = {'formal': {'tasks': {'task': task}}}
+
+        with patch.object(formal_dist.fidelity, 'ts_now', return_value='2026-08-07 22:00:00'):
+            changed = formal_dist.reopen_retriable_failed_tasks_for_resume(
+                dispatch_state,
+                max_attempts=4,
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual('pending', task['status'])
+        self.assertEqual(3, task['attempts'])
+        self.assertEqual('2026-08-07 22:00:00', task['retry_reopened_at'])
+        self.assertNotIn('error', task)
+        self.assertNotIn('finished_at', task)
+        self.assertNotIn('remote_task_name', task)
+        self.assertEqual(
+            {
+                'reopened_at': '2026-08-07 22:00:00',
+                'attempts': 3,
+                'error': 'remote task is no longer running (orphaned)',
+                'finished_at': '2026-08-07 06:25:55',
+                'remote_task_name': 'MahjongAI-formal-attempt-003',
+                'remote_runtime_root': r'C:\runtime\attempt_003',
+                'remote_result_path': r'C:\results\attempt_003.json',
+                'last_remote_probe_status': 'orphaned',
+            },
+            task['recovered_failures'][0],
+        )
+
+    def test_failed_task_stays_terminal_without_extra_attempt_budget(self):
+        task = {'status': 'failed', 'attempts': 3, 'error': 'failed'}
+
+        changed = formal_dist.reopen_retriable_failed_tasks_for_resume(
+            {'formal': {'tasks': {'task': task}}},
+            max_attempts=3,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual({'status': 'failed', 'attempts': 3, 'error': 'failed'}, task)
+
     def test_poll_running_remote_tasks_supports_ssh_inline(self):
         task = {
             'task_id': 'formal__anchor',
