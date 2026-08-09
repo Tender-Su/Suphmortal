@@ -488,6 +488,44 @@ class RunStage05FormalTests(unittest.TestCase):
         )
         self.assertTrue(finalized['pending_canonical_alias_targets'])
 
+    def test_finalize_formal_result_retains_cross_phase_offline_winner(self):
+        base_cfg = {
+            'supervised': {
+                'state_file': './checkpoints/sl_latest.pth',
+                'best_state_file': './checkpoints/sl_canonical.pth',
+                'best_loss_state_file': './checkpoints/sl_best_loss.pth',
+                'best_acc_state_file': './checkpoints/sl_best_acc.pth',
+                'best_rank_state_file': './checkpoints/sl_best_rank.pth',
+            },
+            '1v3': {
+                'challenger': {'device': 'cuda:0', 'state_file': './challenger.pth'},
+                'champion': {'device': 'cuda:0', 'state_file': './champion.pth'},
+            },
+        }
+        result = {
+            'winner': 'phase_b_pareto_00',
+            'candidates': {
+                'best_policy': {'path': 'C:/virtual/final_best_policy.pth'},
+                'best_acc': {'path': 'C:/virtual/final_best_acc.pth'},
+                'best_rank': {'path': 'C:/virtual/final_best_rank.pth'},
+                'phase_b_pareto_00': {'path': 'C:/virtual/phase_b_pareto.pth'},
+            },
+        }
+
+        finalized = sl_formal.finalize_formal_result(
+            base_cfg,
+            result,
+            protocol_arm=sl_formal.CURRENT_PRIMARY_PROTOCOL_ARM,
+            config_path=Path('C:/virtual/mortal/config.toml'),
+        )
+
+        self.assertEqual('phase_b_pareto_00', finalized['checkpoint_pack_winner'])
+        self.assertIn('phase_b_pareto_00', finalized['checkpoint_pack_types'])
+        self.assertEqual(
+            {'best_policy', 'best_acc', 'best_rank', 'phase_b_pareto_00'},
+            set(finalized['candidates']),
+        )
+
     def test_build_formal_shortlist_candidates_requires_three_formal_checkpoints(self):
         with self.assertRaisesRegex(RuntimeError, 'missing required checkpoint types'):
             sl_formal.build_formal_shortlist_candidates(

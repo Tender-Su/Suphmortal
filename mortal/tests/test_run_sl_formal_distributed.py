@@ -787,14 +787,29 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
                 candidate_arms=['arm_a', 'arm_b'],
                 formal_seed_offset=2000,
                 formal_step_scale=5.0,
+                convergence_profile='longabc',
             )
 
             self.assertEqual('source_run', context['source_run_name'])
             self.assertEqual(20262329, context['formal_seed'])
             self.assertEqual('proto_arm', context['selected_protocol_arm'])
+            self.assertEqual('longabc', context['convergence_profile'])
+            self.assertIsNone(context['phase_a_extension_source'])
             self.assertEqual(
                 ['triplet_formal_run__arm_a', 'triplet_formal_run__arm_b'],
                 [payload['child_run_name'] for payload in context['candidate_payloads']],
+            )
+
+    def test_load_source_context_rejects_one_extension_source_for_multiple_candidates(self):
+        with self.assertRaisesRegex(RuntimeError, 'exactly one --candidate-arm'):
+            formal_dist.load_source_context(
+                source_run_dir=Path('unused'),
+                coordinator_run_name='unit',
+                candidate_arms=['arm_a', 'arm_b'],
+                formal_seed_offset=0,
+                formal_step_scale=140,
+                convergence_profile='longabc',
+                phase_a_extension_source=r'C:\remote\phase_a',
             )
 
     def test_load_source_context_resolves_structural_aliases(self):
@@ -964,6 +979,8 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
                 'source_refine_front_runner': 'front_runner',
                 'formal_seed': 20262329,
                 'formal_step_scale': 5.0,
+                'convergence_profile': 'longabc',
+                'phase_a_extension_source': r'C:\remote\phase_a',
                 'candidate_payloads': [
                     {
                         **fidelity.candidate_cache_payload(candidate, include_meta=True),
@@ -1019,7 +1036,7 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
                 patch.object(formal_dist.ab, 'build_base_config', return_value={'supervised': {}}),
                 patch.object(formal_dist.ab, 'group_files_by_month', return_value={}),
                 patch.object(formal_dist.ab, 'load_all_files', return_value=[]),
-                patch.object(formal_dist.ab, 'run_ab6_checkpoint', return_value={'winner': 'best_loss'}),
+                patch.object(formal_dist.ab, 'run_ab6_checkpoint', return_value={'winner': 'best_loss'}) as run_ab6,
                 patch.object(formal_dist.formal, 'finalize_formal_result', side_effect=fake_finalize_formal_result),
             ):
                 payload = formal_dist.execute_single_task(
@@ -1031,6 +1048,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
 
             self.assertEqual('triplet_formal_run__arm_a', payload['child_run_name'])
             self.assertEqual('best_loss', payload['offline_checkpoint_winner'])
+            self.assertEqual('longabc', run_ab6.call_args.kwargs['convergence_profile'])
+            self.assertEqual(
+                {'phase_a': r'C:\remote\phase_a'},
+                run_ab6.call_args.kwargs['phase_extension_sources'],
+            )
             child_state = json.loads(
                 (fidelity_root / 'triplet_formal_run__arm_a' / 'state.json').read_text(
                     encoding='utf-8'

@@ -410,7 +410,17 @@ def load_source_context(
     candidate_arms: list[str],
     formal_seed_offset: int,
     formal_step_scale: float,
+    convergence_profile: str | None = None,
+    phase_a_extension_source: str | None = None,
 ) -> dict[str, Any]:
+    if phase_a_extension_source and convergence_profile is None:
+        raise RuntimeError(
+            '--phase-a-extension-source requires --convergence-profile'
+        )
+    if phase_a_extension_source and len(candidate_arms) != 1:
+        raise RuntimeError(
+            '--phase-a-extension-source requires exactly one --candidate-arm'
+        )
     state_path = source_run_dir / 'state.json'
     if not state_path.exists():
         raise FileNotFoundError(f'missing source state.json under {source_run_dir}')
@@ -486,6 +496,8 @@ def load_source_context(
         'source_refine_front_runner': source_refine_front_runner,
         'formal_seed': int(source_seed) + int(formal_seed_offset),
         'formal_step_scale': float(formal_step_scale),
+        'convergence_profile': convergence_profile,
+        'phase_a_extension_source': phase_a_extension_source,
         'candidate_source_ranks': dict(ranking_index),
         'candidate_alias_to_arm': dict(alias_to_arm),
         'candidate_arm_to_alias': {arm_name: arm_to_alias.get(arm_name, arm_name) for arm_name in candidate_index},
@@ -548,6 +560,8 @@ def load_dispatch_context(run_dir: Path) -> dict[str, Any]:
         'source_refine_front_runner': str(dispatch_state.get('source_refine_front_runner') or ''),
         'formal_seed': int(dispatch_state.get('formal_seed', 0)),
         'formal_step_scale': float(dispatch_state.get('formal_step_scale', DEFAULT_FORMAL_STEP_SCALE)),
+        'convergence_profile': dispatch_state.get('convergence_profile'),
+        'phase_a_extension_source': dispatch_state.get('phase_a_extension_source'),
         'candidate_index': candidate_index,
         'candidate_child_run_names': candidate_child_run_names,
         'candidate_source_ranks': candidate_source_ranks,
@@ -576,6 +590,8 @@ def initialize_dispatch_state(
             'source_rank': int(payload.get('source_rank', 999)),
             'formal_seed': int(source_context['formal_seed']),
             'formal_step_scale': float(source_context['formal_step_scale']),
+            'convergence_profile': source_context.get('convergence_profile'),
+            'phase_a_extension_source': source_context.get('phase_a_extension_source'),
             'status': 'pending',
             'attempts': 0,
         }
@@ -596,6 +612,8 @@ def initialize_dispatch_state(
         'source_refine_front_runner': source_context['source_refine_front_runner'],
         'formal_seed': int(source_context['formal_seed']),
         'formal_step_scale': float(source_context['formal_step_scale']),
+        'convergence_profile': source_context.get('convergence_profile'),
+        'phase_a_extension_source': source_context.get('phase_a_extension_source'),
         'candidate_alias_to_arm': dict(source_context.get('candidate_alias_to_arm') or {}),
         'candidate_arm_to_alias': dict(source_context.get('candidate_arm_to_alias') or {}),
         'candidate_payloads': list(source_context['candidate_payloads']),
@@ -800,6 +818,12 @@ def execute_single_task(
                     window_profile=candidate.window_profile,
                     step_scale=float(context['formal_step_scale']),
                     ab_name=ab_name,
+                    convergence_profile=context.get('convergence_profile'),
+                    phase_extension_sources=(
+                        {'phase_a': str(context['phase_a_extension_source'])}
+                        if context.get('phase_a_extension_source')
+                        else None
+                    ),
                 )
                 result = formal.finalize_formal_result(
                     merged_cfg,
@@ -856,6 +880,8 @@ def execute_single_task(
             'source_rank': source_rank,
             'formal_seed': int(context['formal_seed']),
             'formal_step_scale': float(context['formal_step_scale']),
+            'convergence_profile': context.get('convergence_profile'),
+            'phase_a_extension_source': context.get('phase_a_extension_source'),
             'offline_checkpoint_winner': result.get('offline_checkpoint_winner'),
             'shortlist_checkpoint_types': list(formal_state.get('shortlist_checkpoint_types') or []),
             'completed_at': fidelity.ts_now(),
@@ -910,6 +936,16 @@ def validate_task_result_identity(payload: dict[str, Any], task_state: dict[str,
     for key, expected_value in expected.items():
         if not expected_value:
             continue
+        actual_value = str(payload.get(key) or '')
+        if actual_value != expected_value:
+            raise RuntimeError(
+                f'task result identity mismatch for `{key}`: '
+                f'expected `{expected_value}`, got `{actual_value}`'
+            )
+    for key in ('convergence_profile', 'phase_a_extension_source'):
+        if key not in task_state:
+            continue
+        expected_value = str(task_state.get(key) or '')
         actual_value = str(payload.get(key) or '')
         if actual_value != expected_value:
             raise RuntimeError(
@@ -1934,6 +1970,8 @@ def run_dispatch(args: argparse.Namespace) -> int:
                 candidate_arms=candidate_arms,
                 formal_seed_offset=args.seed_offset,
                 formal_step_scale=args.formal_step_scale,
+                convergence_profile=args.convergence_profile,
+                phase_a_extension_source=args.phase_a_extension_source,
             )
             dispatch_state = initialize_dispatch_state(
                 run_name=args.run_name,
@@ -2222,6 +2260,11 @@ def parse_args() -> argparse.Namespace:
     dispatch_cmd.add_argument('--candidate-arm', action='append', required=True)
     dispatch_cmd.add_argument('--seed-offset', type=int, default=DEFAULT_FORMAL_SEED_OFFSET)
     dispatch_cmd.add_argument('--formal-step-scale', type=float, default=DEFAULT_FORMAL_STEP_SCALE)
+    dispatch_cmd.add_argument(
+        '--convergence-profile',
+        choices=sorted(ab.CONVERGENCE_PROFILES),
+    )
+    dispatch_cmd.add_argument('--phase-a-extension-source')
     dispatch_cmd.add_argument('--local-only', action='store_true')
     dispatch_cmd.add_argument(
         '--remote-only',

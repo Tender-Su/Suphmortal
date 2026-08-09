@@ -12,9 +12,27 @@ class LinearWarmUpCosineAnnealingLR(LambdaLR):
         self.max_steps = max_steps
         self.offset = offset
         self.epoch_size = epoch_size
+        self.tail_lr = final
         kwargs['optimizer'] = optimizer
         kwargs['lr_lambda'] = self._step_inner
         super().__init__(**kwargs)
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Checkpoints created before convergence tails have no tail_lr. Their
+        # exact continuation is the original cosine floor.
+        if not hasattr(self, 'tail_lr'):
+            self.tail_lr = self.final
+
+    def set_tail_lr(self, value):
+        value = float(value)
+        if not 0 <= value <= self.final:
+            raise ValueError(f'tail lr must be in [0, {self.final}], got {value}')
+        self.tail_lr = value
+        if self.last_epoch >= self.max_steps:
+            self._last_lr = [value for _ in self.optimizer.param_groups]
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = value
 
     def _step_inner(self, steps):
         steps += self.offset
@@ -26,4 +44,4 @@ class LinearWarmUpCosineAnnealingLR(LambdaLR):
             cos_steps = steps - self.warm_up_steps
             cos_max_steps = self.max_steps - self.warm_up_steps
             return self.final + 0.5 * (self.peak - self.final) * (1 + math.cos(cos_steps / cos_max_steps * math.pi))
-        return self.final
+        return self.tail_lr

@@ -78,6 +78,11 @@ FORMAL_DEFAULTS = {
 }
 
 FORMAL_SHORTLIST_CHECKPOINT_TYPES = (
+    'best_policy',
+    'best_acc',
+    'best_rank',
+)
+LEGACY_FORMAL_SHORTLIST_CHECKPOINT_TYPES = (
     'best_loss',
     'best_acc',
     'best_rank',
@@ -301,12 +306,30 @@ def build_formal_shortlist_candidates(result: dict) -> dict[str, dict]:
         raise RuntimeError('formal result is missing checkpoint candidates')
     shortlist: dict[str, dict] = {}
     missing: list[str] = []
-    for checkpoint_type in FORMAL_SHORTLIST_CHECKPOINT_TYPES:
+    checkpoint_types = (
+        FORMAL_SHORTLIST_CHECKPOINT_TYPES
+        if isinstance(candidates.get('best_policy'), dict)
+        else LEGACY_FORMAL_SHORTLIST_CHECKPOINT_TYPES
+    )
+    for checkpoint_type in checkpoint_types:
         candidate = candidates.get(checkpoint_type)
         if not isinstance(candidate, dict) or not candidate.get('path'):
             missing.append(checkpoint_type)
             continue
         shortlist[checkpoint_type] = candidate
+    offline_winner = str(result.get('winner') or '')
+    offline_candidate = candidates.get(offline_winner)
+    if (
+        offline_winner
+        and offline_winner != 'latest'
+        and offline_winner not in shortlist
+        and isinstance(offline_candidate, dict)
+        and offline_candidate.get('path')
+    ):
+        offline_path = str(offline_candidate['path'])
+        retained_paths = {str(candidate['path']) for candidate in shortlist.values()}
+        if offline_path not in retained_paths:
+            shortlist[offline_winner] = offline_candidate
     if missing:
         raise RuntimeError(
             'formal checkpoint pack is missing required checkpoint types: '
@@ -322,6 +345,8 @@ def resolve_formal_checkpoint_pack_winner(
 ) -> str:
     if offline_winner in candidates:
         return str(offline_winner)
+    if 'best_policy' in candidates:
+        return 'best_policy'
     if 'best_loss' in candidates:
         return 'best_loss'
     raise RuntimeError(
@@ -350,8 +375,8 @@ def finalize_formal_result(
         base_cfg,
         config_path=config_path,
     )
-    result['shortlist_checkpoint_types'] = list(FORMAL_SHORTLIST_CHECKPOINT_TYPES)
-    result['checkpoint_pack_types'] = list(FORMAL_SHORTLIST_CHECKPOINT_TYPES)
+    result['shortlist_checkpoint_types'] = list(result['candidates'])
+    result['checkpoint_pack_types'] = list(result['candidates'])
     result['latest_discarded'] = True
     result['publish_pending'] = True
     result['canonical_alias_sync_pending'] = True
@@ -531,6 +556,11 @@ def main() -> None:
     parser.add_argument('--list-protocol-arms', action='store_true')
     parser.add_argument('--step-scale', type=float, default=5.0)
     parser.add_argument('--seed', type=int, default=FORMAL_DEFAULTS['seed'])
+    parser.add_argument(
+        '--convergence-profile',
+        choices=sorted(ab.CONVERGENCE_PROFILES),
+    )
+    parser.add_argument('--phase-a-extension-source')
     args = parser.parse_args()
 
     if args.list_protocol_arms:
@@ -561,6 +591,12 @@ def main() -> None:
         window_profile=window_profile,
         step_scale=args.step_scale,
         ab_name=ab_name,
+        convergence_profile=args.convergence_profile,
+        phase_extension_sources=(
+            {'phase_a': args.phase_a_extension_source}
+            if args.phase_a_extension_source
+            else None
+        ),
     )
     result = finalize_formal_result(
         base_cfg,

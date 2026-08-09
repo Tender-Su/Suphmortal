@@ -7,9 +7,11 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from copy import deepcopy
 from pathlib import Path
 
@@ -32,15 +34,18 @@ BASE_CFG_PATH = MORTAL_DIR / 'config.toml'
 BASE_INDEX_PATH = MORTAL_DIR / 'checkpoints' / 'file_index_supervised_json.pth'
 AB_ROOT = REPO_ROOT / 'logs' / 'sl_ab'
 AB_ROOT.mkdir(parents=True, exist_ok=True)
-PHASE_PLAN_SCHEMA_VERSION = 1
+PHASE_PLAN_SCHEMA_VERSION = 2
 
 PROVENANCE_IGNORED_SUPERVISED_KEYS = {
     'state_file',
     'best_state_file',
     'best_loss_state_file',
+    'best_policy_state_file',
     'best_acc_state_file',
     'best_rank_state_file',
     'tensorboard_dir',
+    'candidate_portfolio_dir',
+    'milestone_checkpoint_dir',
     'file_index',
     'init_state_file',
     'run_provenance',
@@ -53,6 +58,28 @@ PROVENANCE_IGNORED_SUPERVISED_KEYS = {
     'worker_torch_num_threads',
     'worker_torch_num_interop_threads',
     'force_safe_training',
+    # The hard cap is an operational guard, not part of the optimization
+    # trajectory. Scheduler horizons and convergence policy remain immutable.
+    'max_steps',
+}
+
+
+CONVERGENCE_PROFILES = {
+    'longabc': {
+        'training_caps': {
+            'phase_a': 8_000_000,
+            'phase_b': 8_000_000,
+            'phase_c': 4_000_000,
+        },
+        'tail_lr_levels': (1e-5, 5e-6, 2.5e-6, 1e-6),
+        'smoothing_checks': 5,
+        'improvement_delta': 2e-4,
+        'reduce_patience_steps': 160_000,
+        'stop_patience_steps': 240_000,
+        'min_level_steps': 80_000,
+        'metric': 'policy_loss',
+        'candidate_portfolio_limit': 12,
+    },
 }
 
 
@@ -326,15 +353,19 @@ def checkpoint_paths(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     tb_dir.mkdir(parents=True, exist_ok=True)
     best_loss_state_file = ckpt_dir / 'best_loss.pth'
+    best_policy_state_file = ckpt_dir / 'best_policy.pth'
     best_acc_state_file = ckpt_dir / 'best_action_score.pth'
     best_rank_state_file = ckpt_dir / 'best_rank.pth'
     return {
         'state_file': ckpt_dir / 'latest.pth',
         'best_state_file': best_loss_state_file,
         'best_loss_state_file': best_loss_state_file,
+        'best_policy_state_file': best_policy_state_file,
         'best_acc_state_file': best_acc_state_file,
         'best_rank_state_file': best_rank_state_file,
         'tensorboard_dir': tb_dir,
+        'candidate_portfolio_dir': artifact_root / 'candidate_portfolio',
+        'milestone_checkpoint_dir': artifact_root / 'milestones',
         'file_index': artifact_root / 'file_index.pth',
         'manifest_file': artifact_root / 'phase_manifest.json',
     }
@@ -367,12 +398,17 @@ def load_state_summary(state_path: Path) -> dict:
         'best_monitor_action_score': state.get('best_val_action_score', state.get('best_val_action_acc')),
         'best_monitor_rank_acc': state.get('best_val_rank_acc'),
         'best_full_recent_loss': state.get('best_full_recent_loss', state.get('best_val_loss')),
+        'best_full_recent_policy_loss': state.get(
+            'best_full_recent_policy_loss',
+            (last_full_recent_metrics or {}).get('policy_loss', math.inf),
+        ),
         'best_full_recent_macro_action_acc': state.get('best_full_recent_action_acc', state.get('best_val_action_acc')),
         'best_full_recent_action_score': state.get('best_full_recent_action_score', state.get('best_full_recent_action_acc', state.get('best_val_action_acc'))),
         'best_full_recent_rank_acc': state.get('best_full_recent_rank_acc', state.get('best_val_rank_acc')),
         'last_monitor_recent_metrics': state.get('last_monitor_recent_metrics'),
         'last_full_recent_metrics': last_full_recent_metrics or None,
         'last_old_regression_metrics': state.get('last_old_regression_metrics'),
+        'convergence_state': state.get('convergence_state'),
         'validation_checks': state.get('validation_checks'),
         'full_validation_checks': state.get('full_validation_checks'),
         'old_regression_checks': state.get('old_regression_checks'),
@@ -387,7 +423,50 @@ def load_state_summary_with_fallback(state_path: Path, *fallback_paths: Path) ->
     raise FileNotFoundError(state_path)
 
 
+def load_candidate_portfolio(portfolio_dir: Path) -> dict[str, dict]:
+    manifest_path = portfolio_dir / 'portfolio.json'
+    if not manifest_path.exists():
+        return {}
+    manifest = load_json_file(manifest_path)
+    summaries = {}
+    for index, entry in enumerate(manifest.get('candidates') or []):
+        checkpoint_id = str(entry.get('checkpoint_id') or '')
+        checkpoint_path = str(entry.get('path') or '')
+        if not checkpoint_id or not checkpoint_path or not Path(checkpoint_path).exists():
+            continue
+        old_policy_loss = entry.get('old_regression_policy_loss')
+        full_recent_metrics = dict(entry.get('full_recent_metrics') or {})
+        full_recent_metrics.setdefault('policy_loss', float(entry['policy_loss']))
+        full_recent_metrics.setdefault(
+            'action_quality_score',
+            float(entry['action_quality_score']),
+        )
+        full_recent_metrics.setdefault('rank_acc', float(entry.get('rank_acc') or 0.0))
+        refresh_scenario_quality_score(full_recent_metrics)
+        refresh_selection_quality_score(full_recent_metrics)
+        summaries[f'pareto_{index:02d}_{checkpoint_id[:12]}'] = {
+            'path': checkpoint_path,
+            'checkpoint_id': checkpoint_id,
+            'steps': int(entry.get('step') or 0),
+            'optimizer_steps': int(entry.get('optimizer_steps') or 0),
+            'lr': entry.get('lr'),
+            'last_full_recent_metrics': full_recent_metrics,
+            'last_old_regression_metrics': (
+                {'policy_loss': float(old_policy_loss)}
+                if old_policy_loss is not None
+                else None
+            ),
+            'portfolio_entry': entry,
+        }
+    return summaries
+
+
 def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool:
+    convergence_cfg = supervised_cfg.get('convergence') or {}
+    if bool(convergence_cfg.get('enabled', False)):
+        convergence_state = state.get('convergence_state') or {}
+        return bool(convergence_state.get('converged', False))
+
     steps = int(state.get('steps') or 0)
     max_steps = int(supervised_cfg.get('max_steps') or 0)
     if max_steps > 0 and steps >= max_steps:
@@ -468,6 +547,7 @@ def build_phase_plan(
     seed: int,
     step_scale: float,
     max_steps: int,
+    scheduler_core_steps: int,
     train_files: list[str],
     eval_splits: dict[str, list[str]],
     cfg: dict,
@@ -485,7 +565,8 @@ def build_phase_plan(
         'training_seed': int(seed),
         'file_order_seed': int(phase_seed(seed, phase_name)),
         'step_scale': float(step_scale),
-        'max_steps': int(max_steps),
+        'training_cap_steps': int(max_steps),
+        'scheduler_core_steps': int(scheduler_core_steps),
         'train_files_digest': stable_digest(list(train_files)),
         'monitor_recent_files_digest': stable_digest(
             list(eval_splits['monitor_recent_files'])
@@ -500,7 +581,12 @@ def build_phase_plan(
         'parent_checkpoint_id': parent['checkpoint_id'] if parent else '',
         'parent_plan_id': parent['plan_id'] if parent else '',
     }
-    plan['plan_id'] = stable_digest(plan)
+    lineage_payload = {
+        key: value
+        for key, value in plan.items()
+        if key not in {'training_cap_steps'}
+    }
+    plan['plan_id'] = stable_digest(lineage_payload)
     return plan
 
 
@@ -541,6 +627,259 @@ def atomic_torch_save(payload, path: Path) -> None:
             temp_path.unlink()
 
 
+EXTENSION_MUTABLE_SUPERVISED_KEYS = {
+    *PROVENANCE_IGNORED_SUPERVISED_KEYS,
+    'candidate_portfolio_limit',
+    'convergence',
+    'early_stopping_patience',
+    'early_stopping_patience_checks',
+    'early_stopping_min_delta',
+    'early_stopping_min_lr_reductions',
+    'min_validation_checks',
+}
+
+
+def extension_immutable_config_digest(cfg: dict) -> str:
+    immutable_cfg = deepcopy(cfg)
+    supervised_cfg = immutable_cfg.get('supervised')
+    if isinstance(supervised_cfg, dict):
+        for key in EXTENSION_MUTABLE_SUPERVISED_KEYS:
+            supervised_cfg.pop(key, None)
+    return stable_digest(immutable_cfg)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def nested_state_equal(left, right) -> bool:
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        return left.dtype == right.dtype and left.shape == right.shape and torch.equal(left, right)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            nested_state_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, (list, tuple)) and isinstance(right, type(left)):
+        return len(left) == len(right) and all(
+            nested_state_equal(lhs, rhs) for lhs, rhs in zip(left, right)
+        )
+    return left == right
+
+
+def validate_phase_extension_source(
+    source_state: dict,
+    *,
+    source_path: Path,
+    expected_plan: dict,
+    target_cfg: dict,
+) -> None:
+    source_plan = source_state.get('run_provenance')
+    if not isinstance(source_plan, dict) or not source_plan.get('plan_id'):
+        raise RuntimeError(f'phase extension source has no provenance: {source_path}')
+    for key in (
+        'phase_name',
+        'scheduler_type',
+        'weight_profile',
+        'window_profile',
+        'training_seed',
+        'file_order_seed',
+        'train_files_digest',
+        'monitor_recent_files_digest',
+        'full_recent_files_digest',
+        'old_regression_files_digest',
+        'parent_checkpoint_id',
+        'parent_plan_id',
+    ):
+        if source_plan.get(key) != expected_plan.get(key):
+            raise RuntimeError(
+                f'phase extension source mismatch for {key}: '
+                f'{source_plan.get(key)!r} != {expected_plan.get(key)!r}'
+            )
+
+    source_cfg = source_state.get('config')
+    if not isinstance(source_cfg, dict):
+        raise RuntimeError(f'phase extension source has no saved config: {source_path}')
+    if extension_immutable_config_digest(source_cfg) != extension_immutable_config_digest(target_cfg):
+        raise RuntimeError(
+            'phase extension changes immutable model/data/optimizer semantics; '
+            f'refusing migration from {source_path}'
+        )
+
+    scheduler_state = source_state.get('scheduler') or {}
+    source_core_steps = int(scheduler_state.get('max_steps') or 0)
+    expected_core_steps = int(expected_plan['scheduler_core_steps'])
+    if source_core_steps != expected_core_steps:
+        raise RuntimeError(
+            'phase extension scheduler horizon mismatch: '
+            f'{source_core_steps} != {expected_core_steps}'
+        )
+    optimizer_steps = int(source_state.get('optimizer_steps') or source_state.get('steps') or 0)
+    if optimizer_steps >= expected_core_steps:
+        raise RuntimeError(
+            'automatic convergence migration is only safe before the cosine core '
+            f'ends: optimizer_steps={optimizer_steps:,}, core={expected_core_steps:,}'
+        )
+
+
+def migrate_phase_extension(
+    *,
+    source_root: Path,
+    target_root: Path,
+    target_ckpts: dict[str, Path],
+    expected_plan: dict,
+    target_cfg: dict,
+) -> dict:
+    source_root = source_root.resolve()
+    target_root = target_root.resolve()
+    if source_root == target_root:
+        raise RuntimeError('phase extension source and destination must be different')
+    source_checkpoint_dir = source_root / 'checkpoints'
+    source_paths = {
+        'best_loss_state_file': source_checkpoint_dir / 'best_loss.pth',
+        'best_acc_state_file': source_checkpoint_dir / 'best_action_score.pth',
+        'best_rank_state_file': source_checkpoint_dir / 'best_rank.pth',
+    }
+    source_best_policy = source_checkpoint_dir / 'best_policy.pth'
+    if source_best_policy.exists():
+        source_paths['best_policy_state_file'] = source_best_policy
+    # latest.pth is installed last so an interrupted migration cannot look
+    # like a resumable destination.
+    source_paths['state_file'] = source_checkpoint_dir / 'latest.pth'
+    missing = [str(path) for path in source_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError('phase extension source is incomplete: ' + ', '.join(missing))
+    if target_ckpts['state_file'].exists():
+        raise RuntimeError(f'phase extension destination already has latest.pth: {target_root}')
+
+    marker = target_root / '.migration_in_progress.json'
+    migration_id = uuid.uuid4().hex
+    migration_record = {
+        'schema_version': 1,
+        'migration_id': migration_id,
+        'source_root': str(source_root),
+        'target_root': str(target_root),
+        'target_plan_id': expected_plan['plan_id'],
+        'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'source_files': {},
+    }
+    atomic_write_json(marker, migration_record)
+
+    migrated_states: dict[str, dict] = {}
+    staged_latest = target_root / '.migration_latest.pth'
+    try:
+        for key, source_path in source_paths.items():
+            source_state = torch.load(source_path, map_location='cpu', weights_only=False)
+            validate_phase_extension_source(
+                source_state,
+                source_path=source_path,
+                expected_plan=expected_plan,
+                target_cfg=target_cfg,
+            )
+            migrated = dict(source_state)
+            source_checkpoint_id = str(source_state['checkpoint_id'])
+            migrated['checkpoint_id'] = uuid.uuid4().hex
+            migrated['run_provenance'] = deepcopy(expected_plan)
+            migrated['config'] = deepcopy(target_cfg)
+            migrated.pop('convergence_state', None)
+            migrated['phase_extension_migration'] = {
+                'migration_id': migration_id,
+                'source_path': str(source_path),
+                'source_file_sha256': file_sha256(source_path),
+                'source_checkpoint_id': source_checkpoint_id,
+                'source_plan_id': source_state['run_provenance']['plan_id'],
+                'migrated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            target_path = target_ckpts[key]
+            install_path = staged_latest if key == 'state_file' else target_path
+            atomic_torch_save(migrated, install_path)
+            verified = torch.load(install_path, map_location='cpu', weights_only=False)
+            for state_key in (
+                'mortal',
+                'policy_net',
+                'aux_net',
+                'opponent_aux_net',
+                'danger_aux_net',
+                'optimizer',
+                'scheduler',
+                'scaler',
+                'steps',
+                'optimizer_steps',
+            ):
+                if not nested_state_equal(source_state.get(state_key), verified.get(state_key)):
+                    raise RuntimeError(
+                        f'phase extension changed {state_key} while migrating {source_path}'
+                    )
+            migrated_states[key] = verified
+            migration_record['source_files'][key] = {
+                'source_path': str(source_path),
+                'source_checkpoint_id': source_checkpoint_id,
+                'target_path': str(target_path),
+                'target_checkpoint_id': verified['checkpoint_id'],
+                'source_file_sha256': migrated['phase_extension_migration']['source_file_sha256'],
+                'target_file_sha256': file_sha256(install_path),
+            }
+
+        policy_losses = {
+            key: float(metrics['policy_loss'])
+            for key, state in migrated_states.items()
+            if (
+                (metrics := state.get('last_full_recent_metrics'))
+                and metrics.get('policy_loss') is not None
+                and math.isfinite(float(metrics['policy_loss']))
+            )
+        }
+        if not policy_losses:
+            raise RuntimeError(
+                'phase extension source has no checkpoint with a finite '
+                'full-recent policy_loss'
+            )
+        best_policy_key = min(policy_losses, key=policy_losses.get)
+        best_policy_loss = policy_losses[best_policy_key]
+        best_policy_state = deepcopy(migrated_states[best_policy_key])
+        best_policy_state['best_full_recent_policy_loss'] = best_policy_loss
+        atomic_torch_save(
+            best_policy_state,
+            target_ckpts['best_policy_state_file'],
+        )
+        latest_state = deepcopy(migrated_states['state_file'])
+        latest_state['best_full_recent_policy_loss'] = best_policy_loss
+        atomic_torch_save(latest_state, staged_latest)
+        migration_record['source_files']['state_file']['target_file_sha256'] = (
+            file_sha256(staged_latest)
+        )
+        migration_record['best_policy_source'] = best_policy_key
+        migration_record['best_policy_loss'] = best_policy_loss
+        migration_record['best_policy_target_file_sha256'] = file_sha256(
+            target_ckpts['best_policy_state_file']
+        )
+        migration_record['completed_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        atomic_write_json(target_root / 'phase_extension_migration.json', migration_record)
+        atomic_write_json(
+            target_ckpts['manifest_file'],
+            {
+                'schema_version': PHASE_PLAN_SCHEMA_VERSION,
+                'plan': expected_plan,
+                'status': 'running',
+                'migration_id': migration_id,
+                'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            },
+        )
+        source_log = source_root / 'train.log'
+        if source_log.exists():
+            shutil.copy2(source_log, target_root / 'train.pre_extension.log')
+        marker.unlink()
+        os.replace(staged_latest, target_ckpts['state_file'])
+        return migration_record
+    except Exception:
+        migration_record['failed_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        atomic_write_json(marker, migration_record)
+        raise
+
+
 def validate_existing_phase_artifacts(
     ckpts: dict[str, Path],
     expected_plan: dict,
@@ -577,12 +916,12 @@ def validate_existing_phase_artifacts(
         )
     state = torch.load(latest_path, map_location='cpu', weights_only=False)
     actual_plan = state.get('run_provenance')
-    if actual_plan != expected_plan:
-        actual_plan_id = (
-            actual_plan.get('plan_id')
-            if isinstance(actual_plan, dict)
-            else None
-        )
+    actual_plan_id = (
+        actual_plan.get('plan_id')
+        if isinstance(actual_plan, dict)
+        else None
+    )
+    if actual_plan_id != expected_plan['plan_id']:
         raise RuntimeError(
             f'checkpoint provenance mismatch at {latest_path}: '
             f'expected plan_id={expected_plan["plan_id"]}, '
@@ -594,11 +933,14 @@ def validate_existing_phase_artifacts(
 def score_summary(summary: dict) -> tuple[float, float, float, float]:
     full_metrics = summary.get('last_full_recent_metrics') or {}
     old_metrics = summary.get('last_old_regression_metrics') or {}
-    full_loss = full_metrics.get('loss', summary.get('best_full_recent_loss', math.inf))
+    policy_loss = full_metrics.get(
+        'policy_loss',
+        summary.get('best_full_recent_policy_loss', math.inf),
+    )
     action_score = full_metrics.get('action_quality_score', summary.get('best_full_recent_action_score', action_quality_score(full_metrics or summary)))
     rank_acc = full_metrics.get('rank_acc', summary.get('best_full_recent_rank_acc', 0.0))
-    old_loss = old_metrics.get('loss', 0.0)
-    return (full_loss, -action_score, -rank_acc, old_loss)
+    old_policy_loss = old_metrics.get('policy_loss', math.inf)
+    return (policy_loss, -action_score, -rank_acc, old_policy_loss)
 
 
 def full_recent_loss(summary: dict) -> float:
@@ -606,48 +948,63 @@ def full_recent_loss(summary: dict) -> float:
     return full_metrics.get('loss', summary.get('best_full_recent_loss', math.inf))
 
 
+def full_recent_policy_loss(summary: dict) -> float:
+    full_metrics = summary.get('last_full_recent_metrics') or {}
+    return full_metrics.get(
+        'policy_loss',
+        summary.get('best_full_recent_policy_loss', math.inf),
+    )
+
+
 def action_priority(summary: dict) -> tuple:
     full_metrics = summary.get('last_full_recent_metrics') or {}
     old_metrics = summary.get('last_old_regression_metrics') or {}
     return selection_tiebreak_key(
         full_metrics or summary,
-        recent_loss=full_recent_loss(summary),
-        old_regression_loss=old_metrics.get('loss', math.inf),
+        recent_loss=full_recent_policy_loss(summary),
+        old_regression_loss=old_metrics.get('policy_loss', math.inf),
     )
 
 
 def select_winner_by_policy(results: dict[str, dict]) -> tuple[str, dict]:
-    best_loss = min(full_recent_loss(result['final']['best_loss']) for result in results.values())
+    best_loss = min(
+        full_recent_policy_loss(result['final'].get('best_policy', result['final']['best_loss']))
+        for result in results.values()
+    )
     eligible = {
         name: result
         for name, result in results.items()
-        if full_recent_loss(result['final']['best_loss']) <= best_loss + LOSS_EPSILON
+        if full_recent_policy_loss(
+            result['final'].get('best_policy', result['final']['best_loss'])
+        ) <= best_loss + LOSS_EPSILON
     }
     winner = max(
         eligible.items(),
-        key=lambda item: action_priority(item[1]['final']['best_loss']),
+        key=lambda item: action_priority(
+            item[1]['final'].get('best_policy', item[1]['final']['best_loss'])
+        ),
     )[0]
     return winner, {
         'loss_epsilon': LOSS_EPSILON,
         'best_loss': best_loss,
         'eligible': sorted(eligible),
         'eligible_action_scores': {
-            name: action_quality_score((result['final']['best_loss'].get('last_full_recent_metrics') or result['final']['best_loss']))
+            name: action_quality_score((result['final'].get('best_policy', result['final']['best_loss']).get('last_full_recent_metrics') or result['final'].get('best_policy', result['final']['best_loss'])))
             for name, result in eligible.items()
         },
         'eligible_scenario_scores': {
-            name: scenario_quality_score((result['final']['best_loss'].get('last_full_recent_metrics') or result['final']['best_loss']))
+            name: scenario_quality_score((result['final'].get('best_policy', result['final']['best_loss']).get('last_full_recent_metrics') or result['final'].get('best_policy', result['final']['best_loss'])))
             for name, result in eligible.items()
         },
     }
 
 
 def select_checkpoint_candidate(candidates: dict[str, dict]) -> tuple[str, dict]:
-    best_loss = min(full_recent_loss(candidate) for candidate in candidates.values())
+    best_loss = min(full_recent_policy_loss(candidate) for candidate in candidates.values())
     eligible = {
         name: candidate
         for name, candidate in candidates.items()
-        if full_recent_loss(candidate) <= best_loss + LOSS_EPSILON
+        if full_recent_policy_loss(candidate) <= best_loss + LOSS_EPSILON
     }
     winner = max(
         eligible.items(),
@@ -802,13 +1159,16 @@ def make_phase_overrides(
     seed: int,
     phase_name: str,
     max_steps: int,
+    scheduler_core_steps: int | None,
     scheduler_type: str,
     init_state_file: str | None,
     allow_early_stopping: bool,
+    convergence_profile: str | None = None,
 ) -> dict:
+    scheduler_core_steps = int(scheduler_core_steps or max_steps)
     warm_up_steps = min(
         2000 if phase_name == 'phase_a' else 1000,
-        max(1, max_steps // 4),
+        max(1, scheduler_core_steps // 4),
     )
     scheduler_overrides = {
         'type': scheduler_type,
@@ -820,15 +1180,18 @@ def make_phase_overrides(
         'cooldown': 0,
         'min_lr': 1e-6,
         'final': 1e-5,
-        'max_steps': max_steps,
+        'max_steps': scheduler_core_steps,
     }
     supervised = {
         'state_file': str(ckpts['state_file']),
         'best_state_file': str(ckpts['best_state_file']),
         'best_loss_state_file': str(ckpts['best_loss_state_file']),
+        'best_policy_state_file': str(ckpts['best_policy_state_file']),
         'best_acc_state_file': str(ckpts['best_acc_state_file']),
         'best_rank_state_file': str(ckpts['best_rank_state_file']),
         'tensorboard_dir': str(ckpts['tensorboard_dir']),
+        'candidate_portfolio_dir': str(ckpts['candidate_portfolio_dir']),
+        'milestone_checkpoint_dir': str(ckpts['milestone_checkpoint_dir']),
         'file_index': str(ckpts['file_index']),
         'batch_size': BASE_SCREENING['batch_size'],
         'save_every': BASE_SCREENING['save_every'],
@@ -854,6 +1217,29 @@ def make_phase_overrides(
         'seed': seed,
         'scheduler': scheduler_overrides,
     }
+    if convergence_profile is not None:
+        profile = CONVERGENCE_PROFILES[convergence_profile]
+        if scheduler_type != 'cosine':
+            raise ValueError(
+                f'convergence profile {convergence_profile!r} requires cosine '
+                f'scheduling for {phase_name}'
+            )
+        supervised.update({
+            'early_stopping_patience': 0,
+            'early_stopping_patience_checks': 0,
+            'candidate_portfolio_limit': int(profile['candidate_portfolio_limit']),
+            'convergence': {
+                'enabled': True,
+                'core_optimizer_steps': scheduler_core_steps,
+                'tail_lr_levels': list(profile['tail_lr_levels']),
+                'smoothing_checks': int(profile['smoothing_checks']),
+                'improvement_delta': float(profile['improvement_delta']),
+                'reduce_patience_steps': int(profile['reduce_patience_steps']),
+                'stop_patience_steps': int(profile['stop_patience_steps']),
+                'min_level_steps': int(profile['min_level_steps']),
+                'metric': str(profile['metric']),
+            },
+        })
     if init_state_file:
         supervised['init_state_file'] = init_state_file
     return {'supervised': supervised}
@@ -875,13 +1261,27 @@ def run_phase(
     step_scale: float,
     storage_root: Path | None = None,
     allow_early_stopping: bool = True,
+    convergence_profile: str | None = None,
+    phase_extension_source: str | None = None,
 ) -> dict:
     exp_dir = AB_ROOT / ab_name / arm_name / phase_name
     ckpts = checkpoint_paths(
         exp_dir,
         storage_root=storage_root,
     )
-    max_steps = max(1, int(round(BASE_SCREENING['phase_steps'][phase_name] * step_scale)))
+    scheduler_core_steps = max(
+        1,
+        int(round(BASE_SCREENING['phase_steps'][phase_name] * step_scale)),
+    )
+    max_steps = scheduler_core_steps
+    if convergence_profile is not None:
+        profile = CONVERGENCE_PROFILES[convergence_profile]
+        max_steps = int(profile['training_caps'][phase_name])
+        if max_steps <= scheduler_core_steps:
+            raise ValueError(
+                f'{convergence_profile} training cap for {phase_name} must exceed '
+                f'its scheduler core: {max_steps} <= {scheduler_core_steps}'
+            )
     pool_size = BASE_SCREENING['phase_train_pool'][phase_name]
     train_files = phase_train_files(
         grouped,
@@ -898,9 +1298,11 @@ def run_phase(
             seed=seed,
             phase_name=phase_name,
             max_steps=max_steps,
+            scheduler_core_steps=scheduler_core_steps,
             scheduler_type=scheduler_type,
             init_state_file=init_state_file,
             allow_early_stopping=allow_early_stopping,
+            convergence_profile=convergence_profile,
         ),
     )
     cfg_path = exp_dir / 'config.toml'
@@ -915,12 +1317,21 @@ def run_phase(
         seed=seed,
         step_scale=step_scale,
         max_steps=max_steps,
+        scheduler_core_steps=scheduler_core_steps,
         train_files=train_files,
         eval_splits=eval_splits,
         cfg=cfg,
         init_state_file=init_state_file,
     )
     cfg['supervised']['run_provenance'] = phase_plan
+    if phase_extension_source and not ckpts['state_file'].exists():
+        migrate_phase_extension(
+            source_root=Path(phase_extension_source),
+            target_root=(storage_root or exp_dir),
+            target_ckpts=ckpts,
+            expected_plan=phase_plan,
+            target_cfg=cfg,
+        )
     existing_state = validate_existing_phase_artifacts(ckpts, phase_plan)
     write_index(
         ckpts['file_index'],
@@ -964,9 +1375,15 @@ def run_phase(
         run_training(cfg_path, log_path)
     summaries = {
         'latest': load_state_summary(ckpts['state_file']),
+        'best_policy': load_state_summary_with_fallback(
+            ckpts['best_policy_state_file'],
+            ckpts['best_loss_state_file'],
+            ckpts['state_file'],
+        ),
         'best_loss': load_state_summary_with_fallback(ckpts['best_loss_state_file'], ckpts['state_file']),
         'best_acc': load_state_summary_with_fallback(ckpts['best_acc_state_file'], ckpts['state_file']),
         'best_rank': load_state_summary_with_fallback(ckpts['best_rank_state_file'], ckpts['state_file']),
+        'portfolio': load_candidate_portfolio(ckpts['candidate_portfolio_dir']),
         'artifact_root': str((storage_root or exp_dir).resolve()),
         'artifacts_retained': True,
         'paths': {name: str(path) for name, path in ckpts.items()},
@@ -1014,7 +1431,19 @@ def run_arm(
     eval_splits: dict[str, list[str]],
     step_scale: float,
     allow_early_stopping: bool = True,
+    convergence_profile: str | None = None,
+    phase_extension_sources: dict[str, str] | None = None,
 ) -> dict:
+    if phase_extension_sources and convergence_profile is None:
+        raise ValueError('phase extension requires an explicit convergence profile')
+    unknown_extension_phases = set(phase_extension_sources or {}) - set(
+        CURRICULUM_PROFILES[curriculum_profile]
+    )
+    if unknown_extension_phases:
+        raise ValueError(
+            'phase extension contains phases outside the selected curriculum: '
+            + ', '.join(sorted(unknown_extension_phases))
+        )
     phase_order = CURRICULUM_PROFILES[curriculum_profile]
     final_phase_name = phase_order[-1]
     init_state_file = None
@@ -1022,27 +1451,37 @@ def run_arm(
     for phase_name in phase_order:
         scheduler_type = SCHEDULER_PROFILES[scheduler_profile][phase_name]
         storage_root_override = phase_storage_root_override(phase_name)
+        phase_kwargs = {
+            'base_cfg': base_cfg,
+            'grouped': grouped,
+            'ab_name': ab_name,
+            'arm_name': arm_name,
+            'phase_name': phase_name,
+            'scheduler_type': scheduler_type,
+            'weight_profile': weight_profile,
+            'window_profile': window_profile,
+            'seed': seed,
+            'eval_splits': eval_splits,
+            'init_state_file': init_state_file,
+            'step_scale': step_scale,
+            'storage_root': storage_root_override,
+            'allow_early_stopping': allow_early_stopping,
+        }
+        if convergence_profile is not None:
+            phase_kwargs['convergence_profile'] = convergence_profile
+        extension_source = (phase_extension_sources or {}).get(phase_name)
+        if extension_source:
+            phase_kwargs['phase_extension_source'] = extension_source
         phase_result = run_phase(
-            base_cfg,
-            grouped,
-            ab_name=ab_name,
-            arm_name=arm_name,
-            phase_name=phase_name,
-            scheduler_type=scheduler_type,
-            weight_profile=weight_profile,
-            window_profile=window_profile,
-            seed=seed,
-            eval_splits=eval_splits,
-            init_state_file=init_state_file,
-            step_scale=step_scale,
-            storage_root=storage_root_override,
-            allow_early_stopping=allow_early_stopping,
+            **phase_kwargs,
         )
         handoff_candidates = {
+            'best_policy': phase_result.get('best_policy', phase_result['best_loss']),
             'best_loss': phase_result['best_loss'],
             'best_acc': phase_result['best_acc'],
             'best_rank': phase_result['best_rank'],
         }
+        handoff_candidates.update(phase_result.get('portfolio') or {})
         handoff_winner, handoff_selection = select_checkpoint_candidate(
             handoff_candidates
         )
@@ -1060,24 +1499,40 @@ def run_arm(
         phase_results[phase_name] = phase_result
         init_state_file = handoff_summary['path']
 
+    final_best_policy = phase_results[final_phase_name].get(
+        'best_policy',
+        phase_results[final_phase_name]['best_loss'],
+    )
     final_best_loss = phase_results[final_phase_name]['best_loss']
     final_best_acc = phase_results[final_phase_name]['best_acc']
     final_best_rank = phase_results[final_phase_name]['best_rank']
     final_latest = phase_results[final_phase_name]['latest']
+    cross_phase_candidates = {
+        f'{phase_name}_{checkpoint_type}': phase_result[checkpoint_type]
+        for phase_name, phase_result in phase_results.items()
+        for checkpoint_type in ('best_policy', 'best_acc', 'best_rank', 'best_loss')
+        if checkpoint_type in phase_result
+    }
+    for phase_name, phase_result in phase_results.items():
+        for candidate_name, candidate in (phase_result.get('portfolio') or {}).items():
+            cross_phase_candidates[f'{phase_name}_{candidate_name}'] = candidate
     return {
         'scheduler_profile': scheduler_profile,
         'curriculum_profile': curriculum_profile,
         'weight_profile': weight_profile,
         'window_profile': window_profile,
+        'convergence_profile': convergence_profile,
         'phase_order': phase_order,
         'phase_results': phase_results,
         'final': {
+            'best_policy': final_best_policy,
             'best_loss': final_best_loss,
             'best_acc': final_best_acc,
             'best_rank': final_best_rank,
             'latest': final_latest,
         },
-        'score': score_summary(final_best_loss),
+        'cross_phase_candidates': cross_phase_candidates,
+        'score': score_summary(final_best_policy),
     }
 
 
@@ -1310,7 +1765,7 @@ def run_ab5_quality_signal(grouped: dict[str, list[str]]) -> dict:
     return conclusion
 
 
-def run_ab6_checkpoint(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, curriculum_profile: str, weight_profile: str, window_profile: str, step_scale: float, ab_name: str = 'sl_ab6_checkpoint') -> dict:
+def run_ab6_checkpoint(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, curriculum_profile: str, weight_profile: str, window_profile: str, step_scale: float, ab_name: str = 'sl_ab6_checkpoint', convergence_profile: str | None = None, phase_extension_sources: dict[str, str] | None = None) -> dict:
     eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
     result = run_arm(
         base_cfg,
@@ -1325,14 +1780,18 @@ def run_ab6_checkpoint(base_cfg: dict, grouped: dict[str, list[str]], seed: int,
         eval_splits=eval_splits,
         step_scale=step_scale,
         allow_early_stopping=False,
+        convergence_profile=convergence_profile,
+        phase_extension_sources=phase_extension_sources,
     )
     final = result['final']
     candidates = {
+        'best_policy': final.get('best_policy', final['best_loss']),
         'best_loss': final['best_loss'],
         'best_acc': final['best_acc'],
         'best_rank': final['best_rank'],
         'latest': final['latest'],
     }
+    candidates.update(result.get('cross_phase_candidates') or {})
     winner, selection = select_checkpoint_candidate(candidates)
     payload = {'winner': winner, 'selection': selection, 'candidates': candidates, 'result': result}
     save_results(ab_name, payload)
@@ -1359,6 +1818,11 @@ def main() -> None:
     parser.add_argument('--val-prefetch-factor', type=int, default=-1)
     parser.add_argument('--batch-size', type=int, default=-1)
     parser.add_argument('--force-safe-training', action='store_true')
+    parser.add_argument(
+        '--convergence-profile',
+        choices=sorted(CONVERGENCE_PROFILES),
+    )
+    parser.add_argument('--phase-a-extension-source')
     args = parser.parse_args()
 
     if args.monitor_val_batches > 0:
@@ -1413,7 +1877,12 @@ def main() -> None:
         return
     if args.ab == 'ab6':
         ab_name = args.ab_name or 'sl_ab6_checkpoint'
-        print(json.dumps(run_ab6_checkpoint(base_cfg, grouped, args.seed, args.scheduler_profile, args.curriculum_profile, args.weight_profile, args.window_profile, args.step_scale, ab_name=ab_name), ensure_ascii=False, indent=2))
+        extension_sources = (
+            {'phase_a': args.phase_a_extension_source}
+            if args.phase_a_extension_source
+            else None
+        )
+        print(json.dumps(run_ab6_checkpoint(base_cfg, grouped, args.seed, args.scheduler_profile, args.curriculum_profile, args.weight_profile, args.window_profile, args.step_scale, ab_name=ab_name, convergence_profile=args.convergence_profile, phase_extension_sources=extension_sources), ensure_ascii=False, indent=2))
         return
 
     ab1 = run_ab1(base_cfg, grouped, args.seed, args.step_scale)
@@ -1429,6 +1898,7 @@ def main() -> None:
         winner_result['weight_profile'],
         winner_result['window_profile'],
         args.step_scale,
+        convergence_profile=args.convergence_profile,
     )
     payload = {
         'winner_scheduler': winner_result['scheduler_profile'],

@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 import os
 import sys
@@ -7,6 +8,7 @@ import uuid
 from copy import deepcopy
 from os import path
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,6 +16,12 @@ from torch.utils.data._utils.collate import default_collate
 
 from mortal._repo import MORTAL_ROOT, REPO_ROOT
 from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
+from mortal.supervised.convergence import (
+    ConvergenceConfig,
+    initial_convergence_state,
+    observe_convergence,
+    select_bounded_pareto_candidates,
+)
 
 
 LEGACY_PATHS_FOR_SCRIPT_IMPORTS = {
@@ -245,13 +253,13 @@ def validate_checkpoint_provenance(state, expected_provenance, *, cfg_prefix):
     if not expected_provenance:
         return
     actual_provenance = state.get('run_provenance')
-    if actual_provenance != expected_provenance:
-        expected_plan = expected_provenance.get('plan_id')
-        actual_plan = (
-            actual_provenance.get('plan_id')
-            if isinstance(actual_provenance, dict)
-            else None
-        )
+    expected_plan = expected_provenance.get('plan_id')
+    actual_plan = (
+        actual_provenance.get('plan_id')
+        if isinstance(actual_provenance, dict)
+        else None
+    )
+    if actual_plan != expected_plan:
         raise RuntimeError(
             f'{cfg_prefix}.state_file provenance mismatch: '
             f'expected plan_id={expected_plan!r}, actual plan_id={actual_plan!r}. '
@@ -467,6 +475,15 @@ def train(
     full_val_every_checks = supervised_cfg.get('full_val_every_checks', 0)
     old_regression_every_checks = supervised_cfg.get('old_regression_every_checks', 0)
     max_steps = supervised_cfg.get('max_steps', 0)
+    convergence_raw = supervised_cfg.get('convergence', {})
+    if not isinstance(convergence_raw, dict):
+        raise ValueError(f'{cfg_prefix}.convergence must be a table')
+    convergence_enabled = bool(convergence_raw.get('enabled', False))
+    convergence_config = (
+        ConvergenceConfig.from_mapping(convergence_raw)
+        if convergence_enabled
+        else None
+    )
     force_safe_training = supervised_cfg.get('force_safe_training', False)
     gradient_calibration_cfg = supervised_cfg.get('gradient_calibration', {})
     if not isinstance(gradient_calibration_cfg, dict):
@@ -596,11 +613,19 @@ def train(
     state_file = supervised_cfg['state_file']
     best_state_file = supervised_cfg['best_state_file']
     best_loss_state_file = supervised_cfg.get('best_loss_state_file', best_state_file)
+    best_policy_state_file = supervised_cfg.get('best_policy_state_file', best_loss_state_file)
     best_acc_state_file = supervised_cfg.get('best_acc_state_file', best_state_file)
     best_rank_state_file = supervised_cfg.get('best_rank_state_file', best_state_file)
     init_state_file = supervised_cfg.get('init_state_file', '')
     tensorboard_dir = supervised_cfg['tensorboard_dir']
     file_index = supervised_cfg['file_index']
+    candidate_portfolio_dir = supervised_cfg.get('candidate_portfolio_dir', '')
+    candidate_portfolio_limit = int(supervised_cfg.get('candidate_portfolio_limit', 0) or 0)
+    milestone_checkpoint_dir = supervised_cfg.get('milestone_checkpoint_dir', '')
+    if candidate_portfolio_limit < 0 or candidate_portfolio_limit in {1, 2}:
+        raise ValueError(
+            f'{cfg_prefix}.candidate_portfolio_limit must be zero or at least three'
+        )
     scheduler_cfg = supervised_cfg.get('scheduler', {})
     peak_lr = supervised_cfg.get('lr', config['optim']['scheduler']['peak'])
     warm_up_steps = scheduler_cfg.get('warm_up_steps', config['optim']['scheduler'].get('warm_up_steps', 0))
@@ -683,6 +708,22 @@ def train(
     logging.info(f'peak_lr: {peak_lr:.3e}')
     logging.info(f'warm_up_steps: {warm_up_steps}')
     logging.info(f'max_steps: {max_steps}')
+    logging.info(f'convergence_enabled: {convergence_enabled}')
+    if convergence_config is not None:
+        logging.info(
+            'convergence: metric=%s core_optimizer_steps=%s tail_lr_levels=%s '
+            'smoothing_checks=%s improvement_delta=%s reduce_patience_steps=%s '
+            'stop_patience_steps=%s min_level_steps=%s',
+            convergence_config.metric,
+            convergence_config.core_optimizer_steps,
+            convergence_config.tail_lr_levels,
+            convergence_config.smoothing_checks,
+            convergence_config.improvement_delta,
+            convergence_config.reduce_patience_steps,
+            convergence_config.stop_patience_steps,
+            convergence_config.min_level_steps,
+        )
+    logging.info(f'candidate_portfolio_limit: {candidate_portfolio_limit}')
     logging.info(f'action_score_weights: {ACTION_SCORE_WEIGHTS}')
     logging.info(f'opponent_state_weight: {opponent_state_weight}')
     logging.info(f'opponent_shanten_weight: {opponent_shanten_weight}')
@@ -812,6 +853,26 @@ def train(
         )
     else:
         raise ValueError(f'unsupported {cfg_prefix}.scheduler.type: {scheduler_type}')
+    if convergence_config is not None:
+        if scheduler_type != 'cosine':
+            raise ValueError('supervised convergence currently requires scheduler.type=cosine')
+        if convergence_config.core_optimizer_steps != cosine_total_steps:
+            raise ValueError(
+                'convergence.core_optimizer_steps must exactly match the cosine '
+                f'scheduler horizon: {convergence_config.core_optimizer_steps} != '
+                f'{cosine_total_steps}'
+            )
+        first_tail_lr = convergence_config.tail_lr_levels[0]
+        if not math.isclose(first_tail_lr, cosine_final_lr, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(
+                'the first convergence tail lr must match scheduler.final: '
+                f'{first_tail_lr} != {cosine_final_lr}'
+            )
+        if max_steps > 0 and max_steps <= convergence_config.core_optimizer_steps:
+            raise ValueError(
+                'convergence training max_steps must leave room after the cosine core: '
+                f'{max_steps} <= {convergence_config.core_optimizer_steps}'
+            )
     scaler = GradScaler(device.type, enabled=enable_amp)
 
     def load_optional_head_states(state):
@@ -2279,6 +2340,7 @@ def train(
     best_val_action_score = float('-inf')
     best_val_rank_acc = 0.0
     best_full_recent_loss = float('inf')
+    best_full_recent_policy_loss = float('inf')
     best_full_recent_action_acc = 0.0
     best_full_recent_action_score = float('-inf')
     best_full_recent_rank_acc = 0.0
@@ -2291,6 +2353,11 @@ def train(
     last_monitor_recent_metrics = None
     last_full_recent_metrics = None
     last_old_regression_metrics = None
+    convergence_state = (
+        initial_convergence_state(convergence_config)
+        if convergence_config is not None
+        else None
+    )
 
     def reset_resume_validation_history():
         nonlocal best_val_loss
@@ -2298,6 +2365,7 @@ def train(
         nonlocal best_val_action_score
         nonlocal best_val_rank_acc
         nonlocal best_full_recent_loss
+        nonlocal best_full_recent_policy_loss
         nonlocal best_full_recent_action_acc
         nonlocal best_full_recent_action_score
         nonlocal best_full_recent_rank_acc
@@ -2310,12 +2378,14 @@ def train(
         nonlocal last_monitor_recent_metrics
         nonlocal last_full_recent_metrics
         nonlocal last_old_regression_metrics
+        nonlocal convergence_state
 
         best_val_loss = float('inf')
         best_val_action_acc = 0.0
         best_val_action_score = float('-inf')
         best_val_rank_acc = 0.0
         best_full_recent_loss = float('inf')
+        best_full_recent_policy_loss = float('inf')
         best_full_recent_action_acc = 0.0
         best_full_recent_action_score = float('-inf')
         best_full_recent_rank_acc = 0.0
@@ -2328,6 +2398,11 @@ def train(
         last_monitor_recent_metrics = None
         last_full_recent_metrics = None
         last_old_regression_metrics = None
+        convergence_state = (
+            initial_convergence_state(convergence_config)
+            if convergence_config is not None
+            else None
+        )
 
     if path.exists(state_file):
         state = torch.load(state_file, weights_only=False, map_location=device)
@@ -2367,6 +2442,10 @@ def train(
         best_val_action_score = state.get('best_val_action_score', best_val_action_score)
         best_val_rank_acc = state.get('best_val_rank_acc', best_val_rank_acc)
         best_full_recent_loss = state.get('best_full_recent_loss', best_full_recent_loss)
+        best_full_recent_policy_loss = state.get(
+            'best_full_recent_policy_loss',
+            best_full_recent_policy_loss,
+        )
         best_full_recent_action_acc = state.get(
             'best_full_recent_action_acc',
             best_full_recent_action_acc,
@@ -2388,6 +2467,8 @@ def train(
         last_monitor_recent_metrics = state.get('last_monitor_recent_metrics')
         last_full_recent_metrics = state.get('last_full_recent_metrics')
         last_old_regression_metrics = state.get('last_old_regression_metrics')
+        if convergence_config is not None:
+            convergence_state = state.get('convergence_state') or convergence_state
         timestamp = datetime.fromtimestamp(state['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
         logging.info(
             f'loaded {checkpoint_label} checkpoint: {timestamp}; '
@@ -3089,6 +3170,7 @@ def train(
         nonlocal best_val_action_score
         nonlocal best_val_rank_acc
         nonlocal best_full_recent_loss
+        nonlocal best_full_recent_policy_loss
         nonlocal best_full_recent_action_acc
         nonlocal best_full_recent_action_score
         nonlocal best_full_recent_rank_acc
@@ -3097,6 +3179,7 @@ def train(
         nonlocal patience_counter
         nonlocal num_lr_reductions
         nonlocal validation_checks
+        nonlocal convergence_state
 
         validation_checks += 1
         prev_monitor_recent_metrics = last_monitor_recent_metrics
@@ -3239,9 +3322,66 @@ def train(
         ):
             run_old_regression_validation(validation_checks)
 
+        convergence_decision = None
+        if convergence_config is not None:
+            if not ran_full_val or selection_metrics is metrics:
+                raise RuntimeError(
+                    'convergence decisions require a full-recent validation on every '
+                    'monitor check'
+                )
+            convergence_decision = observe_convergence(
+                convergence_state,
+                convergence_config,
+                optimizer_steps=optimizer_steps,
+                metric_value=float(selection_metrics[convergence_config.metric]),
+            )
+            convergence_state = convergence_decision.state
+            if convergence_decision.action == 'reduce_lr':
+                previous_lr = optimizer.param_groups[0]['lr']
+                scheduler.set_tail_lr(convergence_decision.target_lr)
+                num_lr_reductions += 1
+                logging.info(
+                    '[CONVERGENCE] %s; lr %.3e -> %.3e (count=%s)',
+                    convergence_decision.reason,
+                    previous_lr,
+                    optimizer.param_groups[0]['lr'],
+                    num_lr_reductions,
+                )
+            else:
+                logging.info(
+                    '[CONVERGENCE] action=%s smoothed=%s %s',
+                    convergence_decision.action,
+                    (
+                        'NA'
+                        if convergence_decision.smoothed_metric is None
+                        else f'{convergence_decision.smoothed_metric:.6f}'
+                    ),
+                    convergence_decision.reason,
+                )
+            writer.add_scalar(
+                'convergence/tail_level',
+                convergence_state['level_index'],
+                steps,
+            )
+            writer.add_scalar(
+                'convergence/tail_started',
+                int(convergence_state['tail_started']),
+                steps,
+            )
+            if convergence_decision.smoothed_metric is not None:
+                writer.add_scalar(
+                    f'convergence/smoothed_{convergence_config.metric}',
+                    convergence_decision.smoothed_metric,
+                    steps,
+                )
+
         improved_selection_loss = is_strict_loss_improvement(
             selection_metrics['loss'],
             best_full_recent_loss,
+        )
+        improved_selection_policy_loss = is_strict_loss_improvement(
+            selection_metrics['policy_loss'],
+            best_full_recent_policy_loss,
         )
         improved_selection_acc = selection_metrics['macro_action_acc'] > best_full_recent_action_acc
         improved_selection_action_score = selection_metrics['action_quality_score'] > best_full_recent_action_score
@@ -3252,6 +3392,15 @@ def train(
             best_full_recent_loss = selection_metrics['loss']
             best_checkpoint_targets.append(
                 (best_loss_state_file, f'new best-loss {checkpoint_label} checkpoint')
+            )
+
+        if improved_selection_policy_loss:
+            best_full_recent_policy_loss = selection_metrics['policy_loss']
+            best_checkpoint_targets.append(
+                (
+                    best_policy_state_file,
+                    f'new best-policy-loss {checkpoint_label} checkpoint',
+                )
             )
 
         if improved_selection_acc:
@@ -3276,6 +3425,12 @@ def train(
                 continue
             saved_best_paths.add(checkpoint_key)
             save_named_state(state, checkpoint_path, label=label)
+        save_candidate_portfolio(state, selection_metrics)
+        if convergence_decision is not None and convergence_decision.action in {
+            'reduce_lr',
+            'stop',
+        }:
+            save_convergence_milestone(state, convergence_decision.action)
 
         mortal.train()
         policy_net.train()
@@ -3285,19 +3440,30 @@ def train(
         if danger_aux_net is not None:
             danger_aux_net.train()
 
-        should_stop = (
+        legacy_should_stop = (
             early_stopping_patience_checks > 0
             and validation_checks >= min_validation_checks
             and patience_counter >= early_stopping_patience_checks
             and num_lr_reductions >= early_stopping_min_lr_reductions
         )
-        if should_stop:
+        convergence_should_stop = (
+            convergence_decision is not None
+            and convergence_decision.action == 'stop'
+        )
+        should_stop = legacy_should_stop or convergence_should_stop
+        if legacy_should_stop:
             logging.info(
                 f'early stopping triggered at monitor check {validation_checks}; '
                 f'best_val_loss={best_val_loss:.4f} '
                 f'best_val_action_acc={best_val_action_acc:.4f} '
                 f'best_val_action_score={best_val_action_score:.4f} '
                 f'best_val_rank_acc={best_val_rank_acc:.4f}'
+            )
+        if convergence_should_stop:
+            logging.info(
+                'convergence stopping triggered at monitor check %s: %s',
+                validation_checks,
+                convergence_decision.reason,
             )
         return should_stop, ran_full_val
 
@@ -3326,6 +3492,7 @@ def train(
             'best_val_action_score': best_val_action_score,
             'best_val_rank_acc': best_val_rank_acc,
             'best_full_recent_loss': best_full_recent_loss,
+            'best_full_recent_policy_loss': best_full_recent_policy_loss,
             'best_full_recent_action_acc': best_full_recent_action_acc,
             'best_full_recent_action_score': best_full_recent_action_score,
             'best_full_recent_rank_acc': best_full_recent_rank_acc,
@@ -3338,6 +3505,7 @@ def train(
             'last_monitor_recent_metrics': last_monitor_recent_metrics,
             'last_full_recent_metrics': last_full_recent_metrics,
             'last_old_regression_metrics': last_old_regression_metrics,
+            'convergence_state': deepcopy(convergence_state),
             'config_section': cfg_prefix,
             'stage_label': stage_label,
             'checkpoint_label': checkpoint_label,
@@ -3356,6 +3524,130 @@ def train(
     def save_named_state(state, checkpoint_path, *, label):
         atomic_torch_save(state, checkpoint_path)
         logging.info(f'saved {label} to {checkpoint_path}')
+
+    def write_json_atomically(target: Path, payload: dict[str, Any]):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = target.with_name(
+            f'.{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp'
+        )
+        try:
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding='utf-8',
+                newline='\n',
+            )
+            os.replace(temp_path, target)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def save_candidate_portfolio(state, selection_metrics):
+        if not candidate_portfolio_dir or candidate_portfolio_limit <= 0:
+            return
+        root = Path(candidate_portfolio_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        manifest_path = root / 'portfolio.json'
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+        else:
+            manifest = {'schema_version': 1, 'candidates': []}
+        existing = [
+            entry
+            for entry in list(manifest.get('candidates') or [])
+            if Path(str(entry.get('path') or '')).exists()
+        ]
+        old_policy_loss = None
+        if last_old_regression_metrics is not None:
+            old_policy_loss = float(
+                last_old_regression_metrics.get('policy_loss', math.inf)
+            )
+        candidate_path = root / (
+            f'step_{steps:09d}_{state["checkpoint_id"][:12]}.pth'
+        )
+        compact_full_metrics = {}
+        for key in (
+            'loss',
+            'policy_loss',
+            'macro_action_acc',
+            'action_quality_score',
+            'scenario_quality_score',
+            'selection_quality_score',
+            'rank_acc',
+        ):
+            if selection_metrics.get(key) is not None:
+                compact_full_metrics[key] = float(selection_metrics[key])
+        if selection_metrics.get('scenario_quality_score_version') is not None:
+            compact_full_metrics['scenario_quality_score_version'] = str(
+                selection_metrics['scenario_quality_score_version']
+            )
+        candidate = {
+            'checkpoint_id': state['checkpoint_id'],
+            'path': str(candidate_path.resolve()),
+            'step': int(steps),
+            'optimizer_steps': int(optimizer_steps),
+            'policy_loss': float(selection_metrics['policy_loss']),
+            'action_quality_score': float(selection_metrics['action_quality_score']),
+            'old_regression_policy_loss': old_policy_loss,
+            'rank_acc': float(selection_metrics['rank_acc']),
+            'full_recent_metrics': compact_full_metrics,
+            'lr': float(optimizer.param_groups[0]['lr']),
+            'tail_level': (
+                int(convergence_state['level_index'])
+                if convergence_state is not None
+                else None
+            ),
+            'managed': True,
+        }
+        selected, removed = select_bounded_pareto_candidates(
+            [*existing, candidate],
+            limit=candidate_portfolio_limit,
+        )
+        if any(entry['checkpoint_id'] == state['checkpoint_id'] for entry in selected):
+            atomic_torch_save(state, candidate_path)
+            logging.info(
+                'saved Pareto candidate checkpoint: step=%s policy=%.6f '
+                'action_score=%.6f old_policy=%.6f path=%s',
+                steps,
+                candidate['policy_loss'],
+                candidate['action_quality_score'],
+                (
+                    math.inf
+                    if candidate['old_regression_policy_loss'] is None
+                    else candidate['old_regression_policy_loss']
+                ),
+                candidate_path,
+            )
+        manifest.update({
+            'schema_version': 1,
+            'limit': candidate_portfolio_limit,
+            'updated_at': datetime.now().isoformat(timespec='seconds'),
+            'candidates': selected,
+        })
+        write_json_atomically(manifest_path, manifest)
+        for entry in removed:
+            if not entry.get('managed'):
+                continue
+            removed_path = Path(str(entry.get('path') or ''))
+            try:
+                if removed_path.parent.resolve() == root.resolve() and removed_path.exists():
+                    removed_path.unlink()
+                    logging.info(f'pruned dominated Pareto checkpoint: {removed_path}')
+            except OSError as exc:
+                logging.warning(
+                    'failed to prune Pareto checkpoint %s: %s',
+                    removed_path,
+                    exc,
+                )
+
+    def save_convergence_milestone(state, action):
+        if not milestone_checkpoint_dir or convergence_state is None:
+            return
+        root = Path(milestone_checkpoint_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        level = int(convergence_state['level_index'])
+        target = root / f'{action}_level_{level}_step_{steps:09d}.pth'
+        atomic_torch_save(state, target)
+        logging.info(f'saved convergence milestone checkpoint to {target}')
 
     if (
         steps > 0
