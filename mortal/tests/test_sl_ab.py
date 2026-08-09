@@ -957,6 +957,53 @@ class Stage05ABTests(unittest.TestCase):
                 target_cfg=source_state['config'],
             )
 
+    def test_extension_config_ignores_unrelated_rebased_paths(self):
+        source = {
+            'control': {'version': 4, 'batch_size': 1024, 'state_file': 'old.pth'},
+            'dataset': {
+                'enable_augmentation': True,
+                'augmented_first': False,
+                'globs': [r'C:\data\*.json'],
+            },
+            'optim': {'eps': 1e-8},
+            'resnet': {'conv_channels': 256},
+            'aux': {'next_rank_weight': 0.1},
+            'supervised': {
+                'batch_size': 1024,
+                'state_file': r'C:\old\latest.pth',
+                'max_steps': 2_520_000,
+            },
+            '1v3': {'log_dir': r'C:\old\1v3'},
+        }
+        target = deepcopy(source)
+        target['control']['state_file'] = './mortal.pth'
+        target['dataset']['globs'] = ['C:/data/*.json']
+        target['supervised']['state_file'] = r'C:\new\latest.pth'
+        target['supervised']['max_steps'] = 8_000_000
+        target['1v3']['log_dir'] = './1v3'
+
+        self.assertEqual(
+            sl_ab.extension_immutable_config_digest(source),
+            sl_ab.extension_immutable_config_digest(target),
+        )
+        self.assertEqual([], sl_ab.extension_config_differences(source, target))
+
+    def test_extension_config_reports_training_semantic_difference(self):
+        source = {
+            'control': {'version': 4},
+            'dataset': {'enable_augmentation': True},
+            'optim': {'weight_decay': 0.01},
+            'resnet': {'conv_channels': 256},
+            'supervised': {'batch_size': 1024},
+        }
+        target = deepcopy(source)
+        target['optim']['weight_decay'] = 0.02
+
+        self.assertEqual(
+            [('optim.weight_decay', 0.01, 0.02)],
+            sl_ab.extension_config_differences(source, target),
+        )
+
     def test_load_candidate_portfolio_preserves_compact_selection_metrics(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

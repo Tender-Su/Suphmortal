@@ -639,13 +639,87 @@ EXTENSION_MUTABLE_SUPERVISED_KEYS = {
 }
 
 
+EXTENSION_CONTROL_TRAINING_KEYS = {
+    'version',
+    'batch_size',
+    'opt_step_every',
+    'save_every',
+    'device',
+    'enable_cudnn_benchmark',
+    'enable_amp',
+    'enable_compile',
+    'allow_tf32',
+    'enable_cuda_prefetch',
+}
+
+
+EXTENSION_DATASET_TRAINING_KEYS = {
+    'file_batch_size',
+    'reserve_ratio',
+    'num_workers',
+    'rayon_num_threads',
+    'worker_torch_num_threads',
+    'worker_torch_num_interop_threads',
+    'enable_augmentation',
+    'augmented_first',
+}
+
+
+def extension_immutable_config_view(cfg: dict) -> dict:
+    supervised = deepcopy(cfg.get('supervised') or {})
+    for key in EXTENSION_MUTABLE_SUPERVISED_KEYS:
+        supervised.pop(key, None)
+
+    control = cfg.get('control') or {}
+    dataset = cfg.get('dataset') or {}
+    return {
+        'control': {
+            key: deepcopy(control[key])
+            for key in sorted(EXTENSION_CONTROL_TRAINING_KEYS)
+            if key in control
+        },
+        'dataset': {
+            key: deepcopy(dataset[key])
+            for key in sorted(EXTENSION_DATASET_TRAINING_KEYS)
+            if key in dataset
+        },
+        'optim': deepcopy(cfg.get('optim') or {}),
+        'resnet': deepcopy(cfg.get('resnet') or {}),
+        'aux': deepcopy(cfg.get('aux') or {}),
+        'search': deepcopy(cfg.get('search') or {}),
+        'search_distill': deepcopy(cfg.get('search_distill') or {}),
+        'supervised': supervised,
+    }
+
+
 def extension_immutable_config_digest(cfg: dict) -> str:
-    immutable_cfg = deepcopy(cfg)
-    supervised_cfg = immutable_cfg.get('supervised')
-    if isinstance(supervised_cfg, dict):
-        for key in EXTENSION_MUTABLE_SUPERVISED_KEYS:
-            supervised_cfg.pop(key, None)
-    return stable_digest(immutable_cfg)
+    return stable_digest(extension_immutable_config_view(cfg))
+
+
+def config_value_differences(left, right, path: str = '') -> list[tuple[str, object, object]]:
+    if isinstance(left, dict) and isinstance(right, dict):
+        differences = []
+        for key in sorted(set(left) | set(right)):
+            child_path = f'{path}.{key}' if path else str(key)
+            if key not in left:
+                differences.append((child_path, '<missing>', right[key]))
+            elif key not in right:
+                differences.append((child_path, left[key], '<missing>'))
+            else:
+                differences.extend(
+                    config_value_differences(left[key], right[key], child_path)
+                )
+        return differences
+    if left != right:
+        return [(path, left, right)]
+    return []
+
+
+def extension_config_differences(source_cfg: dict, target_cfg: dict) -> list[tuple[str, object, object]]:
+    return config_value_differences(
+        extension_immutable_config_view(source_cfg),
+        extension_immutable_config_view(target_cfg),
+    )
 
 
 def file_sha256(path: Path) -> str:
@@ -703,10 +777,17 @@ def validate_phase_extension_source(
     source_cfg = source_state.get('config')
     if not isinstance(source_cfg, dict):
         raise RuntimeError(f'phase extension source has no saved config: {source_path}')
-    if extension_immutable_config_digest(source_cfg) != extension_immutable_config_digest(target_cfg):
+    config_differences = extension_config_differences(source_cfg, target_cfg)
+    if config_differences:
+        rendered_differences = '; '.join(
+            f'{path}: {source_value!r} != {target_value!r}'
+            for path, source_value, target_value in config_differences[:8]
+        )
+        if len(config_differences) > 8:
+            rendered_differences += f'; ... ({len(config_differences) - 8} more)'
         raise RuntimeError(
             'phase extension changes immutable model/data/optimizer semantics; '
-            f'refusing migration from {source_path}'
+            f'refusing migration from {source_path}: {rendered_differences}'
         )
 
     scheduler_state = source_state.get('scheduler') or {}
