@@ -3786,6 +3786,8 @@ def train(
                     steps,
                     nonfinite_batches,
                 )
+                # No backward pass releases this graph, so drop all device refs before prefetch.
+                del batch, total_loss, batch_metrics
                 continue
             scaler.scale(total_loss / opt_step_every).backward()
 
