@@ -454,10 +454,8 @@ def train(
     from mortal.core.checkpoint_utils import load_brain_state_with_input_bridge
     from mortal.config import config
     from mortal.data.dataloader import SupervisedFileDatasetsIter, resolve_rayon_num_threads, worker_init_fn
-    from mortal.core.lr_scheduler import (
-        LinearWarmUpCosineAnnealingLR,
-        LinearWarmUpStableDecayLR,
-    )
+    from mortal.core.lr_scheduler import LinearWarmUpCosineAnnealingLR
+    from mortal.supervised.lr_scheduler import LinearWarmUpConstantLR
     from libriichi.consts import ACTION_SPACE, obs_shape
     from mortal.core.model import AuxNet, Brain, CategoricalPolicy, DangerAuxNet, OpponentStateAuxNet
     from mortal.eval.search_runtime import LocalSearchPlanner, SearchConfig, SearchDistillConfig
@@ -924,13 +922,10 @@ def train(
             betas=betas,
             eps=eps,
         )
-        scheduler = LinearWarmUpStableDecayLR(
+        scheduler = LinearWarmUpConstantLR(
             optimizer,
             peak=peak_lr,
-            final=peak_lr,
             warm_up_steps=warm_up_steps,
-            stable_steps=0,
-            decay_steps=0,
             init=warmup_init,
         )
     else:
