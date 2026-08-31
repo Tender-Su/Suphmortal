@@ -112,6 +112,20 @@ function Write-SupervisorLog {
     )
 }
 
+function Move-AtomicFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Temporary,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    if (Test-Path -LiteralPath $Target) {
+        [IO.File]::Replace($Temporary, $Target, $null)
+    }
+    else {
+        [IO.File]::Move($Temporary, $Target)
+    }
+}
+
 function Write-SupervisorStatus {
     param(
         [Parameter(Mandatory = $true)][string]$State,
@@ -143,7 +157,7 @@ function Write-SupervisorStatus {
         ($payload | ConvertTo-Json -Depth 4),
         [Text.UTF8Encoding]::new($false)
     )
-    [IO.File]::Move($temporary, $statusFile, $true)
+    Move-AtomicFile -Temporary $temporary -Target $statusFile
 }
 
 function Test-ApexRunning {
@@ -163,7 +177,7 @@ function Write-PauseRequest {
         $payload,
         [Text.UTF8Encoding]::new($false)
     )
-    [IO.File]::Move($temporary, $pauseFile, $true)
+    Move-AtomicFile -Temporary $temporary -Target $pauseFile
 }
 
 function Remove-PauseRequest {
