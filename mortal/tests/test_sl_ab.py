@@ -214,7 +214,7 @@ class Stage05ABTests(unittest.TestCase):
                 [sl_ab.sys.executable, '-m', 'mortal.supervised.train_supervised'],
                 run_args.args[0],
             )
-            self.assertEqual(sl_ab.MORTAL_DIR, run_args.kwargs['cwd'])
+            self.assertEqual(sl_ab.REPO_ROOT, run_args.kwargs['cwd'])
             self.assertEqual(str(cfg_path), run_args.kwargs['env']['MORTAL_CFG'])
             self.assertFalse(run_args.kwargs['check'])
 

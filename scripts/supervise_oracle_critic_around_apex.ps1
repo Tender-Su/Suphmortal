@@ -119,7 +119,15 @@ function Move-AtomicFile {
     )
 
     if (Test-Path -LiteralPath $Target) {
-        [IO.File]::Replace($Temporary, $Target, $null)
+        $backup = "$Target.$PID.replace.bak"
+        try {
+            [IO.File]::Replace($Temporary, $Target, $backup)
+        }
+        finally {
+            if (Test-Path -LiteralPath $backup) {
+                Remove-Item -LiteralPath $backup -Force
+            }
+        }
     }
     else {
         [IO.File]::Move($Temporary, $Target)

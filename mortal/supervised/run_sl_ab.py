@@ -1373,7 +1373,7 @@ def run_training(cfg_path: Path, log_path: Path) -> None:
             f.flush()
             proc = subprocess.run(
                 [sys.executable, '-m', 'mortal.supervised.train_supervised'],
-                cwd=MORTAL_DIR,
+                cwd=REPO_ROOT,
                 env=env,
                 stdout=f,
                 stderr=subprocess.STDOUT,
