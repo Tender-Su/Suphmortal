@@ -182,6 +182,7 @@
 - 阶段交接完整保留模型、AdamW、AMP scaler、scheduler 和 phase-best baseline；因为训练 split 改变，SL 明确重启该阶段的数据遍历，不伪装成可精确恢复的 data cursor。
 - 从成熟 A checkpoint 进入 B 时不重置到大 LR：读取来源 checkpoint 的实际 LR，以它为 warmup 起点，在 `5k` steps 内最多温和回热 `2x`。当前 A 最佳点对应 `5e-6 -> 1e-5`。
 - 最终阶段保留 checkpointed 动态 LR 候选层级直到 `1e-6`，但不是机械一路衰减。每个更低 LR 必须先在 paired gate 上刷新 phase-best，才有资格继续下探；若该层连续两次 gate 都没有有效改善，就停止并保留此前的 `adaptive_best`，避免后段越训越不动。
+- 长训可由 Apex supervisor 托管：检测到 `r5apex_dx12.exe` 后，SL 在当前 optimizer batch 边界原子保存 exact 状态并以退出码 `75` 释放 GPU；Apex 关闭后从该 checkpoint 自动恢复。课程阶段变更本来就会重启数据遍历，不把它表述成不存在的 SL sample cursor 精确恢复。
 - 代码入口是 `python -m mortal.supervised.run_sl_ab --ab adaptive --adaptive-curriculum-profile full_dynamic`。offline 只产生 finalist，最终发布仍由 `formal_1v3` 决定。
 - 长训产物未通过 `formal_1v3` 前不得覆盖 `sl_canonical.pth`；通过后才发布为下一版 supervised canonical。
 

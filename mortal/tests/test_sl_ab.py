@@ -218,6 +218,27 @@ class Stage05ABTests(unittest.TestCase):
             self.assertEqual(str(cfg_path), run_args.kwargs['env']['MORTAL_CFG'])
             self.assertFalse(run_args.kwargs['check'])
 
+    def test_run_training_propagates_external_pause_exit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = Path(tmp_dir) / 'config.toml'
+            cfg_path.write_text('', encoding='utf-8', newline='\n')
+            log_path = Path(tmp_dir) / 'train.log'
+
+            with patch.object(
+                sl_ab.subprocess,
+                'run',
+                return_value=SimpleNamespace(
+                    returncode=sl_ab.EXTERNAL_PAUSE_EXIT_CODE,
+                ),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    sl_ab.run_training(cfg_path, log_path)
+
+            self.assertEqual(
+                sl_ab.EXTERNAL_PAUSE_EXIT_CODE,
+                raised.exception.code,
+            )
+
     def test_load_state_summary_with_fallback_uses_latest_when_best_checkpoint_missing(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

@@ -39,6 +39,7 @@ BASE_INDEX_PATH = MORTAL_DIR / 'checkpoints' / 'file_index_supervised_json.pth'
 AB_ROOT = REPO_ROOT / 'logs' / 'sl_ab'
 AB_ROOT.mkdir(parents=True, exist_ok=True)
 PHASE_PLAN_SCHEMA_VERSION = 2
+EXTERNAL_PAUSE_EXIT_CODE = 75
 
 PROVENANCE_IGNORED_SUPERVISED_KEYS = {
     'state_file',
@@ -1380,6 +1381,8 @@ def run_training(cfg_path: Path, log_path: Path) -> None:
             )
         if proc.returncode == 0:
             return
+        if proc.returncode == EXTERNAL_PAUSE_EXIT_CODE:
+            raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
         marker = transient_training_failure_marker(log_path, start_offset=attempt_log_start)
         if marker is None:
             raise RuntimeError(f'train_supervised.py failed, see {log_path}')

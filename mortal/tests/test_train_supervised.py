@@ -29,6 +29,26 @@ class FakeLoaderIterator:
 
 
 class TrainSupervisedResumeAuxTests(unittest.TestCase):
+    def test_external_pause_file_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pause_path = Path(tmp_dir) / 'apex_pause.request'
+            with patch.dict(
+                train_supervised.os.environ,
+                {train_supervised.EXTERNAL_PAUSE_ENV_VAR: str(pause_path)},
+                clear=False,
+            ):
+                self.assertEqual(
+                    pause_path.resolve(),
+                    train_supervised.resolve_external_pause_file(),
+                )
+                self.assertFalse(
+                    train_supervised.external_pause_requested(pause_path)
+                )
+                pause_path.write_text('{}', encoding='utf-8')
+                self.assertTrue(
+                    train_supervised.external_pause_requested(pause_path)
+                )
+
     def test_sanitize_sys_path_for_spawn_keeps_repo_root_first(self):
         original_sys_path = list(sys.path)
         repo_root = str(train_supervised.REPO_ROOT)

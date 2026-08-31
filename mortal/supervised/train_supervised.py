@@ -41,6 +41,18 @@ LEGACY_PATHS_FOR_SCRIPT_IMPORTS = {
     REPO_ROOT / 'scripts',
 }
 
+EXTERNAL_PAUSE_ENV_VAR = 'MORTAL_ORACLE_PAUSE_FILE'
+EXTERNAL_PAUSE_EXIT_CODE = 75
+
+
+def resolve_external_pause_file():
+    value = os.environ.get(EXTERNAL_PAUSE_ENV_VAR, '').strip()
+    return Path(value).resolve() if value else None
+
+
+def external_pause_requested(file_path):
+    return file_path is not None and file_path.is_file()
+
 
 def sanitize_sys_path_for_spawn():
     """Keep Windows DataLoader workers from importing script modules as packages."""
@@ -464,6 +476,13 @@ def train(
         raise KeyError(f'missing config section: {config_section}')
     supervised_cfg = config[config_section]
     cfg_prefix = config_section
+    external_pause_file = resolve_external_pause_file()
+    if external_pause_requested(external_pause_file):
+        logging.info(
+            'external pause already requested before SL initialization: %s',
+            external_pause_file,
+        )
+        raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
     run_provenance = deepcopy(supervised_cfg.get('run_provenance') or {})
     if not isinstance(run_provenance, dict):
         raise ValueError(f'{cfg_prefix}.run_provenance must be a table')
@@ -2995,6 +3014,13 @@ def train(
                 )
                 with torch.inference_mode():
                     for batch in tqdm(val_loader, desc=desc, unit='batch'):
+                        if external_pause_requested(external_pause_file):
+                            logging.info(
+                                'external pause requested during SL validation at '
+                                'step=%s; latest exact checkpoint is retained',
+                                steps,
+                            )
+                            raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
                         _, batch_metrics = forward_loss(
                             batch,
                             batch_on_device=val_batches_on_device,
@@ -4055,6 +4081,21 @@ def train(
 
     def handle_post_optimizer_step(epoch):
         nonlocal should_stop, ran_full_val, stop_due_to_budget
+
+        if external_pause_requested(external_pause_file):
+            release_train_loader()
+            save_latest_state(
+                epoch,
+                epoch_complete=False,
+                reason='external_pause',
+            )
+            writer.flush()
+            logging.info(
+                'external pause saved exact SL state at step=%s; exiting code=%s',
+                steps,
+                EXTERNAL_PAUSE_EXIT_CODE,
+            )
+            raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
 
         post_step_actions = plan_post_optimizer_step_actions(
             steps=steps,
