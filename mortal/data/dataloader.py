@@ -1,3 +1,4 @@
+import hashlib
 import os
 import random
 import re
@@ -15,6 +16,15 @@ from mortal.data.reward_calculator import RewardCalculator
 
 
 _REPLAY_PARAM_VERSION_RE = re.compile(r'^pv(\d+)_sid\d+_')
+
+
+def stable_source_game_id(filename):
+    digest = hashlib.blake2b(
+        str(filename).encode('utf-8'),
+        digest_size=8,
+        person=b'mortal-sl',
+    ).digest()
+    return int.from_bytes(digest, byteorder='little') & ((1 << 63) - 1)
 
 
 def replay_param_version_from_path(filename):
@@ -461,6 +471,7 @@ class SupervisedFileDatasetsIter(IterableDataset):
         rayon_num_threads=0,
         emit_opponent_state_labels=None,
         track_danger_labels=None,
+        emit_game_id=False,
     ):
         super().__init__()
         self.version = version
@@ -483,6 +494,7 @@ class SupervisedFileDatasetsIter(IterableDataset):
             track_danger_labels = danger_labels_enabled()
         self.emit_opponent_state_labels = bool(emit_opponent_state_labels)
         self.track_danger_labels = bool(track_danger_labels)
+        self.emit_game_id = bool(emit_game_id)
         self.track_opponent_states = self.emit_opponent_state_labels
 
     def build_iter(self):
@@ -524,7 +536,8 @@ class SupervisedFileDatasetsIter(IterableDataset):
         self.buffer.clear()
 
     def populate_buffer(self, file_list):
-        for _, gameplay_batch in iter_loaded_gameplay_batches(self.loader, file_list):
+        for source_name, gameplay_batch in iter_loaded_gameplay_batches(self.loader, file_list):
+            game_id = stable_source_game_id(source_name)
             for game in gameplay_batch:
                 obs = game.take_obs_batch()
                 actions = game.take_actions_batch()
@@ -563,6 +576,8 @@ class SupervisedFileDatasetsIter(IterableDataset):
                         danger_value,
                         danger_player_mask,
                     ))
+                if self.emit_game_id:
+                    columns.append(repeat(game_id, game_size))
                 extend_buffer_from_columns(self.buffer, *columns)
 
     def __iter__(self):
