@@ -310,6 +310,30 @@ class Stage05ABTests(unittest.TestCase):
             )
         )
 
+    def test_adaptive_checkpoint_completes_only_after_controller_completion(self):
+        config = {
+            'max_steps': 8_000_000,
+            'adaptive_curriculum': {'enabled': True},
+        }
+        self.assertFalse(
+            sl_ab.checkpoint_is_complete_for_config(
+                {
+                    'steps': 8_000_000,
+                    'adaptive_curriculum_state': {'completed': False},
+                },
+                config,
+            )
+        )
+        self.assertTrue(
+            sl_ab.checkpoint_is_complete_for_config(
+                {
+                    'steps': 250_000,
+                    'adaptive_curriculum_state': {'completed': True},
+                },
+                config,
+            )
+        )
+
     def test_longabc_convergence_decouples_core_from_training_cap(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_a')
@@ -337,6 +361,206 @@ class Stage05ABTests(unittest.TestCase):
             supervised['convergence']['tail_lr_levels'],
         )
         self.assertEqual(0, supervised['early_stopping_patience_checks'])
+
+    def test_full_dynamic_overrides_use_evidence_gates_and_constant_scheduler(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_c')
+            overrides = sl_ab.make_phase_overrides(
+                ckpts,
+                seed=7,
+                phase_name='phase_c',
+                max_steps=8_000_000,
+                scheduler_core_steps=8_000_000,
+                scheduler_type='constant',
+                init_state_file=None,
+                allow_early_stopping=False,
+                adaptive_curriculum_profile='full_dynamic',
+            )
+
+        supervised = overrides['supervised']
+        adaptive = supervised['adaptive_curriculum']
+        self.assertEqual('constant', supervised['scheduler']['type'])
+        self.assertEqual(5_000, supervised['scheduler']['warm_up_steps'])
+        self.assertEqual(10_000, supervised['val_every_steps'])
+        self.assertEqual(10_000, supervised['save_every'])
+        self.assertEqual(50_000, adaptive['gate_every_steps'])
+        self.assertEqual(2, adaptive['required_futile_gates'])
+        self.assertTrue(adaptive['final_phase'])
+        self.assertEqual(
+            [1e-4, 5e-5, 2.5e-5, 1e-5, 5e-6, 2.5e-6, 1e-6],
+            adaptive['lr_levels'],
+        )
+        self.assertEqual(0, supervised['early_stopping_patience_checks'])
+
+    def test_mature_bootstrap_caps_dynamic_lr_ladder(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ckpts = sl_ab.checkpoint_paths(Path(tmp_dir) / 'phase_c')
+            overrides = sl_ab.make_phase_overrides(
+                ckpts,
+                seed=7,
+                phase_name='phase_c',
+                max_steps=8_000_000,
+                scheduler_core_steps=8_000_000,
+                scheduler_type='constant',
+                init_state_file=None,
+                allow_early_stopping=False,
+                adaptive_curriculum_profile='full_dynamic',
+                adaptive_peak_lr=5e-5,
+            )
+
+        supervised = overrides['supervised']
+        self.assertEqual(5e-5, supervised['lr'])
+        self.assertEqual(
+            [5e-5, 2.5e-5, 1e-5, 5e-6, 2.5e-6, 1e-6],
+            supervised['adaptive_curriculum']['lr_levels'],
+        )
+
+    def test_adaptive_bootstrap_starts_at_phase_b_and_preserves_anchor(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_path = root / 'legacy_a_best.pth'
+            eval_splits = {
+                'monitor_recent_files': ['monitor.json.gz'],
+                'full_recent_files': ['full.json.gz'],
+                'old_regression_files': ['old.json.gz'],
+            }
+            source_plan = {
+                'plan_id': 'legacy-a-plan',
+                'phase_name': 'phase_a',
+                'monitor_recent_files_digest': sl_ab.stable_digest(
+                    eval_splits['monitor_recent_files']
+                ),
+                'full_recent_files_digest': sl_ab.stable_digest(
+                    eval_splits['full_recent_files']
+                ),
+                'old_regression_files_digest': sl_ab.stable_digest(
+                    eval_splits['old_regression_files']
+                ),
+            }
+            torch.save(
+                {
+                    'checkpoint_id': 'legacy-a-best',
+                    'run_provenance': source_plan,
+                    'steps': 2_880_000,
+                    'optimizer_steps': 2_880_000,
+                    'epoch': 8,
+                    'timestamp': 1.0,
+                    'optimizer': {'param_groups': [{'lr': 5e-6}]},
+                    'last_full_recent_metrics': {
+                        'policy_loss': 0.44,
+                        'action_quality_score': -0.20,
+                        'rank_acc': 0.30,
+                    },
+                    'last_old_regression_metrics': {'policy_loss': 0.48},
+                },
+                source_path,
+            )
+            calls = []
+
+            def fake_run_phase(**kwargs):
+                calls.append(kwargs)
+                phase_name = kwargs['phase_name']
+                checkpoint_path = root / phase_name / 'adaptive_best.pth'
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint_path.write_text(
+                    phase_name,
+                    encoding='utf-8',
+                    newline='\n',
+                )
+                manifest_path = root / phase_name / 'phase_manifest.json'
+                manifest_path.write_text(
+                    '{"plan": {"plan_id": "unit"}, "status": "completed"}',
+                    encoding='utf-8',
+                    newline='\n',
+                )
+                summary = {
+                    'checkpoint_id': f'{phase_name}-best',
+                    'path': str(checkpoint_path),
+                    'last_full_recent_metrics': {
+                        'policy_loss': 0.43 if phase_name == 'phase_b' else 0.42,
+                        'action_quality_score': -0.19,
+                        'rank_acc': 0.31,
+                    },
+                    'last_old_regression_metrics': {'policy_loss': 0.47},
+                    'adaptive_curriculum_state': {'completed': True},
+                }
+                return {
+                    'latest': summary,
+                    'best_policy': summary,
+                    'best_loss': summary,
+                    'best_acc': summary,
+                    'best_rank': summary,
+                    'adaptive_best': summary,
+                    'portfolio': {},
+                    'paths': {'manifest_file': str(manifest_path)},
+                }
+
+            original_ab_root = sl_ab.AB_ROOT
+            sl_ab.AB_ROOT = root / 'sl_ab'
+            try:
+                with (
+                    patch.object(sl_ab, 'run_phase', side_effect=fake_run_phase),
+                    patch.object(sl_ab, 'phase_storage_root_override', return_value=None),
+                ):
+                    result = sl_ab.run_arm(
+                        base_cfg={},
+                        grouped={},
+                        ab_name='bootstrap_unit',
+                        arm_name='dynamic_from_b',
+                        scheduler_profile='phasewise',
+                        curriculum_profile='broad_to_recent',
+                        weight_profile='strong',
+                        window_profile='24m_12m',
+                        seed=123,
+                        eval_splits=eval_splits,
+                        step_scale=1.0,
+                        allow_early_stopping=False,
+                        adaptive_curriculum_profile='full_dynamic',
+                        adaptive_start_phase='phase_b',
+                        adaptive_bootstrap_state_file=str(source_path),
+                    )
+            finally:
+                sl_ab.AB_ROOT = original_ab_root
+
+            self.assertEqual(['phase_b', 'phase_c'], result['phase_order'])
+            self.assertEqual(str(source_path), calls[0]['init_state_file'])
+            self.assertIsNone(calls[0]['adaptive_handoff_source'])
+            self.assertIsNone(calls[1]['init_state_file'])
+            self.assertEqual(
+                str(root / 'phase_b' / 'adaptive_best.pth'),
+                calls[1]['adaptive_handoff_source'],
+            )
+            self.assertEqual([1e-5, 1e-5], [call['adaptive_peak_lr'] for call in calls])
+            self.assertEqual(5e-6, calls[0]['adaptive_warmup_init_lr'])
+            self.assertIsNone(calls[1]['adaptive_warmup_init_lr'])
+            self.assertTrue(result['adaptive_bootstrap']['eval_split_digests_match'])
+            self.assertFalse(result['adaptive_bootstrap']['optimizer_state_preserved'])
+            self.assertEqual(5e-6, result['adaptive_bootstrap']['source_lr'])
+            self.assertEqual(2.0, result['adaptive_bootstrap']['rewarm_ratio'])
+            self.assertIn('bootstrap_anchor', result['cross_phase_candidates'])
+            self.assertTrue(
+                (root / 'sl_ab' / 'bootstrap_unit' / 'adaptive_bootstrap.json').exists()
+            )
+
+    def test_adaptive_phase_b_requires_bootstrap_checkpoint(self):
+        with self.assertRaisesRegex(ValueError, 'requires a bootstrap checkpoint'):
+            sl_ab.run_arm(
+                base_cfg={},
+                grouped={},
+                ab_name='unit',
+                arm_name='unit',
+                scheduler_profile='phasewise',
+                curriculum_profile='broad_to_recent',
+                weight_profile='strong',
+                window_profile='24m_12m',
+                seed=1,
+                eval_splits={},
+                step_scale=1.0,
+                adaptive_curriculum_profile='full_dynamic',
+                adaptive_start_phase='phase_b',
+            )
 
     def test_checkpoint_paths_keep_distinct_metric_winners_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -920,6 +1144,164 @@ class Stage05ABTests(unittest.TestCase):
             self.assertEqual(0.35, migrated_best_policy['best_full_recent_policy_loss'])
             self.assertTrue(target_ckpts['manifest_file'].exists())
             self.assertFalse((target_root / '.migration_in_progress.json').exists())
+
+    def test_adaptive_phase_handoff_preserves_training_state_and_resets_gate(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_path = root / 'source' / 'checkpoints' / 'adaptive_best.pth'
+            target_path = root / 'target' / 'checkpoints' / 'latest.pth'
+            source_path.parent.mkdir(parents=True)
+            source_plan = {
+                'plan_id': 'source-plan',
+                'phase_name': 'phase_a',
+            }
+            source_cfg = {
+                'control': {'version': 4, 'batch_size': 1024},
+                'dataset': {'enable_augmentation': True},
+                'optim': {'lr': 1e-4, 'weight_decay': 0.01},
+                'resnet': {'conv_channels': 256},
+                'aux': {'next_rank_weight': 0.1},
+                'supervised': {
+                    'state_file': str(source_path.parent / 'latest.pth'),
+                    'adaptive_best_state_file': str(source_path),
+                    'max_steps': 8_000_000,
+                    'scheduler': {
+                        'type': 'constant',
+                        'warm_up_steps': 5_000,
+                        'max_steps': 8_000_000,
+                    },
+                    'adaptive_curriculum': {
+                        'enabled': True,
+                        'phase_name': 'phase_a',
+                        'final_phase': False,
+                        'gate_every_steps': 50_000,
+                        'required_futile_gates': 2,
+                        'primary': {
+                            'name': 'policy_loss',
+                            'direction': 'lower',
+                            'meaningful_delta': 2e-4,
+                        },
+                    },
+                },
+            }
+            source_state = {
+                'checkpoint_id': 'source-checkpoint',
+                'run_provenance': source_plan,
+                'config': source_cfg,
+                'mortal': {'weight': torch.tensor([1.0, 2.0])},
+                'policy_net': {'weight': torch.tensor([3.0])},
+                'aux_net': {'weight': torch.tensor([4.0])},
+                'opponent_aux_net': None,
+                'danger_aux_net': None,
+                'optimizer': {
+                    'state': {0: {'step': torch.tensor(9.0)}},
+                    'param_groups': [{'lr': 1e-4}],
+                },
+                'optimizer_param_groups': [{'lr': 1e-4}],
+                'scheduler': {'last_epoch': 49, 'tail_lr': 1e-4},
+                'scaler': {'scale': 1024.0},
+                'steps': 150_000,
+                'optimizer_steps': 149_997,
+                'skipped_optimizer_steps': 3,
+                'nonfinite_batches': 1,
+                'epoch': 12,
+                'validation_checks': 15,
+                'last_full_recent_metrics': {'policy_loss': 0.35},
+                'adaptive_curriculum_state': {
+                    'schema_version': 1,
+                    'phase_name': 'phase_a',
+                    'completed': True,
+                    'best_step': 100_000,
+                    'best_metrics': {'policy_loss': 0.35},
+                    'best_cluster_records': {
+                        'policy_loss': [[1, 0.35, 1], [2, 0.36, 1]],
+                    },
+                },
+            }
+            torch.save(source_state, source_path)
+
+            target_cfg = deepcopy(source_cfg)
+            target_cfg['supervised'].update({
+                'state_file': str(target_path),
+                'adaptive_best_state_file': str(
+                    target_path.parent / 'adaptive_best.pth'
+                ),
+                'adaptive_curriculum': {
+                    'enabled': True,
+                    'phase_name': 'phase_b',
+                    'final_phase': False,
+                    'gate_every_steps': 50_000,
+                    'required_futile_gates': 2,
+                    'primary': {
+                        'name': 'policy_loss',
+                        'direction': 'lower',
+                        'meaningful_delta': 2e-4,
+                    },
+                },
+            })
+            expected_plan = {
+                'plan_id': 'target-plan',
+                'phase_name': 'phase_b',
+                'parent_checkpoint_id': 'source-checkpoint',
+                'parent_plan_id': 'source-plan',
+            }
+
+            migration = sl_ab.migrate_adaptive_phase_handoff(
+                source_path=source_path,
+                target_path=target_path,
+                expected_plan=expected_plan,
+                target_cfg=target_cfg,
+            )
+
+            migrated = torch.load(
+                target_path,
+                map_location='cpu',
+                weights_only=False,
+            )
+            for key in sl_ab.ADAPTIVE_PHASE_PRESERVED_STATE_KEYS:
+                self.assertTrue(
+                    sl_ab.nested_state_equal(source_state.get(key), migrated.get(key)),
+                    key,
+                )
+            adaptive_state = migrated['adaptive_curriculum_state']
+            self.assertEqual('phase_b', adaptive_state['phase_name'])
+            self.assertFalse(adaptive_state['completed'])
+            self.assertEqual(0, adaptive_state['gate_index'])
+            self.assertEqual(100_000, adaptive_state['best_step'])
+            self.assertEqual('inherit_baseline', adaptive_state['last_action'])
+            self.assertEqual(0, migrated['validation_checks'])
+            self.assertIsNone(migrated['last_full_recent_metrics'])
+            self.assertEqual(-1, migrated['epoch'])
+            self.assertTrue(
+                migrated['adaptive_phase_handoff_migration'][
+                    'data_traversal_restart'
+                ]
+            )
+            self.assertEqual('source-checkpoint', migration['source_checkpoint_id'])
+            self.assertTrue(
+                (target_path.parent.parent / 'adaptive_phase_handoff.json').exists()
+            )
+            adaptive_best_path = Path(
+                target_cfg['supervised']['adaptive_best_state_file']
+            )
+            self.assertTrue(adaptive_best_path.exists())
+            inherited_best = torch.load(
+                adaptive_best_path,
+                map_location='cpu',
+                weights_only=False,
+            )
+            self.assertEqual(
+                migrated['checkpoint_id'],
+                inherited_best['checkpoint_id'],
+            )
+            original = torch.load(
+                source_path,
+                map_location='cpu',
+                weights_only=False,
+            )
+            self.assertEqual('phase_a', original['run_provenance']['phase_name'])
 
     def test_phase_extension_rejects_scheduler_horizon_change(self):
         source_state = {

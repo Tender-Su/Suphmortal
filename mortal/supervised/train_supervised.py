@@ -15,6 +15,12 @@ import torch
 from torch.utils.data._utils.collate import default_collate
 
 from mortal._repo import MORTAL_ROOT, REPO_ROOT
+from mortal.supervised.adaptive_curriculum import (
+    AdaptiveCurriculumConfig,
+    initial_adaptive_curriculum_state,
+    normalize_adaptive_curriculum_state,
+    observe_adaptive_curriculum,
+)
 from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
 from mortal.supervised.convergence import (
     ConvergenceConfig,
@@ -436,7 +442,10 @@ def train(
     from mortal.core.checkpoint_utils import load_brain_state_with_input_bridge
     from mortal.config import config
     from mortal.data.dataloader import SupervisedFileDatasetsIter, resolve_rayon_num_threads, worker_init_fn
-    from mortal.core.lr_scheduler import LinearWarmUpCosineAnnealingLR
+    from mortal.core.lr_scheduler import (
+        LinearWarmUpCosineAnnealingLR,
+        LinearWarmUpStableDecayLR,
+    )
     from libriichi.consts import ACTION_SPACE, obs_shape
     from mortal.core.model import AuxNet, Brain, CategoricalPolicy, DangerAuxNet, OpponentStateAuxNet
     from mortal.eval.search_runtime import LocalSearchPlanner, SearchConfig, SearchDistillConfig
@@ -484,6 +493,19 @@ def train(
         if convergence_enabled
         else None
     )
+    adaptive_raw = supervised_cfg.get('adaptive_curriculum', {})
+    if not isinstance(adaptive_raw, dict):
+        raise ValueError(f'{cfg_prefix}.adaptive_curriculum must be a table')
+    adaptive_enabled = bool(adaptive_raw.get('enabled', False))
+    adaptive_config = (
+        AdaptiveCurriculumConfig.from_mapping(adaptive_raw)
+        if adaptive_enabled
+        else None
+    )
+    if convergence_config is not None and adaptive_config is not None:
+        raise ValueError(
+            f'{cfg_prefix}.convergence and adaptive_curriculum cannot both be enabled'
+        )
     force_safe_training = supervised_cfg.get('force_safe_training', False)
     gradient_calibration_cfg = supervised_cfg.get('gradient_calibration', {})
     if not isinstance(gradient_calibration_cfg, dict):
@@ -622,6 +644,11 @@ def train(
     candidate_portfolio_dir = supervised_cfg.get('candidate_portfolio_dir', '')
     candidate_portfolio_limit = int(supervised_cfg.get('candidate_portfolio_limit', 0) or 0)
     milestone_checkpoint_dir = supervised_cfg.get('milestone_checkpoint_dir', '')
+    adaptive_best_state_file = supervised_cfg.get('adaptive_best_state_file', '')
+    if adaptive_config is not None and not adaptive_best_state_file:
+        raise ValueError(
+            f'{cfg_prefix}.adaptive_best_state_file is required for adaptive curriculum'
+        )
     if candidate_portfolio_limit < 0 or candidate_portfolio_limit in {1, 2}:
         raise ValueError(
             f'{cfg_prefix}.candidate_portfolio_limit must be zero or at least three'
@@ -722,6 +749,25 @@ def train(
             convergence_config.reduce_patience_steps,
             convergence_config.stop_patience_steps,
             convergence_config.min_level_steps,
+        )
+    logging.info(f'adaptive_curriculum_enabled: {adaptive_enabled}')
+    if adaptive_config is not None:
+        if val_every_steps <= 0:
+            raise ValueError('adaptive curriculum requires val_every_steps')
+        if adaptive_config.gate_every_steps % val_every_steps != 0:
+            raise ValueError(
+                'adaptive gate_every_steps must be divisible by val_every_steps'
+            )
+        logging.info(
+            'adaptive curriculum: phase=%s final=%s gate_every=%s '
+            'required_futile=%s primary=%s guardrails=%s lr_levels=%s',
+            adaptive_config.phase_name,
+            adaptive_config.final_phase,
+            adaptive_config.gate_every_steps,
+            adaptive_config.required_futile_gates,
+            adaptive_config.primary.name,
+            [spec.name for spec in adaptive_config.guardrails],
+            adaptive_config.lr_levels,
         )
     logging.info(f'candidate_portfolio_limit: {candidate_portfolio_limit}')
     logging.info(f'action_score_weights: {ACTION_SCORE_WEIGHTS}')
@@ -851,6 +897,23 @@ def train(
             max_steps=cosine_total_steps,
             init=warmup_init,
         )
+    elif scheduler_type == 'constant':
+        optimizer = optim.AdamW(
+            param_groups,
+            lr=1,
+            weight_decay=0,
+            betas=betas,
+            eps=eps,
+        )
+        scheduler = LinearWarmUpStableDecayLR(
+            optimizer,
+            peak=peak_lr,
+            final=peak_lr,
+            warm_up_steps=warm_up_steps,
+            stable_steps=0,
+            decay_steps=0,
+            init=warmup_init,
+        )
     else:
         raise ValueError(f'unsupported {cfg_prefix}.scheduler.type: {scheduler_type}')
     if convergence_config is not None:
@@ -873,6 +936,18 @@ def train(
                 'convergence training max_steps must leave room after the cosine core: '
                 f'{max_steps} <= {convergence_config.core_optimizer_steps}'
             )
+    if adaptive_config is not None:
+        if scheduler_type != 'constant':
+            raise ValueError(
+                'supervised adaptive curriculum requires scheduler.type=constant'
+            )
+        if adaptive_config.final_phase:
+            if adaptive_config.lr_levels[0] > peak_lr:
+                raise ValueError(
+                    'first adaptive lr level must not exceed supervised peak lr'
+                )
+        elif adaptive_config.lr_levels:
+            raise ValueError('non-final adaptive phase must not define lr levels')
     scaler = GradScaler(device.type, enabled=enable_amp)
 
     def load_optional_head_states(state):
@@ -2119,6 +2194,19 @@ def train(
     logging.info(f'monitor recent files: {len(monitor_recent_files):,}')
     logging.info(f'full recent files: {len(full_recent_files):,}')
     logging.info(f'old regression files: {len(old_regression_files):,}')
+    if adaptive_config is not None:
+        adaptive_metric_names = {
+            adaptive_config.primary.name,
+            *(spec.name for spec in adaptive_config.guardrails),
+        }
+        if (
+            'old_regression_policy_loss' in adaptive_metric_names
+            and not old_regression_files
+        ):
+            raise ValueError(
+                'adaptive old_regression_policy_loss guardrail requires a '
+                'non-empty old regression split'
+            )
 
     def build_loader(file_list, *, training, shuffle_files, safe_train=False):
         phase_file_batch_size = file_batch_size if training else val_file_batch_size
@@ -2157,6 +2245,7 @@ def train(
             rayon_num_threads=phase_rayon_num_threads,
             emit_opponent_state_labels=phase_emit_opponent_state_labels,
             track_danger_labels=enable_danger_aux,
+            emit_game_id=adaptive_config is not None and not training,
         )
         kwargs = {
             'dataset': dataset,
@@ -2187,6 +2276,7 @@ def train(
             danger_any,
             danger_value,
             danger_player_mask,
+            game_id,
         ) = unpack_batch(batch)
         if not torch.is_tensor(obs):
             obs = torch.as_tensor(obs)
@@ -2227,6 +2317,10 @@ def train(
             if not torch.is_tensor(danger_player_mask):
                 danger_player_mask = torch.as_tensor(danger_player_mask)
             danger_player_mask = danger_player_mask.to(dtype=torch.bool, device=device, non_blocking=True)
+        if game_id is not None:
+            if not torch.is_tensor(game_id):
+                game_id = torch.as_tensor(game_id)
+            game_id = game_id.to(dtype=torch.int64, device='cpu')
         return (
             obs,
             actions,
@@ -2239,6 +2333,7 @@ def train(
             danger_any,
             danger_value,
             danger_player_mask,
+            game_id,
         )
 
     def record_cuda_stream(batch):
@@ -2358,6 +2453,11 @@ def train(
         if convergence_config is not None
         else None
     )
+    adaptive_curriculum_state = (
+        initial_adaptive_curriculum_state(adaptive_config)
+        if adaptive_config is not None
+        else None
+    )
 
     def reset_resume_validation_history():
         nonlocal best_val_loss
@@ -2379,6 +2479,7 @@ def train(
         nonlocal last_full_recent_metrics
         nonlocal last_old_regression_metrics
         nonlocal convergence_state
+        nonlocal adaptive_curriculum_state
 
         best_val_loss = float('inf')
         best_val_action_acc = 0.0
@@ -2401,6 +2502,11 @@ def train(
         convergence_state = (
             initial_convergence_state(convergence_config)
             if convergence_config is not None
+            else None
+        )
+        adaptive_curriculum_state = (
+            initial_adaptive_curriculum_state(adaptive_config)
+            if adaptive_config is not None
             else None
         )
 
@@ -2469,6 +2575,11 @@ def train(
         last_old_regression_metrics = state.get('last_old_regression_metrics')
         if convergence_config is not None:
             convergence_state = state.get('convergence_state') or convergence_state
+        if adaptive_config is not None:
+            adaptive_curriculum_state = normalize_adaptive_curriculum_state(
+                state.get('adaptive_curriculum_state'),
+                adaptive_config,
+            )
         timestamp = datetime.fromtimestamp(state['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
         logging.info(
             f'loaded {checkpoint_label} checkpoint: {timestamp}; '
@@ -2499,6 +2610,13 @@ def train(
             f'skipped={len(bridge_info["skipped_keys"])}'
         )
 
+    if adaptive_config is not None and adaptive_config.final_phase:
+        scheduler.set_tail_lr(
+            adaptive_config.lr_levels[
+                int(adaptive_curriculum_state['lr_level_index'])
+            ]
+        )
+
     optimizer.zero_grad(set_to_none=True)
     writer = SummaryWriter(tensorboard_dir)
 
@@ -2524,6 +2642,13 @@ def train(
         idx += 4
         remaining = len(batch) - idx
         expected_without_opponent = 4 if enable_danger_aux else 0
+        batch_has_game_id = False
+        if adaptive_config is not None and remaining in {
+            expected_without_opponent + 1,
+            expected_without_opponent + 3,
+        }:
+            batch_has_game_id = True
+            remaining -= 1
         if remaining == expected_without_opponent + 2:
             batch_has_opponent_state_labels = True
         elif remaining == expected_without_opponent:
@@ -2552,6 +2677,11 @@ def train(
             danger_any = None
             danger_value = None
             danger_player_mask = None
+        if batch_has_game_id:
+            game_id = batch[idx]
+            idx += 1
+        else:
+            game_id = None
         if idx != len(batch):
             raise ValueError(
                 f'unexpected {checkpoint_label} batch length: expected {idx}, got {len(batch)}'
@@ -2568,6 +2698,7 @@ def train(
             danger_any,
             danger_value,
             danger_player_mask,
+            game_id,
         )
 
     def forward_loss(
@@ -2576,6 +2707,7 @@ def train(
         batch_on_device=False,
         compute_detailed_metrics=True,
         compute_sliced_metrics=True,
+        collect_cluster_records=False,
         training=False,
     ):
         if batch_on_device:
@@ -2591,6 +2723,7 @@ def train(
                 danger_any,
                 danger_value,
                 danger_player_mask,
+                game_id,
             ) = batch
         else:
             (
@@ -2605,11 +2738,17 @@ def train(
                 danger_any,
                 danger_value,
                 danger_player_mask,
+                game_id,
             ) = move_batch_to_device(batch)
         with torch.autocast(device.type, enabled=enable_amp):
             phi = mortal(obs)
             policy_logits = policy_net.logits(phi, masks)
-            policy_loss = nn.functional.cross_entropy(policy_logits, actions)
+            policy_loss_vec = nn.functional.cross_entropy(
+                policy_logits,
+                actions,
+                reduction='none',
+            )
+            policy_loss = policy_loss_vec.mean()
             probs = (
                 policy_logits.softmax(-1)
                 if compute_detailed_metrics or compute_sliced_metrics else None
@@ -2716,6 +2855,26 @@ def train(
             action_matches = pred_actions == actions
             rank_matches = rank_preds == player_rank
             batch_size = obs.shape[0]
+            adaptive_cluster_values = None
+            if collect_cluster_records:
+                if game_id is None:
+                    raise RuntimeError(
+                        'adaptive paired validation requires source game ids'
+                    )
+                if int(game_id.numel()) != batch_size:
+                    raise RuntimeError(
+                        'adaptive paired validation game-id count does not match batch size'
+                    )
+                adaptive_cluster_values = {
+                    'policy_loss': (
+                        game_id.detach().to(dtype=torch.int64, device='cpu'),
+                        policy_loss_vec.detach().to(dtype=torch.float64, device='cpu'),
+                    ),
+                    'action_accuracy': (
+                        game_id.detach().to(dtype=torch.int64, device='cpu'),
+                        action_matches.detach().to(dtype=torch.float64, device='cpu'),
+                    ),
+                }
             batch_metrics = {
                 'loss_sum': total_loss.detach().to(torch.float64) * batch_size,
                 'policy_loss_sum': policy_loss.detach().to(torch.float64) * batch_size,
@@ -2765,11 +2924,54 @@ def train(
                 ),
                 'opponent_stats': opponent_metric_stats,
                 'danger_stats': danger_metric_stats if compute_detailed_metrics else None,
+                'adaptive_cluster_values': adaptive_cluster_values,
             }
 
         return total_loss, batch_metrics
 
-    def evaluate(file_list, log_step, *, desc, scalar_prefix, max_batches=0):
+    def merge_adaptive_cluster_values(target, source):
+        if source is None:
+            return
+        for metric_name, (game_ids, values) in source.items():
+            metric_target = target.setdefault(metric_name, {})
+            unique_ids, inverse = torch.unique(
+                game_ids.reshape(-1),
+                sorted=True,
+                return_inverse=True,
+            )
+            sums = torch.zeros(
+                unique_ids.numel(),
+                dtype=torch.float64,
+                device='cpu',
+            )
+            sums.scatter_add_(0, inverse, values.reshape(-1))
+            counts = torch.bincount(inverse, minlength=unique_ids.numel())
+            for game_value, value_sum, count in zip(unique_ids, sums, counts):
+                key = int(game_value.item())
+                current_sum, current_count = metric_target.get(key, (0.0, 0))
+                metric_target[key] = (
+                    current_sum + float(value_sum.item()),
+                    current_count + int(count.item()),
+                )
+
+    def finalize_adaptive_cluster_values(cluster_totals):
+        return {
+            metric_name: [
+                [game_id, value_sum, count]
+                for game_id, (value_sum, count) in sorted(records.items())
+            ]
+            for metric_name, records in cluster_totals.items()
+        }
+
+    def evaluate(
+        file_list,
+        log_step,
+        *,
+        desc,
+        scalar_prefix,
+        max_batches=0,
+        collect_cluster_records=False,
+    ):
         if not file_list:
             logging.info(f'[{scalar_prefix}] skipped: empty file list')
             return None, 0
@@ -2781,7 +2983,7 @@ def train(
         if danger_aux_net is not None:
             danger_aux_net.eval()
 
-        def run_eval_loop(totals):
+        def run_eval_loop(totals, cluster_totals):
             val_loader = None
             val_batches_on_device = None
             batch_count = 0
@@ -2798,9 +3000,15 @@ def train(
                             batch_on_device=val_batches_on_device,
                             compute_detailed_metrics=True,
                             compute_sliced_metrics=True,
+                            collect_cluster_records=collect_cluster_records,
                             training=False,
                         )
                         merge_metrics(totals, batch_metrics)
+                        if collect_cluster_records:
+                            merge_adaptive_cluster_values(
+                                cluster_totals,
+                                batch_metrics['adaptive_cluster_values'],
+                            )
                         batch_count += 1
                         if max_batches > 0 and batch_count >= max_batches:
                             break
@@ -2814,16 +3022,21 @@ def train(
 
         def run_eval_attempt():
             totals = init_metric_dict(include_detailed_metrics=True, include_sliced_metrics=True)
-            batch_count = run_eval_loop(totals)
-            return totals, batch_count
+            cluster_totals = {}
+            batch_count = run_eval_loop(totals, cluster_totals)
+            return totals, batch_count, cluster_totals
 
-        totals, batch_count = run_with_validation_retries(
+        totals, batch_count, cluster_totals = run_with_validation_retries(
             run_eval_attempt,
             device_type=device.type,
             context='validation',
         )
 
         metrics = finalize_metrics(totals)
+        if collect_cluster_records:
+            metrics['_adaptive_cluster_records'] = finalize_adaptive_cluster_values(
+                cluster_totals
+            )
         writer.add_scalar(f'{scalar_prefix}/loss', metrics['loss'], log_step)
         writer.add_scalar(f'{scalar_prefix}/policy_loss', metrics['policy_loss'], log_step)
         writer.add_scalar(f'{scalar_prefix}/aux_loss', metrics['aux_loss'], log_step)
@@ -2923,6 +3136,7 @@ def train(
                         danger_any,
                         danger_value,
                         danger_player_mask,
+                        _game_id,
                     ) = batch if val_batches_on_device else move_batch_to_device(batch)
 
                     with torch.enable_grad():
@@ -3054,7 +3268,7 @@ def train(
         writer.flush()
         return metrics
 
-    def run_full_validation(check_index):
+    def run_full_validation(check_index, *, collect_cluster_records=False):
         nonlocal last_full_recent_metrics
         nonlocal full_validation_checks
         full_validation_checks += 1
@@ -3065,9 +3279,11 @@ def train(
             desc=f'FULL VAL {full_validation_checks}',
             scalar_prefix='full_recent',
             max_batches=0,
+            collect_cluster_records=collect_cluster_records,
         )
         if metrics is None:
-            return None
+            return (None, None) if collect_cluster_records else None
+        cluster_records = metrics.pop('_adaptive_cluster_records', None)
         if gradient_calibration_split == 'full_recent':
             metrics.update(
                 run_gradient_calibration_probe(
@@ -3120,13 +3336,15 @@ def train(
             f'rank_acc={metrics["rank_acc"]:.4f} '
             f'lr={current_lr:.3e}'
         )
+        if collect_cluster_records:
+            return metrics, cluster_records
         return metrics
 
-    def run_old_regression_validation(check_index):
+    def run_old_regression_validation(check_index, *, collect_cluster_records=False):
         nonlocal last_old_regression_metrics
         nonlocal old_regression_checks
         if not old_regression_files:
-            return None
+            return (None, None) if collect_cluster_records else None
         old_regression_checks += 1
         metrics, batch_count = evaluate(
             old_regression_files,
@@ -3134,9 +3352,11 @@ def train(
             desc=f'OLD REG {old_regression_checks}',
             scalar_prefix='old_regression',
             max_batches=0,
+            collect_cluster_records=collect_cluster_records,
         )
         if metrics is None:
-            return None
+            return (None, None) if collect_cluster_records else None
+        cluster_records = metrics.pop('_adaptive_cluster_records', None)
         last_old_regression_metrics = metrics
         current_lr = optimizer.param_groups[0]['lr']
         logging.info(
@@ -3162,6 +3382,8 @@ def train(
             f'rank_acc={metrics["rank_acc"]:.4f} '
             f'lr={current_lr:.3e}'
         )
+        if collect_cluster_records:
+            return metrics, cluster_records
         return metrics
 
     def run_monitor_validation(epoch, *, reason):
@@ -3180,8 +3402,18 @@ def train(
         nonlocal num_lr_reductions
         nonlocal validation_checks
         nonlocal convergence_state
+        nonlocal adaptive_curriculum_state
 
         validation_checks += 1
+        adaptive_gate_due = (
+            adaptive_config is not None
+            and steps > 0
+            and steps % adaptive_config.gate_every_steps == 0
+            and (
+                adaptive_curriculum_state.get('last_gate_step') is None
+                or steps > int(adaptive_curriculum_state['last_gate_step'])
+            )
+        )
         prev_monitor_recent_metrics = last_monitor_recent_metrics
         metrics, batch_count = evaluate(
             monitor_recent_files,
@@ -3297,7 +3529,21 @@ def train(
 
         ran_full_val = False
         selection_metrics = metrics
-        if should_run_full_validation_this_check(
+        adaptive_full_cluster_records = None
+        if adaptive_gate_due:
+            if not full_recent_files:
+                raise RuntimeError(
+                    'adaptive paired gate requires a non-empty full-recent split'
+                )
+            full_metrics, adaptive_full_cluster_records = run_full_validation(
+                validation_checks,
+                collect_cluster_records=True,
+            )
+            ran_full_val = True
+            if full_metrics is None or adaptive_full_cluster_records is None:
+                raise RuntimeError('adaptive paired gate full-recent validation failed')
+            selection_metrics = full_metrics
+        elif should_run_full_validation_this_check(
             full_val_every_checks=full_val_every_checks,
             validation_checks=validation_checks,
             has_full_recent_files=bool(full_recent_files),
@@ -3309,7 +3555,16 @@ def train(
         elif not full_recent_files:
             ran_full_val = True
 
-        if should_run_old_regression_validation_this_check(
+        adaptive_old_metrics = None
+        adaptive_old_cluster_records = None
+        if adaptive_gate_due and old_regression_files:
+            adaptive_old_metrics, adaptive_old_cluster_records = (
+                run_old_regression_validation(
+                    validation_checks,
+                    collect_cluster_records=True,
+                )
+            )
+        elif should_run_old_regression_validation_this_check(
             old_regression_every_checks=old_regression_every_checks,
             validation_checks=validation_checks,
             has_old_regression_files=bool(old_regression_files),
@@ -3375,6 +3630,81 @@ def train(
                     steps,
                 )
 
+        adaptive_decision = None
+        if adaptive_gate_due:
+            adaptive_metrics = {
+                'policy_loss': float(selection_metrics['policy_loss']),
+                'action_accuracy': float(selection_metrics['action_acc']),
+            }
+            adaptive_cluster_records = dict(adaptive_full_cluster_records)
+            if adaptive_old_metrics is not None:
+                adaptive_metrics['old_regression_policy_loss'] = float(
+                    adaptive_old_metrics['policy_loss']
+                )
+                adaptive_cluster_records['old_regression_policy_loss'] = (
+                    adaptive_old_cluster_records['policy_loss']
+                )
+            adaptive_decision = observe_adaptive_curriculum(
+                adaptive_curriculum_state,
+                adaptive_config,
+                optimizer_steps=steps,
+                metrics=adaptive_metrics,
+                cluster_records=adaptive_cluster_records,
+            )
+            adaptive_curriculum_state = adaptive_decision.state
+            if adaptive_decision.action == 'reduce_lr':
+                previous_lr = optimizer.param_groups[0]['lr']
+                scheduler.set_tail_lr(adaptive_decision.target_lr)
+                num_lr_reductions += 1
+                logging.info(
+                    '[ADAPTIVE] %s; lr %.3e -> %.3e (count=%s)',
+                    adaptive_decision.reason,
+                    previous_lr,
+                    optimizer.param_groups[0]['lr'],
+                    num_lr_reductions,
+                )
+            else:
+                logging.info(
+                    '[ADAPTIVE] phase=%s action=%s best_step=%s futile=%s/%s %s',
+                    adaptive_config.phase_name,
+                    adaptive_decision.action,
+                    adaptive_curriculum_state.get('best_step'),
+                    adaptive_curriculum_state['consecutive_futile_gates'],
+                    adaptive_config.required_futile_gates,
+                    adaptive_decision.reason,
+                )
+            writer.add_scalar(
+                'adaptive/gate_index',
+                adaptive_curriculum_state['gate_index'],
+                steps,
+            )
+            writer.add_scalar(
+                'adaptive/consecutive_futile_gates',
+                adaptive_curriculum_state['consecutive_futile_gates'],
+                steps,
+            )
+            writer.add_scalar(
+                'adaptive/lr_level_index',
+                adaptive_curriculum_state['lr_level_index'],
+                steps,
+            )
+            for metric_name, comparison in adaptive_decision.comparisons.items():
+                writer.add_scalar(
+                    f'adaptive/{metric_name}_paired_mean',
+                    comparison['mean'],
+                    steps,
+                )
+                writer.add_scalar(
+                    f'adaptive/{metric_name}_paired_ci_low',
+                    comparison['ci_low'],
+                    steps,
+                )
+                writer.add_scalar(
+                    f'adaptive/{metric_name}_paired_ci_high',
+                    comparison['ci_high'],
+                    steps,
+                )
+
         improved_selection_loss = is_strict_loss_improvement(
             selection_metrics['loss'],
             best_full_recent_loss,
@@ -3416,6 +3746,17 @@ def train(
             best_checkpoint_targets.append(
                 (best_rank_state_file, f'new best-rank-acc {checkpoint_label} checkpoint')
             )
+        if (
+            adaptive_decision is not None
+            and adaptive_curriculum_state['last_action']
+            in {'set_baseline', 'update_best'}
+        ):
+            best_checkpoint_targets.append(
+                (
+                    adaptive_best_state_file,
+                    f'adaptive phase-best {checkpoint_label} checkpoint',
+                )
+            )
 
         state = save_latest_state(epoch, epoch_complete=False, reason=reason)
         saved_best_paths = set()
@@ -3441,7 +3782,9 @@ def train(
             danger_aux_net.train()
 
         legacy_should_stop = (
-            early_stopping_patience_checks > 0
+            adaptive_config is None
+            and convergence_config is None
+            and early_stopping_patience_checks > 0
             and validation_checks >= min_validation_checks
             and patience_counter >= early_stopping_patience_checks
             and num_lr_reductions >= early_stopping_min_lr_reductions
@@ -3450,7 +3793,15 @@ def train(
             convergence_decision is not None
             and convergence_decision.action == 'stop'
         )
-        should_stop = legacy_should_stop or convergence_should_stop
+        adaptive_should_stop = (
+            adaptive_decision is not None
+            and adaptive_decision.action in {'transition', 'stop'}
+        )
+        should_stop = (
+            legacy_should_stop
+            or convergence_should_stop
+            or adaptive_should_stop
+        )
         if legacy_should_stop:
             logging.info(
                 f'early stopping triggered at monitor check {validation_checks}; '
@@ -3464,6 +3815,13 @@ def train(
                 'convergence stopping triggered at monitor check %s: %s',
                 validation_checks,
                 convergence_decision.reason,
+            )
+        if adaptive_should_stop:
+            logging.info(
+                'adaptive curriculum phase finished at gate %s: action=%s %s',
+                adaptive_curriculum_state['gate_index'],
+                adaptive_decision.action,
+                adaptive_decision.reason,
             )
         return should_stop, ran_full_val
 
@@ -3506,6 +3864,7 @@ def train(
             'last_full_recent_metrics': last_full_recent_metrics,
             'last_old_regression_metrics': last_old_regression_metrics,
             'convergence_state': deepcopy(convergence_state),
+            'adaptive_curriculum_state': deepcopy(adaptive_curriculum_state),
             'config_section': cfg_prefix,
             'stage_label': stage_label,
             'checkpoint_label': checkpoint_label,
@@ -3663,6 +4022,16 @@ def train(
         if should_stop:
             return
 
+    if (
+        adaptive_curriculum_state is not None
+        and adaptive_curriculum_state.get('completed')
+    ):
+        logging.info(
+            'adaptive curriculum phase already completed at step=%s; skipping training',
+            adaptive_curriculum_state.get('completed_step'),
+        )
+        return
+
     if max_steps > 0 and steps >= max_steps:
         logging.info(
             f'{checkpoint_label} checkpoint already reached max_steps={max_steps:,} '
@@ -3734,7 +4103,7 @@ def train(
             )
             return False
         optimizer_steps += 1
-        if scheduler_type == 'cosine':
+        if scheduler_type in {'cosine', 'constant'}:
             scheduler.step()
         else:
             update_warmup_lr()

@@ -173,35 +173,17 @@
   - 台式机单条约 `4.5 h`
   - 笔记本单条约 `11.2 h`
 
-## Long-ABC v2 计划
+## Long-ABC 全动态续训
 
-- 目标：重新从头训练 `anchor*1.0`，不从 `sl_canonical.pth` 续训。
-- 选择 `anchor*1.0` 的原因：
-  - `anchor` 的辅助头配比来自 P1 坐标搜索：`rank / opp / danger = 0.43 / 0.21 / 0.36`
-  - 它不是临时 baseline，而是当前 `A2x` 协议内的平衡配方
-  - 旧 formal triplet 最终由 `formal_1v3` 选出 `anchor*1.0`
-- 当前训练量判断：
-  - 旧 formal 总量 `90k` steps，batch `1024`
-  - `phase_c/file_index.pth` 训练文件数约 `1.98M`
-  - 抽样估算全训练集约 `1.27M` batch，因此旧 formal 约等于 `0.07 epoch`
-  - 旧 full-recent envelope 的粗拟合显示 `90k` 已接近短窗可见收益平台，但该拟合只覆盖 `0.07 epoch`，容易低估长训收益
-- 第一轮不直接拉满 `1 epoch`；先做能显著验证长训收益曲线的中长窗：
-  - 推荐 `formal_step_scale = 8`
-  - 对应 `phase_a / phase_b / phase_c = 144000 / 96000 / 48000`
-  - 总量 `288k` steps，约 `0.23 epoch`
-- 若第一轮在 `full_recent loss / action_score / selection_score / formal_1v3` 上有明确正收益，再上第二轮：
-  - `formal_step_scale = 17.5`
-  - 对应 `phase_a / phase_b / phase_c = 315000 / 210000 / 105000`
-  - 总量 `630k` steps，约 `0.50 epoch`
-- `formal_step_scale = 35` 已核对：
-  - 对应 `phase_a / phase_b / phase_c = 630000 / 420000 / 210000`
-  - 总量 `1.26M` steps，约 `1 epoch`
-  - 暂作为第三轮或第二轮强信号后的 full run，不作为第一轮默认
-- 调度纪律：
-  - 长训放笔记本跑，使用 formal dispatch 的 `--remote-only`
-  - 台式机继续用当前 `sl_canonical.pth` 做 RL 探索
-  - 长训产物未通过 `formal_1v3` 前不得覆盖 `sl_canonical.pth`
-  - 通过后再发布为第二版 supervised canonical
+- 目标仍是从头训练 `anchor*1.0`；`anchor` 的辅助头配比来自 P1 坐标搜索，且旧 formal triplet 最终由 `formal_1v3` 选中。
+- 不再预先指定 `phase_a / phase_b / phase_c` 的固定 steps。旧 `90k / 288k / 630k / 1.26M` 只保留为算力尺度参考，不再充当阶段切换条件。
+- 继续使用已验证的 `broad_to_recent + 24m_12m` A/B/C 数据课程，每 `10k` 做 monitor，每 `50k` 在同一 full-recent 集上做 current-vs-phase-best paired gate。
+- 只有连续两次 gate 的乐观 `95% CI` 都无法容纳有意义的 `policy_loss` 改善，并且 `action_accuracy` 与 `old_regression_policy_loss` 没有显著补偿，才进入下一数据阶段。
+- 阶段交接完整保留模型、AdamW、AMP scaler、scheduler 和 phase-best baseline；因为训练 split 改变，SL 明确重启该阶段的数据遍历，不伪装成可精确恢复的 data cursor。
+- 从成熟 A checkpoint 进入 B 时不重置到大 LR：读取来源 checkpoint 的实际 LR，以它为 warmup 起点，在 `5k` steps 内最多温和回热 `2x`。当前 A 最佳点对应 `5e-6 -> 1e-5`。
+- 最终阶段保留 checkpointed 动态 LR 候选层级直到 `1e-6`，但不是机械一路衰减。每个更低 LR 必须先在 paired gate 上刷新 phase-best，才有资格继续下探；若该层连续两次 gate 都没有有效改善，就停止并保留此前的 `adaptive_best`，避免后段越训越不动。
+- 代码入口是 `python -m mortal.supervised.run_sl_ab --ab adaptive --adaptive-curriculum-profile full_dynamic`。offline 只产生 finalist，最终发布仍由 `formal_1v3` 决定。
+- 长训产物未通过 `formal_1v3` 前不得覆盖 `sl_canonical.pth`；通过后才发布为下一版 supervised canonical。
 
 ## 当前证据路径
 

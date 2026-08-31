@@ -18,6 +18,10 @@ from pathlib import Path
 import torch
 from mortal._repo import MORTAL_ROOT, REPO_ROOT
 from mortal.core.cpu_affinity import AFFINITY_ENV_VAR
+from mortal.supervised.adaptive_curriculum import (
+    AdaptiveCurriculumConfig,
+    inherit_adaptive_curriculum_baseline,
+)
 from mortal.supervised.sl_selection import (
     LOSS_EPSILON,
     action_quality_score,
@@ -43,6 +47,7 @@ PROVENANCE_IGNORED_SUPERVISED_KEYS = {
     'best_policy_state_file',
     'best_acc_state_file',
     'best_rank_state_file',
+    'adaptive_best_state_file',
     'tensorboard_dir',
     'candidate_portfolio_dir',
     'milestone_checkpoint_dir',
@@ -78,6 +83,52 @@ CONVERGENCE_PROFILES = {
         'stop_patience_steps': 240_000,
         'min_level_steps': 80_000,
         'metric': 'policy_loss',
+        'candidate_portfolio_limit': 12,
+    },
+}
+
+
+ADAPTIVE_CURRICULUM_PROFILES = {
+    'full_dynamic': {
+        # Operational ceilings only. Evidence, rather than these values,
+        # normally ends each phase.
+        'training_caps': {
+            'phase_a': 8_000_000,
+            'phase_b': 8_000_000,
+            'phase_c': 8_000_000,
+        },
+        'monitor_every_steps': 10_000,
+        'gate_every_steps': 50_000,
+        'required_futile_gates': 2,
+        'confidence_z': 1.96,
+        'primary_noninferiority_margin': 2e-4,
+        'primary': {
+            'name': 'policy_loss',
+            'direction': 'lower',
+            'meaningful_delta': 2e-4,
+        },
+        'guardrails': (
+            {
+                'name': 'action_accuracy',
+                'direction': 'higher',
+                'meaningful_delta': 2e-4,
+            },
+            {
+                'name': 'old_regression_policy_loss',
+                'direction': 'lower',
+                'meaningful_delta': 2e-4,
+            },
+        ),
+        'final_lr_levels': (
+            1e-4,
+            5e-5,
+            2.5e-5,
+            1e-5,
+            5e-6,
+            2.5e-6,
+            1e-6,
+        ),
+        'bootstrap_rewarm_factor': 2.0,
         'candidate_portfolio_limit': 12,
     },
 }
@@ -356,6 +407,7 @@ def checkpoint_paths(
     best_policy_state_file = ckpt_dir / 'best_policy.pth'
     best_acc_state_file = ckpt_dir / 'best_action_score.pth'
     best_rank_state_file = ckpt_dir / 'best_rank.pth'
+    adaptive_best_state_file = ckpt_dir / 'adaptive_best.pth'
     return {
         'state_file': ckpt_dir / 'latest.pth',
         'best_state_file': best_loss_state_file,
@@ -363,6 +415,7 @@ def checkpoint_paths(
         'best_policy_state_file': best_policy_state_file,
         'best_acc_state_file': best_acc_state_file,
         'best_rank_state_file': best_rank_state_file,
+        'adaptive_best_state_file': adaptive_best_state_file,
         'tensorboard_dir': tb_dir,
         'candidate_portfolio_dir': artifact_root / 'candidate_portfolio',
         'milestone_checkpoint_dir': artifact_root / 'milestones',
@@ -409,6 +462,7 @@ def load_state_summary(state_path: Path) -> dict:
         'last_full_recent_metrics': last_full_recent_metrics or None,
         'last_old_regression_metrics': state.get('last_old_regression_metrics'),
         'convergence_state': state.get('convergence_state'),
+        'adaptive_curriculum_state': state.get('adaptive_curriculum_state'),
         'validation_checks': state.get('validation_checks'),
         'full_validation_checks': state.get('full_validation_checks'),
         'old_regression_checks': state.get('old_regression_checks'),
@@ -462,6 +516,11 @@ def load_candidate_portfolio(portfolio_dir: Path) -> dict[str, dict]:
 
 
 def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool:
+    adaptive_cfg = supervised_cfg.get('adaptive_curriculum') or {}
+    if bool(adaptive_cfg.get('enabled', False)):
+        adaptive_state = state.get('adaptive_curriculum_state') or {}
+        return bool(adaptive_state.get('completed', False))
+
     convergence_cfg = supervised_cfg.get('convergence') or {}
     if bool(convergence_cfg.get('enabled', False)):
         convergence_state = state.get('convergence_state') or {}
@@ -631,6 +690,7 @@ EXTENSION_MUTABLE_SUPERVISED_KEYS = {
     *PROVENANCE_IGNORED_SUPERVISED_KEYS,
     'candidate_portfolio_limit',
     'convergence',
+    'adaptive_curriculum',
     'early_stopping_patience',
     'early_stopping_patience_checks',
     'early_stopping_min_delta',
@@ -961,6 +1021,149 @@ def migrate_phase_extension(
         raise
 
 
+ADAPTIVE_PHASE_PRESERVED_STATE_KEYS = (
+    'mortal',
+    'policy_net',
+    'aux_net',
+    'opponent_aux_net',
+    'danger_aux_net',
+    'optimizer',
+    'optimizer_param_groups',
+    'scheduler',
+    'scaler',
+    'steps',
+    'optimizer_steps',
+    'skipped_optimizer_steps',
+    'nonfinite_batches',
+)
+
+
+def migrate_adaptive_phase_handoff(
+    *,
+    source_path: Path,
+    target_path: Path,
+    expected_plan: dict,
+    target_cfg: dict,
+) -> dict:
+    source_path = source_path.resolve()
+    target_path = target_path.resolve()
+    if not source_path.exists():
+        raise FileNotFoundError(f'missing adaptive phase handoff: {source_path}')
+    if target_path.exists():
+        raise RuntimeError(f'adaptive phase destination already exists: {target_path}')
+
+    source_state = torch.load(source_path, map_location='cpu', weights_only=False)
+    source_plan = source_state.get('run_provenance') or {}
+    source_checkpoint_id = str(source_state.get('checkpoint_id') or '')
+    if not source_checkpoint_id or not source_plan.get('plan_id'):
+        raise RuntimeError(
+            f'adaptive phase handoff has no immutable provenance: {source_path}'
+        )
+    if expected_plan.get('parent_checkpoint_id') != source_checkpoint_id:
+        raise RuntimeError(
+            'adaptive phase parent checkpoint mismatch: '
+            f'{expected_plan.get("parent_checkpoint_id")!r} != '
+            f'{source_checkpoint_id!r}'
+        )
+    if expected_plan.get('parent_plan_id') != source_plan.get('plan_id'):
+        raise RuntimeError('adaptive phase parent plan mismatch')
+    source_cfg = source_state.get('config')
+    if not isinstance(source_cfg, dict):
+        raise RuntimeError(f'adaptive phase handoff has no saved config: {source_path}')
+    config_differences = extension_config_differences(source_cfg, target_cfg)
+    if config_differences:
+        rendered = '; '.join(
+            f'{name}: {left!r} != {right!r}'
+            for name, left, right in config_differences[:8]
+        )
+        raise RuntimeError(
+            'adaptive phase handoff changes model/optimizer semantics: ' + rendered
+        )
+
+    adaptive_raw = target_cfg['supervised'].get('adaptive_curriculum') or {}
+    adaptive_config = AdaptiveCurriculumConfig.from_mapping(adaptive_raw)
+    migration_id = uuid.uuid4().hex
+    migrated = deepcopy(source_state)
+    migrated.update({
+        'checkpoint_id': uuid.uuid4().hex,
+        'run_provenance': deepcopy(expected_plan),
+        'config': deepcopy(target_cfg),
+        'epoch': -1,
+        'epoch_complete': True,
+        'timestamp': time.time(),
+        'best_val_loss': math.inf,
+        'best_val_action_acc': 0.0,
+        'best_val_action_score': -math.inf,
+        'best_val_rank_acc': 0.0,
+        'best_full_recent_loss': math.inf,
+        'best_full_recent_policy_loss': math.inf,
+        'best_full_recent_action_acc': 0.0,
+        'best_full_recent_action_score': -math.inf,
+        'best_full_recent_rank_acc': 0.0,
+        'patience_val_loss': math.inf,
+        'patience_counter': 0,
+        'num_lr_reductions': 0,
+        'validation_checks': 0,
+        'full_validation_checks': 0,
+        'old_regression_checks': 0,
+        'last_monitor_recent_metrics': None,
+        'last_full_recent_metrics': None,
+        'last_old_regression_metrics': None,
+        'convergence_state': None,
+        'adaptive_curriculum_state': inherit_adaptive_curriculum_baseline(
+            adaptive_config,
+            source_state.get('adaptive_curriculum_state') or {},
+        ),
+        'adaptive_phase_handoff_migration': {
+            'schema_version': 1,
+            'migration_id': migration_id,
+            'source_path': str(source_path),
+            'source_file_sha256': file_sha256(source_path),
+            'source_checkpoint_id': source_checkpoint_id,
+            'source_plan_id': source_plan['plan_id'],
+            'target_plan_id': expected_plan['plan_id'],
+            'optimizer_state_preserved': True,
+            'amp_scaler_preserved': True,
+            'scheduler_state_preserved': True,
+            'global_steps_preserved': True,
+            'data_traversal_restart': True,
+            'data_traversal_restart_reason': (
+                'intentional phase split change; supervised loader has no exact '
+                'sample cursor contract'
+            ),
+            'adaptive_state_action': (
+                'inherit_phase_best_reset_gate_counters'
+            ),
+            'migrated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        },
+    })
+    adaptive_best_path = Path(
+        target_cfg['supervised']['adaptive_best_state_file']
+    ).resolve()
+    if adaptive_best_path == target_path:
+        raise ValueError('adaptive best and latest checkpoint paths must differ')
+    atomic_torch_save(migrated, adaptive_best_path)
+    atomic_torch_save(migrated, target_path)
+    verified = torch.load(target_path, map_location='cpu', weights_only=False)
+    for key in ADAPTIVE_PHASE_PRESERVED_STATE_KEYS:
+        if not nested_state_equal(source_state.get(key), verified.get(key)):
+            raise RuntimeError(
+                f'adaptive phase handoff changed preserved state field: {key}'
+            )
+    record = deepcopy(verified['adaptive_phase_handoff_migration'])
+    record.update({
+        'source_phase': source_plan.get('phase_name'),
+        'target_phase': expected_plan.get('phase_name'),
+        'target_path': str(target_path),
+        'target_adaptive_best_path': str(adaptive_best_path),
+        'target_checkpoint_id': verified['checkpoint_id'],
+        'target_file_sha256': file_sha256(target_path),
+        'target_adaptive_best_sha256': file_sha256(adaptive_best_path),
+    })
+    atomic_write_json(target_path.parent.parent / 'adaptive_phase_handoff.json', record)
+    return record
+
+
 def validate_existing_phase_artifacts(
     ckpts: dict[str, Path],
     expected_plan: dict,
@@ -1234,6 +1437,53 @@ def phase_train_files(
     return expand_weighted_pool(ordered_buckets, weights, bucket_names, target_pool_size, seed)
 
 
+def adaptive_curriculum_lr_levels(
+    profile_name: str,
+    peak_lr: float | None,
+) -> list[float]:
+    levels = [
+        float(value)
+        for value in ADAPTIVE_CURRICULUM_PROFILES[profile_name]['final_lr_levels']
+    ]
+    if peak_lr is None:
+        return levels
+    peak_lr = float(peak_lr)
+    if not math.isfinite(peak_lr) or peak_lr <= 0:
+        raise ValueError('adaptive peak lr must be positive and finite')
+    bounded = [value for value in levels if value < peak_lr]
+    return [peak_lr, *bounded]
+
+
+def adaptive_curriculum_mapping(
+    profile_name: str,
+    phase_name: str,
+    *,
+    peak_lr: float | None = None,
+) -> dict:
+    profile = ADAPTIVE_CURRICULUM_PROFILES[profile_name]
+    final_phase = phase_name == 'phase_c'
+    mapping = {
+        'enabled': True,
+        'phase_name': phase_name,
+        'final_phase': final_phase,
+        'gate_every_steps': int(profile['gate_every_steps']),
+        'required_futile_gates': int(profile['required_futile_gates']),
+        'confidence_z': float(profile['confidence_z']),
+        'primary_noninferiority_margin': float(
+            profile['primary_noninferiority_margin']
+        ),
+        'primary': deepcopy(profile['primary']),
+        'guardrails': [deepcopy(item) for item in profile['guardrails']],
+    }
+    if final_phase:
+        mapping['lr_levels'] = adaptive_curriculum_lr_levels(
+            profile_name,
+            peak_lr,
+        )
+    AdaptiveCurriculumConfig.from_mapping(mapping)
+    return mapping
+
+
 def make_phase_overrides(
     ckpts: dict[str, Path],
     *,
@@ -1245,16 +1495,35 @@ def make_phase_overrides(
     init_state_file: str | None,
     allow_early_stopping: bool,
     convergence_profile: str | None = None,
+    adaptive_curriculum_profile: str | None = None,
+    adaptive_peak_lr: float | None = None,
+    adaptive_warmup_init_lr: float | None = None,
 ) -> dict:
+    if adaptive_peak_lr is not None and adaptive_curriculum_profile is None:
+        raise ValueError('adaptive peak lr requires an adaptive curriculum profile')
     scheduler_core_steps = int(scheduler_core_steps or max_steps)
-    warm_up_steps = min(
-        2000 if phase_name == 'phase_a' else 1000,
-        max(1, scheduler_core_steps // 4),
-    )
+    if adaptive_curriculum_profile is not None:
+        warm_up_steps = min(5000, max(1, scheduler_core_steps // 4))
+    else:
+        warm_up_steps = min(
+            2000 if phase_name == 'phase_a' else 1000,
+            max(1, scheduler_core_steps // 4),
+        )
+    warmup_init = 1e-8
+    if adaptive_warmup_init_lr is not None:
+        if adaptive_curriculum_profile is None:
+            raise ValueError(
+                'adaptive warmup init lr requires an adaptive curriculum profile'
+            )
+        warmup_init = float(adaptive_warmup_init_lr)
+        if not math.isfinite(warmup_init) or warmup_init <= 0:
+            raise ValueError('adaptive warmup init lr must be positive and finite')
+        if adaptive_peak_lr is not None and warmup_init > adaptive_peak_lr:
+            raise ValueError('adaptive warmup init lr must not exceed peak lr')
     scheduler_overrides = {
         'type': scheduler_type,
         'warm_up_steps': warm_up_steps,
-        'init': 1e-8,
+        'init': warmup_init,
         'factor': 0.5,
         'patience': 2,
         'threshold': 0.0005,
@@ -1270,6 +1539,7 @@ def make_phase_overrides(
         'best_policy_state_file': str(ckpts['best_policy_state_file']),
         'best_acc_state_file': str(ckpts['best_acc_state_file']),
         'best_rank_state_file': str(ckpts['best_rank_state_file']),
+        'adaptive_best_state_file': str(ckpts['adaptive_best_state_file']),
         'tensorboard_dir': str(ckpts['tensorboard_dir']),
         'candidate_portfolio_dir': str(ckpts['candidate_portfolio_dir']),
         'milestone_checkpoint_dir': str(ckpts['milestone_checkpoint_dir']),
@@ -1321,6 +1591,37 @@ def make_phase_overrides(
                 'metric': str(profile['metric']),
             },
         })
+    if adaptive_curriculum_profile is not None:
+        if scheduler_type != 'constant':
+            raise ValueError(
+                'adaptive SL curriculum requires the constant AdamW scheduler'
+            )
+        profile = ADAPTIVE_CURRICULUM_PROFILES[adaptive_curriculum_profile]
+        monitor_every_steps = int(profile['monitor_every_steps'])
+        supervised.update({
+            **(
+                {'lr': float(adaptive_peak_lr)}
+                if adaptive_peak_lr is not None
+                else {}
+            ),
+            'save_every': monitor_every_steps,
+            'val_every_steps': monitor_every_steps,
+            'full_val_every_checks': 0,
+            'old_regression_every_checks': 0,
+            'max_epochs': 999,
+            'early_stopping_patience': 0,
+            'early_stopping_patience_checks': 0,
+            'early_stopping_min_delta': 0.0,
+            'early_stopping_min_lr_reductions': 0,
+            'candidate_portfolio_limit': int(
+                profile['candidate_portfolio_limit']
+            ),
+            'adaptive_curriculum': adaptive_curriculum_mapping(
+                adaptive_curriculum_profile,
+                phase_name,
+                peak_lr=adaptive_peak_lr,
+            ),
+        })
     if init_state_file:
         supervised['init_state_file'] = init_state_file
     return {'supervised': supervised}
@@ -1344,7 +1645,15 @@ def run_phase(
     allow_early_stopping: bool = True,
     convergence_profile: str | None = None,
     phase_extension_source: str | None = None,
+    adaptive_curriculum_profile: str | None = None,
+    adaptive_handoff_source: str | None = None,
+    adaptive_peak_lr: float | None = None,
+    adaptive_warmup_init_lr: float | None = None,
 ) -> dict:
+    if convergence_profile is not None and adaptive_curriculum_profile is not None:
+        raise ValueError('convergence and adaptive curriculum profiles are exclusive')
+    if phase_extension_source and adaptive_handoff_source:
+        raise ValueError('phase extension and adaptive handoff are exclusive')
     exp_dir = AB_ROOT / ab_name / arm_name / phase_name
     ckpts = checkpoint_paths(
         exp_dir,
@@ -1363,6 +1672,10 @@ def run_phase(
                 f'{convergence_profile} training cap for {phase_name} must exceed '
                 f'its scheduler core: {max_steps} <= {scheduler_core_steps}'
             )
+    if adaptive_curriculum_profile is not None:
+        profile = ADAPTIVE_CURRICULUM_PROFILES[adaptive_curriculum_profile]
+        max_steps = int(profile['training_caps'][phase_name])
+        scheduler_core_steps = max_steps
     pool_size = BASE_SCREENING['phase_train_pool'][phase_name]
     train_files = phase_train_files(
         grouped,
@@ -1384,6 +1697,9 @@ def run_phase(
             init_state_file=init_state_file,
             allow_early_stopping=allow_early_stopping,
             convergence_profile=convergence_profile,
+            adaptive_curriculum_profile=adaptive_curriculum_profile,
+            adaptive_peak_lr=adaptive_peak_lr,
+            adaptive_warmup_init_lr=adaptive_warmup_init_lr,
         ),
     )
     cfg_path = exp_dir / 'config.toml'
@@ -1402,9 +1718,16 @@ def run_phase(
         train_files=train_files,
         eval_splits=eval_splits,
         cfg=cfg,
-        init_state_file=init_state_file,
+        init_state_file=adaptive_handoff_source or init_state_file,
     )
     cfg['supervised']['run_provenance'] = phase_plan
+    if adaptive_handoff_source and not ckpts['state_file'].exists():
+        migrate_adaptive_phase_handoff(
+            source_path=Path(adaptive_handoff_source),
+            target_path=ckpts['state_file'],
+            expected_plan=phase_plan,
+            target_cfg=cfg,
+        )
     if phase_extension_source and not ckpts['state_file'].exists():
         migrate_phase_extension(
             source_root=Path(phase_extension_source),
@@ -1464,6 +1787,10 @@ def run_phase(
         'best_loss': load_state_summary_with_fallback(ckpts['best_loss_state_file'], ckpts['state_file']),
         'best_acc': load_state_summary_with_fallback(ckpts['best_acc_state_file'], ckpts['state_file']),
         'best_rank': load_state_summary_with_fallback(ckpts['best_rank_state_file'], ckpts['state_file']),
+        'adaptive_best': load_state_summary_with_fallback(
+            ckpts['adaptive_best_state_file'],
+            ckpts['state_file'],
+        ),
         'portfolio': load_candidate_portfolio(ckpts['candidate_portfolio_dir']),
         'artifact_root': str((storage_root or exp_dir).resolve()),
         'artifacts_retained': True,
@@ -1514,7 +1841,21 @@ def run_arm(
     allow_early_stopping: bool = True,
     convergence_profile: str | None = None,
     phase_extension_sources: dict[str, str] | None = None,
+    adaptive_curriculum_profile: str | None = None,
+    adaptive_start_phase: str | None = None,
+    adaptive_bootstrap_state_file: str | None = None,
+    adaptive_peak_lr: float | None = None,
 ) -> dict:
+    if adaptive_curriculum_profile is not None and convergence_profile is not None:
+        raise ValueError('adaptive curriculum and convergence profiles are exclusive')
+    if adaptive_curriculum_profile is not None and phase_extension_sources:
+        raise ValueError('adaptive curriculum does not use phase extensions')
+    if adaptive_curriculum_profile is None and any((
+        adaptive_start_phase,
+        adaptive_bootstrap_state_file,
+        adaptive_peak_lr is not None,
+    )):
+        raise ValueError('adaptive bootstrap options require an adaptive curriculum')
     if phase_extension_sources and convergence_profile is None:
         raise ValueError('phase extension requires an explicit convergence profile')
     unknown_extension_phases = set(phase_extension_sources or {}) - set(
@@ -1525,12 +1866,98 @@ def run_arm(
             'phase extension contains phases outside the selected curriculum: '
             + ', '.join(sorted(unknown_extension_phases))
         )
-    phase_order = CURRICULUM_PROFILES[curriculum_profile]
+    full_phase_order = list(CURRICULUM_PROFILES[curriculum_profile])
+    start_phase = adaptive_start_phase or full_phase_order[0]
+    if start_phase not in full_phase_order:
+        raise ValueError(
+            f'adaptive start phase {start_phase!r} is outside curriculum '
+            f'{curriculum_profile!r}'
+        )
+    if (
+        adaptive_curriculum_profile is not None
+        and start_phase != full_phase_order[0]
+        and not adaptive_bootstrap_state_file
+    ):
+        raise ValueError(
+            f'adaptive start phase {start_phase!r} requires a bootstrap checkpoint'
+        )
+    phase_order = full_phase_order[full_phase_order.index(start_phase):]
     final_phase_name = phase_order[-1]
-    init_state_file = None
+    init_state_file = adaptive_bootstrap_state_file
+    adaptive_handoff_source = None
     phase_results = {}
+    bootstrap_record = None
+    bootstrap_summary = None
+    adaptive_warmup_init_lr = None
+    if adaptive_bootstrap_state_file:
+        bootstrap_path = Path(adaptive_bootstrap_state_file).resolve()
+        bootstrap_identity = checkpoint_identity(bootstrap_path)
+        bootstrap_summary = load_state_summary(bootstrap_path)
+        source_lr = float(bootstrap_summary.get('lr') or 0.0)
+        if not math.isfinite(source_lr) or source_lr <= 0:
+            raise ValueError(
+                'adaptive bootstrap checkpoint must contain a positive optimizer lr'
+            )
+        adaptive_warmup_init_lr = source_lr
+        if adaptive_peak_lr is None:
+            rewarm_factor = float(
+                ADAPTIVE_CURRICULUM_PROFILES[adaptive_curriculum_profile][
+                    'bootstrap_rewarm_factor'
+                ]
+            )
+            adaptive_peak_lr = source_lr * rewarm_factor
+        if adaptive_peak_lr < source_lr:
+            raise ValueError(
+                'adaptive bootstrap peak lr must not be below the source lr'
+            )
+        source_plan = bootstrap_summary.get('run_provenance') or {}
+        eval_digests_match = all(
+            source_plan.get(key) == stable_digest(list(eval_splits[split_name]))
+            for key, split_name in (
+                ('monitor_recent_files_digest', 'monitor_recent_files'),
+                ('full_recent_files_digest', 'full_recent_files'),
+                ('old_regression_files_digest', 'old_regression_files'),
+            )
+        )
+        bootstrap_record = {
+            'schema_version': 1,
+            'source': bootstrap_identity,
+            'source_file_sha256': file_sha256(bootstrap_path),
+            'start_phase': start_phase,
+            'phase_order': phase_order,
+            'adaptive_peak_lr': adaptive_peak_lr,
+            'source_lr': source_lr,
+            'warmup_init_lr': adaptive_warmup_init_lr,
+            'rewarm_ratio': adaptive_peak_lr / source_lr,
+            'initialization': 'weights_only',
+            'optimizer_state_preserved': False,
+            'amp_scaler_preserved': False,
+            'scheduler_state_preserved': False,
+            'global_steps_preserved': False,
+            'data_traversal_restart': True,
+            'eval_split_digests_match': eval_digests_match,
+            'source_summary': bootstrap_summary,
+        }
+        record_path = AB_ROOT / ab_name / 'adaptive_bootstrap.json'
+        if record_path.exists():
+            existing_record = load_json_file(record_path)
+            if stable_digest(existing_record) != stable_digest(bootstrap_record):
+                raise RuntimeError(
+                    f'adaptive bootstrap record changed for existing run: {record_path}'
+                )
+        else:
+            atomic_write_json(record_path, bootstrap_record)
+    if adaptive_peak_lr is not None:
+        adaptive_curriculum_lr_levels(
+            adaptive_curriculum_profile,
+            adaptive_peak_lr,
+        )
     for phase_name in phase_order:
-        scheduler_type = SCHEDULER_PROFILES[scheduler_profile][phase_name]
+        scheduler_type = (
+            'constant'
+            if adaptive_curriculum_profile is not None
+            else SCHEDULER_PROFILES[scheduler_profile][phase_name]
+        )
         storage_root_override = phase_storage_root_override(phase_name)
         phase_kwargs = {
             'base_cfg': base_cfg,
@@ -1548,6 +1975,15 @@ def run_arm(
             'storage_root': storage_root_override,
             'allow_early_stopping': allow_early_stopping,
         }
+        if adaptive_curriculum_profile is not None:
+            phase_kwargs['adaptive_curriculum_profile'] = (
+                adaptive_curriculum_profile
+            )
+            phase_kwargs['adaptive_handoff_source'] = adaptive_handoff_source
+            phase_kwargs['adaptive_peak_lr'] = adaptive_peak_lr
+            phase_kwargs['adaptive_warmup_init_lr'] = (
+                adaptive_warmup_init_lr if phase_name == start_phase else None
+            )
         if convergence_profile is not None:
             phase_kwargs['convergence_profile'] = convergence_profile
         extension_source = (phase_extension_sources or {}).get(phase_name)
@@ -1556,17 +1992,28 @@ def run_arm(
         phase_result = run_phase(
             **phase_kwargs,
         )
-        handoff_candidates = {
-            'best_policy': phase_result.get('best_policy', phase_result['best_loss']),
-            'best_loss': phase_result['best_loss'],
-            'best_acc': phase_result['best_acc'],
-            'best_rank': phase_result['best_rank'],
-        }
-        handoff_candidates.update(phase_result.get('portfolio') or {})
-        handoff_winner, handoff_selection = select_checkpoint_candidate(
-            handoff_candidates
-        )
-        handoff_summary = handoff_candidates[handoff_winner]
+        if adaptive_curriculum_profile is not None:
+            handoff_winner = 'adaptive_best'
+            handoff_summary = phase_result['adaptive_best']
+            handoff_selection = {
+                'method': 'paired_adaptive_phase_best',
+                'phase_completed': True,
+                'adaptive_curriculum_state': handoff_summary.get(
+                    'adaptive_curriculum_state'
+                ),
+            }
+        else:
+            handoff_candidates = {
+                'best_policy': phase_result.get('best_policy', phase_result['best_loss']),
+                'best_loss': phase_result['best_loss'],
+                'best_acc': phase_result['best_acc'],
+                'best_rank': phase_result['best_rank'],
+            }
+            handoff_candidates.update(phase_result.get('portfolio') or {})
+            handoff_winner, handoff_selection = select_checkpoint_candidate(
+                handoff_candidates
+            )
+            handoff_summary = handoff_candidates[handoff_winner]
         phase_result['handoff'] = {
             'checkpoint_type': handoff_winner,
             'checkpoint_id': handoff_summary['checkpoint_id'],
@@ -1578,7 +2025,11 @@ def run_arm(
             phase_result['handoff'],
         )
         phase_results[phase_name] = phase_result
-        init_state_file = handoff_summary['path']
+        if adaptive_curriculum_profile is not None:
+            adaptive_handoff_source = handoff_summary['path']
+            init_state_file = None
+        else:
+            init_state_file = handoff_summary['path']
 
     final_best_policy = phase_results[final_phase_name].get(
         'best_policy',
@@ -1591,18 +2042,33 @@ def run_arm(
     cross_phase_candidates = {
         f'{phase_name}_{checkpoint_type}': phase_result[checkpoint_type]
         for phase_name, phase_result in phase_results.items()
-        for checkpoint_type in ('best_policy', 'best_acc', 'best_rank', 'best_loss')
+        for checkpoint_type in (
+            'adaptive_best',
+            'best_policy',
+            'best_acc',
+            'best_rank',
+            'best_loss',
+        )
         if checkpoint_type in phase_result
     }
     for phase_name, phase_result in phase_results.items():
         for candidate_name, candidate in (phase_result.get('portfolio') or {}).items():
             cross_phase_candidates[f'{phase_name}_{candidate_name}'] = candidate
+    if (
+        bootstrap_record is not None
+        and bootstrap_record['eval_split_digests_match']
+        and bootstrap_summary is not None
+    ):
+        cross_phase_candidates['bootstrap_anchor'] = bootstrap_summary
     return {
         'scheduler_profile': scheduler_profile,
         'curriculum_profile': curriculum_profile,
         'weight_profile': weight_profile,
         'window_profile': window_profile,
         'convergence_profile': convergence_profile,
+        'adaptive_curriculum_profile': adaptive_curriculum_profile,
+        'adaptive_bootstrap': bootstrap_record,
+        'adaptive_peak_lr': adaptive_peak_lr,
         'phase_order': phase_order,
         'phase_results': phase_results,
         'final': {
@@ -1879,9 +2345,63 @@ def run_ab6_checkpoint(base_cfg: dict, grouped: dict[str, list[str]], seed: int,
     return payload
 
 
+def run_adaptive_curriculum(
+    base_cfg: dict,
+    grouped: dict[str, list[str]],
+    *,
+    seed: int,
+    curriculum_profile: str,
+    weight_profile: str,
+    window_profile: str,
+    adaptive_curriculum_profile: str,
+    ab_name: str,
+    adaptive_start_phase: str = 'phase_a',
+    adaptive_bootstrap_state_file: str | None = None,
+    adaptive_peak_lr: float | None = None,
+) -> dict:
+    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
+    result = run_arm(
+        base_cfg,
+        grouped,
+        ab_name=ab_name,
+        arm_name=(
+            'fully_dynamic'
+            if adaptive_start_phase == 'phase_a'
+            else f'fully_dynamic_from_{adaptive_start_phase}'
+        ),
+        scheduler_profile='phasewise',
+        curriculum_profile=curriculum_profile,
+        weight_profile=weight_profile,
+        window_profile=window_profile,
+        seed=seed,
+        eval_splits=eval_splits,
+        step_scale=1.0,
+        allow_early_stopping=False,
+        adaptive_curriculum_profile=adaptive_curriculum_profile,
+        adaptive_start_phase=adaptive_start_phase,
+        adaptive_bootstrap_state_file=adaptive_bootstrap_state_file,
+        adaptive_peak_lr=adaptive_peak_lr,
+    )
+    finalist_name, finalist_selection = select_checkpoint_candidate(
+        result['cross_phase_candidates']
+    )
+    finalist = result['cross_phase_candidates'][finalist_name]
+    payload = {
+        'status': 'offline_curriculum_complete',
+        'offline_finalist': finalist,
+        'offline_finalist_name': finalist_name,
+        'offline_finalist_selection': finalist_selection,
+        'next_gate': 'formal_1v3',
+        'human_sealed_test_opened': False,
+        'result': result,
+    }
+    save_results(ab_name, payload)
+    return payload
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ab', choices=['ab1', 'ab2', 'ab3', 'ab4', 'ab23', 'ab234', 'ab1234', 'ab5', 'ab6', 'all'], default='all')
+    parser.add_argument('--ab', choices=['ab1', 'ab2', 'ab3', 'ab4', 'ab23', 'ab234', 'ab1234', 'ab5', 'ab6', 'adaptive', 'all'], default='all')
     parser.add_argument('--scheduler-profile', default='phasewise')
     parser.add_argument('--curriculum-profile', default='broad_to_recent')
     parser.add_argument('--weight-profile', default='two_stage')
@@ -1903,6 +2423,18 @@ def main() -> None:
         '--convergence-profile',
         choices=sorted(CONVERGENCE_PROFILES),
     )
+    parser.add_argument(
+        '--adaptive-curriculum-profile',
+        choices=sorted(ADAPTIVE_CURRICULUM_PROFILES),
+        default='full_dynamic',
+    )
+    parser.add_argument(
+        '--adaptive-start-phase',
+        choices=['phase_a', 'phase_b', 'phase_c'],
+        default='phase_a',
+    )
+    parser.add_argument('--adaptive-bootstrap-state-file')
+    parser.add_argument('--adaptive-peak-lr', type=float)
     parser.add_argument('--phase-a-extension-source')
     args = parser.parse_args()
 
@@ -1964,6 +2496,22 @@ def main() -> None:
             else None
         )
         print(json.dumps(run_ab6_checkpoint(base_cfg, grouped, args.seed, args.scheduler_profile, args.curriculum_profile, args.weight_profile, args.window_profile, args.step_scale, ab_name=ab_name, convergence_profile=args.convergence_profile, phase_extension_sources=extension_sources), ensure_ascii=False, indent=2))
+        return
+    if args.ab == 'adaptive':
+        ab_name = args.ab_name or 'sl_fully_dynamic_curriculum'
+        print(json.dumps(run_adaptive_curriculum(
+            base_cfg,
+            grouped,
+            seed=args.seed,
+            curriculum_profile=args.curriculum_profile,
+            weight_profile=args.weight_profile,
+            window_profile=args.window_profile,
+            adaptive_curriculum_profile=args.adaptive_curriculum_profile,
+            ab_name=ab_name,
+            adaptive_start_phase=args.adaptive_start_phase,
+            adaptive_bootstrap_state_file=args.adaptive_bootstrap_state_file,
+            adaptive_peak_lr=args.adaptive_peak_lr,
+        ), ensure_ascii=False, indent=2))
         return
 
     ab1 = run_ab1(base_cfg, grouped, args.seed, args.step_scale)
