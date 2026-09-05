@@ -1,3 +1,4 @@
+import gc
 import inspect
 import json
 import logging
@@ -153,7 +154,10 @@ def run_with_validation_retries(
     context,
     sleep_fn=time.sleep,
     empty_cache_fn=None,
+    max_retries=1,
 ):
+    if max_retries < 0:
+        raise ValueError('max_retries must be nonnegative')
     if empty_cache_fn is None:
         empty_cache_fn = torch.cuda.empty_cache
 
@@ -162,21 +166,59 @@ def run_with_validation_retries(
         try:
             return fn()
         except Exception as exc:
-            if not is_retryable_validation_error(exc):
+            if not is_retryable_validation_error(exc) or attempt >= max_retries:
                 raise
             attempt += 1
             wait_seconds = min(30.0, max(1.0, float(attempt)))
             if device_type == 'cuda':
-                empty_cache_fn()
+                try:
+                    empty_cache_fn()
+                except Exception:
+                    logging.exception('CUDA cleanup failed; preserving validation failure')
+                    raise exc
             logging.exception(
                 '%s hit a transient loader/resource failure; retry same '
-                'validation settings forever (attempt=%s, sleep=%.1fs): %s',
+                'validation settings with a bounded retry (attempt=%s, sleep=%.1fs): %s',
                 context,
                 attempt,
                 wait_seconds,
                 exc,
             )
             sleep_fn(wait_seconds)
+
+
+def forward_validation_brain(model, obs, *, device, microbatch_size=256):
+    if model.training or not torch.is_inference_mode_enabled():
+        raise RuntimeError('validation microbatches require eval and inference_mode')
+    if microbatch_size <= 0 or obs.shape[0] <= 0:
+        raise ValueError('validation microbatch and observation sizes must be positive')
+    # Split only the expensive feature network. Heads and metric reductions
+    # retain the complete logical batch, including conditional auxiliaries.
+    features = []
+    for start in range(0, obs.shape[0], microbatch_size):
+        chunk = obs[start:start + microbatch_size].to(
+            dtype=torch.float32, device=device, non_blocking=True,
+        )
+        features.append(model(chunk))
+        del chunk
+    return torch.cat(features, dim=0)
+
+
+def cleanup_validation_resources(close_fn, *, device_type):
+    primary_error = sys.exc_info()[1]
+    cleanup_error = None
+    actions = [close_fn, gc.collect]
+    if device_type == 'cuda':
+        actions.append(torch.cuda.empty_cache)
+    for action in actions:
+        try:
+            action()
+        except Exception as exc:
+            logging.exception('validation cleanup failed')
+            if cleanup_error is None:
+                cleanup_error = exc
+    if primary_error is None and cleanup_error is not None:
+        raise cleanup_error
 
 
 def gradient_probe_rms(grad_tensor):
@@ -429,7 +471,6 @@ def train(
     checkpoint_label='supervised',
 ):
     import copy
-    import gc
     import gzip
     import json
     import logging
@@ -2277,7 +2318,7 @@ def train(
                 kwargs['in_order'] = phase_in_order
         return DataLoader(**kwargs)
 
-    def move_batch_to_device(batch):
+    def move_batch_to_device(batch, *, move_obs=True):
         (
             obs,
             actions,
@@ -2302,7 +2343,8 @@ def train(
             player_rank = torch.as_tensor(player_rank)
         if not torch.is_tensor(context_meta):
             context_meta = torch.as_tensor(context_meta)
-        obs = obs.to(dtype=torch.float32, device=device, non_blocking=True)
+        if move_obs:
+            obs = obs.to(dtype=torch.float32, device=device, non_blocking=True)
         actions = actions.to(dtype=torch.int64, device=device, non_blocking=True)
         masks = masks.to(dtype=torch.bool, device=device, non_blocking=True)
         player_rank = player_rank.to(dtype=torch.int64, device=device, non_blocking=True)
@@ -2426,7 +2468,9 @@ def train(
         if callable(shutdown):
             shutdown()
 
-    def build_batch_iter(file_list, *, training, shuffle_files, safe_train=False):
+    def build_batch_iter(
+        file_list, *, training, shuffle_files, safe_train=False, allow_cuda_prefetch=True,
+    ):
         loader = build_loader(
             file_list,
             training=training,
@@ -2435,7 +2479,7 @@ def train(
         )
         return make_closeable_batch_iter(
             loader,
-            enable_cuda_prefetch=enable_cuda_prefetch,
+            enable_cuda_prefetch=enable_cuda_prefetch and allow_cuda_prefetch,
             prefetcher_factory=CudaPrefetcher,
         )
 
@@ -2723,6 +2767,7 @@ def train(
         compute_sliced_metrics=True,
         collect_cluster_records=False,
         training=False,
+        validation_microbatch_size=0,
     ):
         if batch_on_device:
             (
@@ -2753,9 +2798,15 @@ def train(
                 danger_value,
                 danger_player_mask,
                 game_id,
-            ) = move_batch_to_device(batch)
+            ) = move_batch_to_device(batch, move_obs=not validation_microbatch_size)
         with torch.autocast(device.type, enabled=enable_amp):
-            phi = mortal(obs)
+            phi = (
+                forward_validation_brain(
+                    mortal, obs, device=device,
+                    microbatch_size=validation_microbatch_size,
+                )
+                if validation_microbatch_size else mortal(obs)
+            )
             policy_logits = policy_net.logits(phi, masks)
             policy_loss_vec = nn.functional.cross_entropy(
                 policy_logits,
@@ -3006,6 +3057,7 @@ def train(
                     file_list,
                     training=False,
                     shuffle_files=False,
+                    allow_cuda_prefetch=False,
                 )
                 with torch.inference_mode():
                     for batch in tqdm(val_loader, desc=desc, unit='batch'):
@@ -3023,6 +3075,7 @@ def train(
                             compute_sliced_metrics=True,
                             collect_cluster_records=collect_cluster_records,
                             training=False,
+                            validation_microbatch_size=256,
                         )
                         merge_metrics(totals, batch_metrics)
                         if collect_cluster_records:
@@ -3034,11 +3087,10 @@ def train(
                         if max_batches > 0 and batch_count >= max_batches:
                             break
             finally:
-                close_batch_iter(val_loader)
+                cleanup_validation_resources(
+                    lambda: close_batch_iter(val_loader), device_type=device.type,
+                )
                 del val_loader
-                gc.collect()
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
             return batch_count
 
         def run_eval_attempt():
@@ -3254,11 +3306,10 @@ def train(
                     if totals['count'] >= gradient_calibration_max_batches:
                         break
             finally:
-                close_batch_iter(val_loader)
+                cleanup_validation_resources(
+                    lambda: close_batch_iter(val_loader), device_type=device.type,
+                )
                 del val_loader
-                gc.collect()
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
             return totals
 
         totals = run_with_validation_retries(

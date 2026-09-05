@@ -1,8 +1,9 @@
 import sys
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -503,6 +504,348 @@ class TrainSupervisedResumeAuxTests(unittest.TestCase):
         self.assertAlmostEqual(5.0 / (2.0 ** 0.5), train_supervised.gradient_probe_rms(left), places=6)
         self.assertAlmostEqual(0.8, train_supervised.gradient_probe_cosine(left, right), places=6)
         self.assertAlmostEqual(90.0 ** 0.5 / 10.0, train_supervised.gradient_probe_combo_factor(left, right), places=6)
+
+
+class ValidationBoundedRetryTests(unittest.TestCase):
+    def test_retry_budget_counts_retries_and_raises_last_original_error(self):
+        for max_retries in (None, 0, 1, 2):
+            with self.subTest(max_retries=max_retries):
+                budget = 1 if max_retries is None else max_retries
+                errors = []
+                sleeps = []
+                empty_cache = Mock()
+
+                def fail_validation():
+                    if len(errors) >= budget + 1:
+                        self.fail('validation exceeded its retry budget')
+                    error = RuntimeError(f'WinError 1455: validation attempt {len(errors)}')
+                    errors.append(error)
+                    raise error
+
+                kwargs = {} if max_retries is None else {'max_retries': max_retries}
+                with (
+                    patch.object(train_supervised.logging, 'exception') as log,
+                    self.assertRaises(RuntimeError) as raised,
+                ):
+                    train_supervised.run_with_validation_retries(
+                        fail_validation,
+                        device_type='cuda',
+                        context='bounded retry test',
+                        sleep_fn=sleeps.append,
+                        empty_cache_fn=empty_cache,
+                        **kwargs,
+                    )
+
+                self.assertEqual(budget + 1, len(errors))
+                self.assertIs(errors[-1], raised.exception)
+                self.assertEqual([float(i) for i in range(1, budget + 1)], sleeps)
+                self.assertEqual(budget, empty_cache.call_count)
+                self.assertEqual(budget, log.call_count)
+
+    def test_success_on_last_allowed_attempt_returns_result(self):
+        result = object()
+        validate = Mock(side_effect=[
+            RuntimeError('WinError 1455: first attempt'),
+            RuntimeError('WinError 1455: second attempt'),
+            result,
+        ])
+        sleeps = []
+        empty_cache = Mock()
+        with self.assertLogs(level='ERROR'):
+            actual = train_supervised.run_with_validation_retries(
+                validate,
+                device_type='cpu',
+                context='bounded success test',
+                max_retries=2,
+                sleep_fn=sleeps.append,
+                empty_cache_fn=empty_cache,
+            )
+
+        self.assertIs(result, actual)
+        self.assertEqual(3, validate.call_count)
+        self.assertEqual([1.0, 2.0], sleeps)
+        empty_cache.assert_not_called()
+
+    def test_negative_budget_rejected_before_validation_or_cleanup(self):
+        validate = Mock()
+        sleep = Mock()
+        empty_cache = Mock()
+        with self.assertRaisesRegex(ValueError, 'max_retries'):
+            train_supervised.run_with_validation_retries(
+                validate,
+                device_type='cuda',
+                context='negative budget test',
+                max_retries=-1,
+                sleep_fn=sleep,
+                empty_cache_fn=empty_cache,
+            )
+        validate.assert_not_called()
+        sleep.assert_not_called()
+        empty_cache.assert_not_called()
+
+    def test_retry_cleanup_failure_preserves_validation_error_without_retrying(self):
+        primary = RuntimeError('WinError 1455: original validation failure')
+        cleanup_error = RuntimeError('CUDA error: out of memory during cleanup')
+        validate = Mock(side_effect=primary)
+        sleep = Mock()
+        empty_cache = Mock(side_effect=cleanup_error)
+        with self.assertLogs(level='ERROR') as logs, self.assertRaises(RuntimeError) as raised:
+            train_supervised.run_with_validation_retries(
+                validate,
+                device_type='cuda',
+                context='retry cleanup failure test',
+                max_retries=2,
+                sleep_fn=sleep,
+                empty_cache_fn=empty_cache,
+            )
+
+        self.assertIs(primary, raised.exception)
+        validate.assert_called_once_with()
+        empty_cache.assert_called_once_with()
+        sleep.assert_not_called()
+        self.assertEqual(1, len(logs.records))
+        self.assertIs(cleanup_error, logs.records[0].exc_info[1])
+
+
+class ValidationBrainMicrobatchTests(unittest.TestCase):
+    def test_group_norm_matches_full_logical_batch(self):
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(17)
+            model = torch.nn.Sequential(
+                torch.nn.Conv1d(4, 8, kernel_size=3, padding=1),
+                torch.nn.GroupNorm(2, 8),
+                torch.nn.Mish(),
+                torch.nn.Flatten(),
+                torch.nn.Linear(8 * 5, 7),
+            ).eval()
+            obs = torch.randn(11, 4, 5, dtype=torch.float64)
+
+        with torch.inference_mode():
+            expected = model(obs.float())
+            actual = train_supervised.forward_validation_brain(
+                model, obs, device=torch.device('cpu'), microbatch_size=4,
+            )
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        self.assertEqual((11, 7), actual.shape)
+        self.assertEqual(torch.float32, actual.dtype)
+        self.assertFalse(actual.requires_grad)
+        self.assertIsNone(actual.grad_fn)
+        self.assertFalse(model.training)
+
+    def test_eval_batch_norm_matches_full_batch_without_updating_buffers(self):
+        model = torch.nn.BatchNorm1d(4).eval()
+        with torch.no_grad():
+            model.running_mean.copy_(torch.tensor([0.2, -0.5, 1.0, 0.8]))
+            model.running_var.copy_(torch.tensor([0.5, 2.0, 1.5, 3.0]))
+        buffers_before = {
+            name: value.clone() for name, value in model.named_buffers()
+        }
+        obs = torch.arange(11 * 4 * 5, dtype=torch.float64).reshape(11, 4, 5) / 20
+
+        with torch.inference_mode():
+            expected = model(obs.float())
+            actual = train_supervised.forward_validation_brain(
+                model, obs, device=torch.device('cpu'), microbatch_size=4,
+            )
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        for name, value in model.named_buffers():
+            self.assertTrue(torch.equal(buffers_before[name], value), name)
+
+    def test_microbatch_sizes_cover_each_sample_once_in_order(self):
+        class RecordingModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.inputs = []
+
+            def forward(self, value):
+                self.inputs.append(value.clone())
+                return value * 2 + 1
+
+        cases = (
+            (1, 1, [1]),
+            (3, 8, [3]),
+            (8, 4, [4, 4]),
+            (11, 4, [4, 4, 3]),
+            (513, None, [256, 256, 1]),
+        )
+        for size, microbatch_size, expected_sizes in cases:
+            with self.subTest(size=size, microbatch_size=microbatch_size):
+                model = RecordingModel().eval()
+                obs = torch.arange(size * 2, dtype=torch.float64).reshape(size, 2)
+                before = obs.clone()
+                kwargs = {} if microbatch_size is None else {
+                    'microbatch_size': microbatch_size,
+                }
+                with torch.inference_mode():
+                    actual = train_supervised.forward_validation_brain(
+                        model, obs, device=torch.device('cpu'), **kwargs,
+                    )
+
+                self.assertEqual(expected_sizes, [len(value) for value in model.inputs])
+                for value in model.inputs:
+                    self.assertEqual(torch.float32, value.dtype)
+                    self.assertEqual('cpu', value.device.type)
+                self.assertTrue(torch.equal(torch.cat(model.inputs), obs.float()))
+                self.assertTrue(torch.equal(actual, obs.float() * 2 + 1))
+                self.assertTrue(torch.equal(obs, before))
+
+    def test_chunk_inputs_die_before_next_transfer_and_outputs_after_concat(self):
+        input_refs = []
+        output_refs = []
+        transfers = []
+        original_to = torch.Tensor.to
+
+        class TrackingModel(torch.nn.Module):
+            def forward(self, value):
+                input_refs.append(weakref.ref(value))
+                result = value.sum(dim=1, keepdim=True)
+                output_refs.append(weakref.ref(result))
+                return result
+
+        def tracked_to(value, *args, **kwargs):
+            self.assertTrue(all(ref() is None for ref in input_refs))
+            transfers.append(value.shape[0])
+            return original_to(value, *args, **kwargs)
+
+        # Float64 CPU input forces a fresh float32 allocation without using CUDA.
+        obs = torch.arange(18, dtype=torch.float64).reshape(9, 2)
+        model = TrackingModel().eval()
+        with torch.inference_mode(), patch.object(torch.Tensor, 'to', new=tracked_to):
+            actual = train_supervised.forward_validation_brain(
+                model, obs, device=torch.device('cpu'), microbatch_size=4,
+            )
+
+        self.assertEqual([4, 4, 1], transfers)
+        self.assertEqual(3, len(input_refs))
+        self.assertTrue(all(ref() is None for ref in input_refs))
+        self.assertTrue(all(ref() is None for ref in output_refs))
+        self.assertTrue(torch.equal(actual, obs.float().sum(dim=1, keepdim=True)))
+
+    def test_requires_inference_mode_even_inside_no_grad(self):
+        model = torch.nn.Identity().eval()
+        obs = torch.ones(2, 4)
+        for context in (torch.enable_grad, torch.no_grad):
+            with self.subTest(context=context.__name__), context():
+                with patch.object(model, 'forward') as forward:
+                    with self.assertRaisesRegex(RuntimeError, 'inference_mode'):
+                        train_supervised.forward_validation_brain(
+                            model, obs, device=torch.device('cpu'),
+                        )
+                    forward.assert_not_called()
+
+    def test_rejects_training_model_without_changing_its_mode(self):
+        model = torch.nn.Identity().train()
+        with torch.inference_mode(), patch.object(model, 'forward') as forward:
+            with self.assertRaisesRegex(RuntimeError, 'eval'):
+                train_supervised.forward_validation_brain(
+                    model, torch.ones(2, 4), device=torch.device('cpu'),
+                )
+        forward.assert_not_called()
+        self.assertTrue(model.training)
+
+    def test_rejects_empty_batch_and_nonpositive_microbatch_size(self):
+        for size, microbatch_size in ((0, 256), (2, 0), (2, -1)):
+            with self.subTest(size=size, microbatch_size=microbatch_size):
+                model = torch.nn.Identity().eval()
+                with torch.inference_mode(), patch.object(model, 'forward') as forward:
+                    with self.assertRaises(ValueError):
+                        train_supervised.forward_validation_brain(
+                            model, torch.ones(size, 4), device=torch.device('cpu'),
+                            microbatch_size=microbatch_size,
+                        )
+                forward.assert_not_called()
+
+
+class ValidationResourceCleanupTests(unittest.TestCase):
+    def test_cleanup_order_and_cpu_skips_cuda_cache(self):
+        for device_type in ('cpu', 'cuda'):
+            with self.subTest(device_type=device_type):
+                events = []
+                with (
+                    patch.object(train_supervised.gc, 'collect', side_effect=lambda: events.append('gc')),
+                    patch.object(train_supervised.torch.cuda, 'empty_cache', side_effect=lambda: events.append('cache')),
+                ):
+                    train_supervised.cleanup_validation_resources(
+                        lambda: events.append('close'), device_type=device_type,
+                    )
+                expected = ['close', 'gc'] + (['cache'] if device_type == 'cuda' else [])
+                self.assertEqual(expected, events)
+
+    def test_all_cleanup_actions_run_and_first_failure_is_raised_and_logged(self):
+        for failed_actions in (('close',), ('gc',), ('cache',), ('close', 'gc', 'cache')):
+            with self.subTest(failed_actions=failed_actions):
+                events = []
+                errors = {name: RuntimeError(f'{name} failed') for name in failed_actions}
+
+                def action(name):
+                    events.append(name)
+                    if name in errors:
+                        raise errors[name]
+
+                with (
+                    patch.object(train_supervised.gc, 'collect', side_effect=lambda: action('gc')),
+                    patch.object(train_supervised.torch.cuda, 'empty_cache', side_effect=lambda: action('cache')),
+                    self.assertLogs(level='ERROR') as logs,
+                    self.assertRaises(RuntimeError) as raised,
+                ):
+                    train_supervised.cleanup_validation_resources(
+                        lambda: action('close'), device_type='cuda',
+                    )
+
+                self.assertIs(errors[failed_actions[0]], raised.exception)
+                self.assertEqual(['close', 'gc', 'cache'], events)
+                self.assertEqual(len(failed_actions), len(logs.records))
+                self.assertEqual(
+                    [errors[name] for name in failed_actions],
+                    [record.exc_info[1] for record in logs.records],
+                )
+
+    def test_active_original_exception_survives_all_cleanup_failures(self):
+        for primary in (RuntimeError('forward CUDA OOM'), SystemExit(75)):
+            with self.subTest(primary=type(primary).__name__):
+                events = []
+
+                def fail(name):
+                    events.append(name)
+                    raise RuntimeError(f'{name} cleanup failed')
+
+                with (
+                    patch.object(train_supervised.gc, 'collect', side_effect=lambda: fail('gc')),
+                    patch.object(train_supervised.torch.cuda, 'empty_cache', side_effect=lambda: fail('cache')),
+                    self.assertLogs(level='ERROR') as logs,
+                    self.assertRaises(type(primary)) as raised,
+                ):
+                    try:
+                        raise primary
+                    finally:
+                        train_supervised.cleanup_validation_resources(
+                            lambda: fail('close'), device_type='cuda',
+                        )
+
+                self.assertIs(primary, raised.exception)
+                self.assertEqual(['close', 'gc', 'cache'], events)
+                self.assertEqual(3, len(logs.records))
+                if isinstance(primary, SystemExit):
+                    self.assertEqual(75, raised.exception.code)
+
+    def test_successful_cleanup_preserves_active_exception(self):
+        primary = RuntimeError('original failure')
+        with (
+            patch.object(train_supervised.gc, 'collect') as collect,
+            patch.object(train_supervised.torch.cuda, 'empty_cache') as empty_cache,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            try:
+                raise primary
+            finally:
+                train_supervised.cleanup_validation_resources(
+                    lambda: None, device_type='cpu',
+                )
+        self.assertIs(primary, raised.exception)
+        collect.assert_called_once_with()
+        empty_cache.assert_not_called()
 
 
 class TrainSupervisedPostStepPlanTests(unittest.TestCase):

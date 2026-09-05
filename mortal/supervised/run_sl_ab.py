@@ -1355,7 +1355,9 @@ def transient_training_failure_marker(log_path: Path, *, start_offset: int = 0) 
     return None
 
 
-def run_training(cfg_path: Path, log_path: Path) -> None:
+def run_training(cfg_path: Path, log_path: Path, *, max_retries: int = 1) -> None:
+    if max_retries < 0:
+        raise ValueError('max_retries must be nonnegative')
     env = os.environ.copy()
     env['MORTAL_CFG'] = str(cfg_path)
     env.setdefault('MORTAL_TQDM_DISABLE', '1')
@@ -1384,6 +1386,16 @@ def run_training(cfg_path: Path, log_path: Path) -> None:
         if proc.returncode == EXTERNAL_PAUSE_EXIT_CODE:
             raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
         marker = transient_training_failure_marker(log_path, start_offset=attempt_log_start)
+        tail = read_log_tail(log_path, start_offset=attempt_log_start).lower()
+        gpu_oom = any(value in tail for value in (
+            'cuda out of memory', 'cuda error: out of memory',
+            'torch.outofmemoryerror', 'torch.cuda.outofmemoryerror',
+        ))
+        if gpu_oom or (marker is not None and attempt > max_retries):
+            reason = 'GPU OOM requires inspection' if gpu_oom else 'retry budget exhausted'
+            with log_path.open('a', encoding='utf-8', newline='\n') as f:
+                f.write(f'=== training stopped: {reason}; attempts={attempt} ===\n')
+            raise RuntimeError(f'{reason}; checkpoint retained; see {log_path}')
         if marker is None:
             raise RuntimeError(f'train_supervised.py failed, see {log_path}')
         sleep_seconds = min(30, 5 + attempt)

@@ -216,6 +216,8 @@ function Start-ManagedRunner {
             -RedirectStandardError $stderrPath `
             -WindowStyle Hidden `
             -PassThru
+        # Keep the process handle so ExitCode survives short-lived runners.
+        $null = $process.Handle
     }
     finally {
         [Environment]::SetEnvironmentVariable(
@@ -260,6 +262,7 @@ try {
         }
 
         if ($null -ne $runner -and $runner.HasExited) {
+            $runner.WaitForExit()
             $exitCode = $runner.ExitCode
             Write-SupervisorLog "runner pid=$($runner.Id) exited code=$exitCode"
             $runner.Dispose()

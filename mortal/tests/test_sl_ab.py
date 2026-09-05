@@ -218,6 +218,44 @@ class Stage05ABTests(unittest.TestCase):
             self.assertEqual(str(cfg_path), run_args.kwargs['env']['MORTAL_CFG'])
             self.assertFalse(run_args.kwargs['check'])
 
+    def test_run_training_resource_retries_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / 'train.log'
+
+            def fail(*args, **kwargs):
+                kwargs['stdout'].write('WinError 1455: paging file is too small\n')
+                return SimpleNamespace(returncode=1)
+
+            with patch.object(sl_ab.subprocess, 'run', side_effect=fail) as run, \
+                    patch.object(sl_ab.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(RuntimeError, 'retry budget exhausted'):
+                    sl_ab.run_training(Path(tmp_dir) / 'config.toml', log_path)
+            self.assertEqual(2, run.call_count)
+            self.assertEqual(1, sleep.call_count)
+
+    def test_run_training_gpu_oom_is_not_retried(self):
+        for marker in ('CUDA error: out of memory', 'CUDA out of memory',
+                       'torch.OutOfMemoryError', 'torch.cuda.OutOfMemoryError'):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as tmp_dir:
+                log_path = Path(tmp_dir) / 'train.log'
+
+                def fail(*args, **kwargs):
+                    kwargs['stdout'].write('WinError 1455\n' + marker + '\n')
+                    return SimpleNamespace(returncode=1)
+
+                with patch.object(sl_ab.subprocess, 'run', side_effect=fail) as run, \
+                        patch.object(sl_ab.time, 'sleep') as sleep:
+                    with self.assertRaisesRegex(RuntimeError, 'GPU OOM requires inspection'):
+                        sl_ab.run_training(Path(tmp_dir) / 'config.toml', log_path)
+                self.assertEqual(1, run.call_count)
+                sleep.assert_not_called()
+
+    def test_run_training_rejects_negative_retry_budget(self):
+        with patch.object(sl_ab.subprocess, 'run') as run:
+            with self.assertRaises(ValueError):
+                sl_ab.run_training(Path('unused.toml'), Path('unused.log'), max_retries=-1)
+            run.assert_not_called()
+
     def test_run_training_propagates_external_pause_exit(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg_path = Path(tmp_dir) / 'config.toml'
