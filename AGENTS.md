@@ -34,6 +34,8 @@
 
 ## 训练与评测
 
+- 用户研究语境中的 `GRP` 是 game result prediction 代理任务，不默认指历史小 GRP 模型。主路线为充分的 Oracle outcome/value 预训练 → 冻结 actor 做当前 visible 策略的 critic 对齐 → 再进行 actor RL；critic 使用 Oracle，actor 保持 visible。固定 warmup/update 上限不等同于成熟度。历史 actor dropout/fake 对照只作明确问题下的低成本旁路，不自动恢复为主线。
+
 - `GRP best_loss` 默认供下游使用，`best_acc` 只做受控对照，`latest` 只用于续训。
 - RL 启动权重优先级：`[control].state_file` → `[online].init_state_file` → `[supervised].best_loss_state_file` → `[supervised].best_state_file`。
 - `1v3` challenger 使用 `[1v3.challenger].state_file`；训练默认关闭 `search`，推理增强单独 A/B。
