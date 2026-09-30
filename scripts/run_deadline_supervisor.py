@@ -43,7 +43,16 @@ def atomic_json(path, value):
             handle.write('\n')
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers/antivirus may briefly deny replacement of an
+                # open manifest. Never change permissions; persistent denial fails.
+                if getattr(exc, 'winerror', None) not in (5, 32) or attempt == 7:
+                    raise
+                time.sleep(min(.01 * (attempt + 1), .05))
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -296,6 +305,12 @@ def supervise(manifest_path):
             if interrupted:
                 reason = reason or 'interrupted'
             left = remaining()
+            if left <= 0:
+                # Do not spend the hard-cutoff window retrying status I/O while
+                # workloads are still alive. Cleanup precedes final persistence.
+                manifest['forced_stop'] = True
+                reason = reason or 'deadline'
+                break
             if left <= grace:
                 reason = reason or 'deadline'
             if reason and stopping_at is None:

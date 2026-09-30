@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'scripts' / 'run_deadline_supervisor.py'
@@ -78,6 +79,33 @@ class DeadlineSupervisorTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         with self.assertRaises(ValueError):
             MODULE.parse_deadline('2026-10-08T11:00:00')
+
+    def test_atomic_manifest_retries_transient_windows_reader_conflict(self):
+        target = self.root / 'status.json'
+        MODULE.atomic_json(target, {'state': 'old'})
+        original_replace = os.replace
+        failures = [5, 32]
+        def replace(source, destination):
+            if failures:
+                error = PermissionError('temporary Windows sharing conflict')
+                error.winerror = failures.pop(0)
+                raise error
+            original_replace(source, destination)
+        with patch.object(MODULE.os, 'replace', side_effect=replace), patch.object(MODULE.time, 'sleep'):
+            MODULE.atomic_json(target, {'state': 'new'})
+        self.assertEqual(json.loads(target.read_text()), {'state': 'new'})
+
+    def test_atomic_manifest_persistent_denial_preserves_previous_file(self):
+        target = self.root / 'status.json'
+        MODULE.atomic_json(target, {'state': 'old'})
+        error = PermissionError('persistent denial')
+        error.winerror = 5
+        with patch.object(MODULE.os, 'replace', side_effect=error) as replace, patch.object(MODULE.time, 'sleep'):
+            with self.assertRaises(PermissionError):
+                MODULE.atomic_json(target, {'state': 'new'})
+        self.assertEqual(replace.call_count, 8)
+        self.assertEqual(json.loads(target.read_text()), {'state': 'old'})
+        self.assertEqual(list(self.root.glob('status.json.*.tmp')), [])
 
     def test_rejects_dirty_source_unless_explicit_smoke_override(self):
         path = self.spec(['pass'])
