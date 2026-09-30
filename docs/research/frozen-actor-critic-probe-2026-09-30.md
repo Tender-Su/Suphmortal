@@ -40,3 +40,21 @@ actor 按 production TrainPlayer 的 categorical 分布采样，explore_rate=1�
 ## 验证边界
 
 轻量测试 `python -m unittest mortal.tests.test_frozen_actor_critic_probe mortal.tests.test_value_coordinate_contracts` 覆盖路径保护、参数校验、标签契约、分箱/误差算术、完整日志检查、可选 seed API 与 production reward/GAE 算术。无 torch 的云端仅运行这些测试及语法检查；真实 torch/native 加载、arena、显存与固定补全 A/A 必须在 runner 的 smoke 确认，不将轻量测试称为集成通过。
+
+## 只读复用已生成的 rollout
+
+新建输出目录，并增加 `--reuse-rollout-dir <original-probe-output>`。actor/opponent、games、seed-start、seed-key、sampling-seed、device、Torch/Rayon线程数仍须显式传入并与原 rollout 一致。只接受这个入口原始生成的输出，不接受任意牌谱目录，不接受链式复用输出。新输出不得位于原输出目录内。
+
+复用前核对 actor/opponent checkpoint hash、native 扩展与包 hash、Torch/NumPy版本、采样/guard/search/guiding设置、engine/player/model/checkpoint_utils源码hash；旧版缺失model/checkpoint_utils哈希时，仅允许从已记录的干净source commit读取本地Git blob，与当前HEAD对应blob及当前实际文件hash一致才接受，禁止lazy fetch、缺失或不匹配即拒绝；逐个检查原 outcomes 注册的日志hash、终局完整性，并由 native 重新解析 seat/seed/key/rank，要求恰好完整的请求四座 seed groups。额外、缺失、重复、目录外或被改写的日志都会失败。评分后再次检查原日志和 outcomes 未变。原有 provenance 即使仍为 running，只要已原子发布完整 outcomes 且以上证据都成立，也可复用；一个 running 状态本身绝不能证明 arena 完成。原 provenance、日志、outcomes 不会被修改，新 provenance 记录原文件hash和核验结果。
+
+此路径直接跳过 TrainPlayer/arena，不增加对局；仍重新构造模型、解码并评分，不是训练 resume，也不复用旧预测替代新核验。
+
+## 可选隐藏输入置换（默认关闭）
+
+`--shuffle-hidden --shuffle-seed 20260930` 才启用单一对照。当前研究核心是 privileged critic 如何通过 advantage 正确帮助 visible policy；此可选对照不自动安排实验，不作为“Oracle 信息是否有价值”的裁决。
+
+对每场完整 trainee 轨迹，用 `[game seed, seed key, trainee seat, shuffle seed]` 的 SHA256 前128位（little-endian）初始化 PCG64；随机排列全部状态后形成一个无固定点循环，给每个可见状态配另一个时间点的隐藏输入。三个 critic 共用完全相同的索引；不在 physical batch 内重新抽样，也不跨 independent seed groups 交换输入。记录固定算法、seed、batch布局、每场置换hash及逐状态 `hidden_source_index`。单状态轨迹无法置换时失败，不静默退回 identity。
+
+每 critic 每状态增加一次 forward，三模型评分计算量约为正常模式的两倍，不增加对局，不新增zero-input模型模式或feature cache；constant-zero数值基线保留。额外输出三组 shuffle − normal 的 p0/all_players MSE 和四座seed-group bootstrap区间。逐状态记录可选的 shuffled predictions，因此轻量预测记录变大；模型数、单批GPU输入规模不变。
+
+置换使可见/隐藏信息不一致，属于 OOD 依赖诊断，不能称为合格 visible-only 对照或 Oracle 的因果提升。warm40k相对warm0可描述响应变化；clean40k缺少clean0，不作其训练学习归因。没有任意硬阈值。
