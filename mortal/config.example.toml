@@ -346,7 +346,11 @@ reward_source = 'score_rank'
 zero_sum_weight = 0.01
 oracle_critic = true
 oracle_critic_state_file = '/path/to/oracle_critic_best.pth'
-# Actor-freeze online calibration window: 0 disables it.
+# Explicit separate calibration phase: actor/policy eval + no_grad for the whole run.
+# Validate the critic and unchanged actor before starting a separate weights-only PPO run.
+critic_only = false
+# Legacy finite actor-freeze window, measured in accepted training microbatches.
+# 0 disables the finite window; critic_only=true overrides it for the whole phase.
 critic_warmup_steps = 0
 # Keep actor LR at step 0 while only the critic is being calibrated.
 independent_actor_lr_clock = true
@@ -404,7 +408,12 @@ min_teacher_gap = 0.03
 history_window = 50
 enable_compile = false
 init_state_file = '/path/to/sl_canonical.pth'
+# Legacy scheduler/data clock cap (microbatches); independent of exact update budget.
 stop_at_max_steps = true
+# Exact successful optimizer updates in this phase: 0 = unlimited (opt-in).
+# Full resume retains the count; weights-only initialization resets exact counts.
+# For an update-budget-only calibration run, set stop_at_max_steps=false explicitly.
+max_successful_optimizer_steps = 0
 
 [online.importance_sampling]
 enabled = true

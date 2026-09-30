@@ -68,3 +68,7 @@ manifest 终态区分 `completed`、`deadline`、`external_failure`、`interrupt
 ```
 
 测试使用秒级 deadline、普通 Python sleep / 文件写入，不需要 GPU：覆盖晚启动拒绝、dry-run、多个 role、SL 75 保存契约、硬截止、不杀无关进程、角色失败联动、发起进程退出后的 detached 截止。测试还通过实际 Popen owner handle 强制终止 supervisor，验证 owned grandchild 心跳停止；在 Windows 执行该测试将验证 Job Object 的 owner 异常退出清理路径。仍须人工核对目标 shell / Codex 与独立 Python 探针保持正常。若 Job Object 受现有 runner job 限制而分配失败，保持 fail-closed，不能退回全局 taskkill。
+
+## 多角色阶段完成
+
+在线 RL 的 server/client 是长驻服务。给 trainer role 设置 `stop_when_complete: true`，仅在所有被标记的完成角色均以 0 正常退出后，请求整个运行 STOP；允许 grace 保存，再清理本运行剩余服务。未标记角色的普通 0 退出不代表整段实验完成，非零失败仍报告失败。默认未标记角色时保持等待全部角色完成。服务被强制收尾会记录 `forced_stop`，不影响已成功完成的 trainer 结果；不能把它解释为所有服务都优雅退出。

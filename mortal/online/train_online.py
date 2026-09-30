@@ -1,7 +1,6 @@
 import math as _math
 import numpy as _np
 from collections import OrderedDict
-from contextlib import nullcontext
 
 from mortal.eval.oracle_experiments import (
     apply_oracle_experiment_to_config,
@@ -15,6 +14,12 @@ from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn
 from mortal.online.policy_objective import (
     ACTOR_OBJECTIVE_VERSION, actor_surrogate, behavior_version_is_usable,
     normalized_behavior_version, policy_drift, validate_actor_objective,
+)
+
+from mortal.online.critic_calibration import (
+    actor_forward_context, critic_only_enabled, restore_actor_training_mode,
+    successful_optimizer_step_limit, successful_optimizer_step_limit_reached,
+    validate_calibration_resume,
 )
 
 ONLINE_MAX_STEPS_EXIT_CODE = 86
@@ -360,7 +365,9 @@ def value_critic_warmup_steps(config):
 
 def value_critic_warmup_active(config, steps):
     cfg = value_training_cfg(config)
-    return bool(cfg.get('enabled', False)) and int(steps) < value_critic_warmup_steps(config)
+    return critic_only_enabled(config) or (
+        bool(cfg.get('enabled', False)) and int(steps) < value_critic_warmup_steps(config)
+    )
 
 
 def value_independent_actor_lr_clock(config):
@@ -1676,6 +1683,8 @@ def train():
     # --- Value Head / Oracle Critic imports ---
     value_cfg = value_training_cfg(config)
     value_enabled = value_cfg.get('enabled', False)
+    critic_only = critic_only_enabled(config)
+    successful_step_limit = successful_optimizer_step_limit(config)
     value_weight = value_cfg.get('weight', 0.5) if value_enabled else 0.0
     oracle_critic = value_cfg.get('oracle_critic', True) if value_enabled else False
     oracle_critic_arch = normalize_oracle_critic_arch(
@@ -1988,6 +1997,8 @@ def train():
         for m in all_models:
             m.compile()
 
+    if critic_only:
+        restore_actor_training_mode(mortal, policy_net, critic_only=True)
     Old_mortal = deepcopy(mortal)
     Old_policy_net = deepcopy(policy_net)
     behavior_mortal = deepcopy(mortal).eval() if online_replay_is else None
@@ -2198,6 +2209,7 @@ def train():
         if exp_reward_net is not None and 'exp_reward_net' in state:
             exp_reward_net.load_state_dict(state['exp_reward_net'])
         if checkpoint_supports_online_resume(state, current_config=config, optimizer=optimizer):
+            validate_calibration_resume(state, config)
             optimizer.load_state_dict(state['optimizer'])
             scheduler.load_state_dict(state['scheduler'])
             scheduler_changes = reconcile_loaded_scheduler_state(
@@ -2496,8 +2508,7 @@ def train():
         return mortal
 
     def restore_training_mode():
-        mortal.train()
-        policy_net.train()
+        restore_actor_training_mode(mortal, policy_net, critic_only=critic_only)
         if aux_net is not None:
             aux_net.train()
         if opponent_aux_net is not None:
@@ -2682,6 +2693,17 @@ def train():
         atomic_torch_save(state, state_file)
         return state
 
+    def stop_at_successful_optimizer_step_limit():
+        if online and successful_optimizer_step_limit_reached(config, update_clock):
+            persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
+            writer.flush()
+            logging.info(
+                'reached exact successful optimizer update limit=%s at microbatch=%s; '
+                'saved latest at optimizer boundary (critic readiness is not implied)',
+                successful_step_limit, steps,
+            )
+            sys.exit(ONLINE_MAX_STEPS_EXIT_CODE)
+
     def stop_after_checkpoint_if_requested():
         if training_stop_requested():
             persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
@@ -2693,6 +2715,12 @@ def train():
             )
             sys.exit(ONLINE_STOP_REQUEST_EXIT_CODE)
 
+    if critic_only:
+        logging.info('critic-only calibration phase: actor/policy eval + no_grad; no in-run PPO transition')
+    if online and successful_step_limit:
+        logging.info('exact successful optimizer update limit=%s; resumed successes=%s; LR remains microbatch-based',
+                     successful_step_limit, update_clock.successes)
+    stop_at_successful_optimizer_step_limit()
     stop_after_checkpoint_if_requested()
 
     if online and steps == 0 and test_play_eval_enabled and initial_test_eval_enabled:
@@ -3381,7 +3409,9 @@ def train():
                     replay_param_version=replay_param_version_cpu,
                 )
 
-            actor_grad_context = torch.no_grad() if critic_warmup else nullcontext()
+            actor_grad_context = actor_forward_context(
+                mortal, policy_net, frozen=critic_warmup, critic_only=critic_only,
+            )
             with actor_grad_context:
                 with torch.autocast(device.type, enabled=enable_amp):
                     phi = (
@@ -3782,7 +3812,8 @@ def train():
                     if oracle_phi_cached is not None:
                         value_pred = value_net(oracle_phi_cached)
                     else:
-                        # Visible critic now directly shapes the shared actor trunk.
+                        # Visible value head trains on detached features during true warmup;
+                        # ordinary alternating training still shapes the shared actor trunk.
                         value_pred = value_net(phi)
                     if v_target is not None:
                         value_target = v_target
@@ -3945,6 +3976,7 @@ def train():
 
             if idx % opt_step_every == 0:
                 # Check before network publication/evaluation can block shutdown.
+                stop_at_successful_optimizer_step_limit()
                 stop_after_checkpoint_if_requested()
 
             if old_policy_update_due(steps, old_update_every):

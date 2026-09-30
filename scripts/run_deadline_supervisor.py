@@ -82,6 +82,9 @@ def prepare(spec_path, output):
         if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name) or name in names:
             raise ValueError('role names must be unique safe filename components')
         names.add(name)
+        completion_role = role.get('stop_when_complete', False)
+        if not isinstance(completion_role, bool):
+            raise ValueError('stop_when_complete must be an explicit boolean')
         argv = role['argv']
         if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or '\0' in x for x in argv):
             raise ValueError('argv must be a nonempty array of strings, never shell text')
@@ -106,6 +109,7 @@ def prepare(spec_path, output):
             config_path = Path(role['config']).resolve(strict=True)
             config = {'path': str(config_path), 'sha256': hashlib.sha256(config_path.read_bytes()).hexdigest()}
         roles.append({'name': name, 'argv': argv, 'cwd': str(cwd), 'source_commit': commit,
+                      'stop_when_complete': completion_role,
                       'source_dirty': dirty, 'allow_dirty': allow_dirty, 'expected_commit': expected_commit, 'config': config,
                       'stdout': str(output / (name + '.stdout.log')),
                       'stderr': str(output / (name + '.stderr.log')),
@@ -280,6 +284,14 @@ def supervise(manifest_path):
             if any(result and result.get('returncode') not in ((0, 75, 87) if reason is not None else (0,))
                    for result in results):
                 reason = reason or 'external_failure'
+            completion_results = [(role['name'], result) for role, result in zip(manifest['roles'], results)
+                                  if role.get('stop_when_complete', False)]
+            if reason is None and completion_results and all(
+                result is not None and result.get('returncode') == 0
+                for _, result in completion_results
+            ):
+                reason = 'completed'
+                manifest['completion_roles'] = [name for name, _ in completion_results]
             # Anchors must remain alive. Do not reap them before group cleanup.
             if interrupted:
                 reason = reason or 'interrupted'

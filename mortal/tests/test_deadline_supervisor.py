@@ -20,7 +20,7 @@ SPEC.loader.exec_module(MODULE)
 class DeadlineSupervisorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.cleanup_directory)
         self.root = Path(self.tmp.name)
         self.output = self.root / 'run'
         self.source = self.root / 'source'
@@ -31,6 +31,20 @@ class DeadlineSupervisorTests(unittest.TestCase):
         subprocess.run(['git', '-C', str(self.source), '-c', 'user.name=Test', '-c',
                         'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], check=True)
         self.commit = subprocess.check_output(['git', '-C', str(self.source), 'rev-parse', 'HEAD'], text=True).strip()
+
+    def cleanup_directory(self):
+        # A detached owner writes its final manifest just before interpreter exit.
+        # Windows can still hold supervisor.log for that short interval. Retry only
+        # a bounded sharing violation; a persistent process/handle leak still fails.
+        until = time.monotonic() + 3
+        while True:
+            try:
+                self.tmp.cleanup()
+                return
+            except PermissionError as exc:
+                if os.name != 'nt' or getattr(exc, 'winerror', None) != 32 or time.monotonic() >= until:
+                    raise
+                time.sleep(.05)
 
     def spec(self, commands, seconds=4, grace=0.5):
         value = {'deadline_utc': (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)).isoformat(),
@@ -166,6 +180,38 @@ class DeadlineSupervisorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(self.manifest()['status'], 'external_failure')
         self.assertEqual(self.manifest()['role_results']['role0']['returncode'], 7)
+
+    def test_designated_completion_stops_owned_services_only(self):
+        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(lambda: (unrelated.kill(), unrelated.wait()) if unrelated.poll() is None else None)
+        path = self.spec(['print("trainer complete")', 'import time; time.sleep(30)'], seconds=8, grace=.3)
+        spec = json.loads(path.read_text())
+        spec['roles'][0]['stop_when_complete'] = True
+        path.write_text(json.dumps(spec))
+        started = time.monotonic()
+        result = self.run_spec(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'completed')
+        self.assertEqual(manifest['completion_roles'], ['role0'])
+        self.assertEqual(manifest['role_results']['role0']['returncode'], 0)
+        self.assertTrue(manifest['forced_stop'])
+        self.assertIsNone(unrelated.poll())
+
+    def test_ordinary_zero_exit_does_not_complete_other_roles(self):
+        result = self.run_spec(self.spec(['pass', 'import time; time.sleep(30)'], seconds=2, grace=.3))
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertEqual(self.manifest()['status'], 'deadline')
+
+    def test_designated_failure_is_not_success(self):
+        path = self.spec(['raise SystemExit(7)', 'import time; time.sleep(30)'])
+        spec = json.loads(path.read_text())
+        spec['roles'][0]['stop_when_complete'] = True
+        path.write_text(json.dumps(spec))
+        result = self.run_spec(path)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.manifest()['status'], 'external_failure')
 
     def test_detached_owner_outlives_launcher(self):
         result = self.run_spec(self.spec(['import time; time.sleep(30)'], seconds=2, grace=0.3), '--detach')
