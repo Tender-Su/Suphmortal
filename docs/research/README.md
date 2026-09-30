@@ -6,6 +6,7 @@
 
 | 报告 | 影响范围 |
 | --- | --- |
+| [冻结 actor 的 critic pilot · 2026-09-30](frozen-actor-critic-probe-2026-09-30.md) | 不更新权重的 fixed-imputed 同轨迹诊断，复用三个已存 critic |
 | [存量权重与评测复用 · 2026-09-30](weight-reuse-2026-09-30.md) | 双机权重库存、可直接复用的评测、保存的早期分支与避免重复计算 |
 | [独立 critic-only 校准阶段](critic-only-calibration.md) | 固定 actor 状态、精确成功更新预算与重新生成 GAE 的阶段切换 |
 | [2026-09-30 至 10-08 研究窗口](research-window-2026-09-30.md) | 云端统一开发、两机分工、指标复议、分阶段实验与截止管理 |

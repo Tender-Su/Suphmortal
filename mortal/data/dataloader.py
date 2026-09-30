@@ -404,9 +404,19 @@ class FileDatasetsIter(IterableDataset):
             self.iterator = self.build_iter()
         return self.iterator
 
-    def iter_game_trajectories(self, file_list):
+    def iter_game_trajectories(self, file_list, *, oracle_imputation_seed=None):
         """Yield complete game trajectory dicts in temporal step order (no shuffle).
-        Used for step-level GAE preprocessing in the main training process."""
+        Used for step-level GAE preprocessing in the main training process.
+
+        An optional fixed imputation seed makes unobserved-wall completion
+        reproducible for diagnostics. It does not enable seed reconstruction or
+        change the default online input protocol.
+        """
+        if oracle_imputation_seed is not None:
+            if (isinstance(oracle_imputation_seed, bool)
+                    or not isinstance(oracle_imputation_seed, int)
+                    or not 0 <= oracle_imputation_seed < 2**64):
+                raise ValueError('oracle_imputation_seed must be an unsigned 64-bit integer')
         reward_calc = None
         if self.value_reward_source == 'grp':
             grp = GRP(**config['grp']['network'])
@@ -424,6 +434,11 @@ class FileDatasetsIter(IterableDataset):
             track_danger_labels=self.track_danger_labels,
             track_regret_labels=self.track_regret_labels,
         )
+        if oracle_imputation_seed is not None:
+            setter = getattr(loader, 'set_oracle_imputation_seed', None)
+            if setter is None:
+                raise RuntimeError('native loader lacks fixed Oracle imputation support')
+            setter(oracle_imputation_seed)
         for source_name, gameplay_batch in iter_loaded_gameplay_batches(loader, file_list):
             for game in gameplay_batch:
                 obs = np.array(game.take_obs_batch())
