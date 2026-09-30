@@ -35,7 +35,9 @@ from mortal.core.adaptive_curriculum import (
     initial_adaptive_curriculum_state,
     normalize_adaptive_curriculum_state,
     observe_adaptive_curriculum,
+    validate_adaptive_observation,
 )
+from mortal.core.oracle_checkpoint_selection import checkpoint_selection, baseline_checkpoint_roles
 from mortal.core.lr_scheduler import build_lr_scheduler, normalize_scheduler_type
 from mortal.core.evidence_contract import validation_input_contract, require_finalist_decision, sha256_file, native_module_file
 from mortal.core.model import Brain, HLGaussValueHead, OracleDualTowerBrain, ValueHead
@@ -1995,7 +1997,11 @@ def resolve_adaptive_curriculum_config(cfg):
         raise ValueError('oracle_critic_pretrain.adaptive_curriculum must be a table')
     if not bool(raw.get('enabled', False)):
         return None
-    return AdaptiveCurriculumConfig.from_mapping(raw)
+    adaptive = AdaptiveCurriculumConfig.from_mapping(raw)
+    if (adaptive.selection_protocol == 'primary_with_diagnostics' and
+            (adaptive.primary.name != 'primary_loss' or adaptive.primary.direction != 'lower')):
+        raise ValueError('Oracle primary_with_diagnostics requires lower primary_loss (p0 MSE)')
+    return adaptive
 
 
 def convergence_contract(convergence_config):
@@ -2017,6 +2023,8 @@ def adaptive_curriculum_contract(adaptive_config):
     if adaptive_config is None:
         return None
     return {
+        **({'selection_protocol': adaptive_config.selection_protocol}
+           if adaptive_config.selection_protocol != 'legacy_guardrails' else {}),
         'phase_name': adaptive_config.phase_name,
         'primary': {
             'name': adaptive_config.primary.name,
@@ -2281,6 +2289,7 @@ def checkpoint_payload(
     training_contract_info,
     convergence_state,
     adaptive_curriculum_state=None,
+    best_observed_primary_loss=None,
 ):
     if optimizer_requires_eval_checkpoint(optimizer) and any(
         bool(group.get('train_mode', False)) for group in optimizer.param_groups
@@ -2303,6 +2312,8 @@ def checkpoint_payload(
         'scaler': scaler.state_dict(),
         'best_val_loss': float(best_val_loss),
         'best_primary_loss': float(best_primary_loss),
+        **({'best_observed_primary_loss': float(best_observed_primary_loss)}
+           if best_observed_primary_loss is not None else {}),
         'config': copy.deepcopy(config),
         'oracle_critic_pretrain': dict(cfg),
         'init_info': init_info,
@@ -2409,6 +2420,24 @@ def maybe_load_best_primary_loss(
     if best_primary_loss is None:
         return current_best_primary_loss
     return min(float(current_best_primary_loss), float(best_primary_loss))
+
+
+def maybe_load_protocol_best_loss(checkpoint_file, current_loss, metric_key,
+                                  training_contract_info, split_info):
+    """Reconcile crash-time companion saves without importing foreign minima."""
+    if not path.exists(checkpoint_file):
+        return current_loss
+    saved = torch.load(checkpoint_file, weights_only=False, map_location='cpu')
+    validate_resume_training_contract(saved, training_contract_info)
+    if not validate_resume_file_splits(saved, split_info):
+        raise ValueError('selection checkpoint is missing file split provenance')
+    value = float(saved[metric_key])
+    if not math.isfinite(value):
+        raise ValueError('selection checkpoint loss must be finite')
+    if metric_key != 'best_observed_primary_loss':
+        if (saved.get('adaptive_curriculum_state') or {}).get('best_step') != saved.get('steps'):
+            raise ValueError('accepted selection checkpoint must be an accepted step')
+    return min(current_loss, value)
 
 
 def train():
@@ -2553,6 +2582,7 @@ def train():
             'state_file',
             'best_state_file',
             'best_primary_state_file',
+            'best_observed_primary_state_file',
             'tensorboard_dir',
             'metrics_file',
         ):
@@ -2574,6 +2604,10 @@ def train():
         'best_primary_state_file',
         './checkpoints/oracle_critic/{run_name}_best_primary.pth',
         run_name,
+    )
+    best_observed_primary_state_file = artifact_path(
+        cfg, 'best_observed_primary_state_file',
+        './checkpoints/oracle_critic/{run_name}_best_observed_primary.pth', run_name,
     )
     adaptive_best_state_file = artifact_path(
         cfg,
@@ -2770,6 +2804,14 @@ def train():
     scheduler_horizon_steps = int(cfg.get('scheduler_horizon_steps', max_steps) or max_steps)
     convergence_config = resolve_convergence_config(cfg)
     adaptive_config = resolve_adaptive_curriculum_config(cfg)
+    primary_with_diagnostics = (adaptive_config is not None and
+                                adaptive_config.selection_protocol == 'primary_with_diagnostics')
+    if primary_with_diagnostics:
+        selection_paths = [path.normcase(path.realpath(item)) for item in
+                           (state_file, best_state_file, best_primary_state_file,
+                            adaptive_best_state_file, best_observed_primary_state_file)]
+        if len(set(selection_paths)) != len(selection_paths):
+            raise ValueError('selection checkpoint roles require distinct artifact paths')
     if convergence_config is not None and adaptive_config is not None:
         raise ValueError(
             'oracle critic convergence and adaptive_curriculum controllers '
@@ -2967,6 +3009,7 @@ def train():
     steps = 0
     best_val_loss = math.inf
     best_primary_loss = math.inf
+    best_observed_primary_loss = math.inf if primary_with_diagnostics else None
     init_info = {'source': '', 'loaded': False}
     stream_signature = data_stream_signature(cfg)
     data_progress = initial_data_progress(stream_signature)
@@ -3016,13 +3059,21 @@ def train():
         scaler.load_state_dict(state['scaler'])
         steps = int(state.get('steps', 0))
         best_val_loss = float(state.get('best_val_loss', math.inf))
-        best_val_loss = maybe_load_best_val_loss(best_state_file, best_val_loss, device)
         best_primary_loss = float(state.get('best_primary_loss', math.inf))
-        best_primary_loss = maybe_load_best_primary_loss(
-            best_primary_state_file,
-            best_primary_loss,
-            device,
-        )
+        if primary_with_diagnostics:
+            best_val_loss = maybe_load_protocol_best_loss(
+                best_state_file, best_val_loss, 'best_val_loss', training_contract_info, split_info)
+            best_primary_loss = maybe_load_protocol_best_loss(
+                best_primary_state_file, best_primary_loss, 'best_primary_loss',
+                training_contract_info, split_info)
+            best_observed_primary_loss = maybe_load_protocol_best_loss(
+                best_observed_primary_state_file,
+                float(state.get('best_observed_primary_loss', math.inf)),
+                'best_observed_primary_loss', training_contract_info, split_info)
+        else:
+            best_val_loss = maybe_load_best_val_loss(best_state_file, best_val_loss, device)
+            best_primary_loss = maybe_load_best_primary_loss(
+                best_primary_state_file, best_primary_loss, device)
         init_info = state.get('init_info', init_info)
         if convergence_config is not None:
             convergence_state = normalize_convergence_state(
@@ -3103,17 +3154,23 @@ def train():
         adaptive_curriculum_state = baseline_decision.state
         best_val_loss = float(baseline_metrics['loss'])
         best_primary_loss = float(baseline_primary['loss'])
+        if primary_with_diagnostics:
+            best_observed_primary_loss = best_primary_loss
         baseline_payload = checkpoint_payload(
             oracle_brain=oracle_brain, value_net=value_net, optimizer=optimizer,
             scheduler=scheduler, scaler=scaler, steps=steps, best_val_loss=best_val_loss,
-            best_primary_loss=best_primary_loss, init_info=init_info, cfg=cfg,
+            best_primary_loss=best_primary_loss,
+            best_observed_primary_loss=best_observed_primary_loss, init_info=init_info, cfg=cfg,
             train_info=train_info, split_info=split_info, data_progress=data_progress,
             training_contract_info=training_contract_info, convergence_state=convergence_state,
             adaptive_curriculum_state=adaptive_curriculum_state,
         )
         baseline_payload['baseline_val_metrics'] = baseline_metrics
-        for baseline_path in (state_file, adaptive_best_state_file):
-            save_checkpoint(baseline_path, baseline_payload)
+        baseline_paths = {'latest': state_file, 'adaptive_best': adaptive_best_state_file,
+                          'best': best_state_file, 'best_primary': best_primary_state_file,
+                          'best_observed_primary': best_observed_primary_state_file}
+        for role in baseline_checkpoint_roles(primary_with_diagnostics):
+            save_checkpoint(baseline_paths[role], baseline_payload)
         logging.info('saved fixed-input no-update anchor at step=%s primary_loss=%.6f', steps, best_primary_loss)
         del baseline_payload, baseline_loader
 
@@ -3394,6 +3451,7 @@ def train():
                         steps=steps,
                         best_val_loss=best_val_loss,
                         best_primary_loss=best_primary_loss,
+                        best_observed_primary_loss=best_observed_primary_loss,
                         init_info=init_info,
                         cfg=cfg,
                         train_info=train_info,
@@ -3453,7 +3511,7 @@ def train():
                         label=f'dev@{steps}/{"+".join(eval_input_modes)}',
                         game_id_modulus=val_game_id_modulus,
                         game_id_remainders=val_game_id_remainders,
-                        include_cluster_records=adaptive_gate_due,
+                        include_cluster_records=adaptive_gate_due or primary_with_diagnostics,
                     )
                     val_metrics = val_by_input.get('true', next(iter(val_by_input.values())))
                     oracle_dependency = summarize_oracle_dependency(val_by_input)
@@ -3503,7 +3561,7 @@ def train():
                         label=f'dev@{steps}/true',
                         game_id_modulus=val_game_id_modulus,
                         game_id_remainders=val_game_id_remainders,
-                        include_cluster_records=adaptive_gate_due,
+                        include_cluster_records=adaptive_gate_due or primary_with_diagnostics,
                     )
                     logging.info(
                         (
@@ -3654,7 +3712,7 @@ def train():
                     if convergence_decision.action == 'stop':
                         stop_training = True
                 adaptive_decision = None
-                if adaptive_gate_due:
+                if adaptive_gate_due or primary_with_diagnostics:
                     if adaptive_cluster_records is None:
                         raise RuntimeError(
                             'adaptive Oracle gate requires per-game cluster records'
@@ -3670,6 +3728,11 @@ def train():
                             for slice_name, slice_metrics in primary_slices.items()
                         },
                     }
+                    validate_adaptive_observation(
+                        adaptive_config, adaptive_metric_values, adaptive_cluster_records,
+                        adaptive_curriculum_state if primary_with_diagnostics else None,
+                    )
+                if adaptive_gate_due:
                     adaptive_decision = observe_adaptive_curriculum(
                         adaptive_curriculum_state,
                         adaptive_config,
@@ -3725,12 +3788,20 @@ def train():
                             adaptive_curriculum_state
                         )
                     f.write(json.dumps(payload, sort_keys=True) + '\n')
-                improved_best_val = val_metrics['loss'] < best_val_loss
-                improved_best_primary = primary_val_loss < best_primary_loss
-                if adaptive_decision is not None:
-                    accepted = adaptive_curriculum_state['best_step'] == steps
-                    improved_best_val = improved_best_val and accepted
-                    improved_best_primary = improved_best_primary and accepted
+                selected = checkpoint_selection(
+                    primary_loss=primary_val_loss, all_players_loss=float(val_metrics['loss']),
+                    best_primary_loss=best_primary_loss, best_val_loss=best_val_loss,
+                    best_observed_primary_loss=best_observed_primary_loss,
+                    primary_with_diagnostics=primary_with_diagnostics,
+                    adaptive_active=adaptive_config is not None,
+                    gate_observed=adaptive_decision is not None,
+                    accepted=adaptive_curriculum_state is not None and
+                             adaptive_curriculum_state['best_step'] == steps,
+                )
+                improved_best_val = selected['best']
+                improved_best_primary = selected['best_primary']
+                if selected['best_observed_primary']:
+                    best_observed_primary_loss = primary_val_loss
                 if improved_best_val:
                     best_val_loss = val_metrics['loss']
                 if improved_best_primary:
@@ -3745,6 +3816,7 @@ def train():
                         steps=steps,
                         best_val_loss=best_val_loss,
                         best_primary_loss=best_primary_loss,
+                        best_observed_primary_loss=best_observed_primary_loss,
                         init_info=init_info,
                         cfg=cfg,
                         train_info=train_info,
@@ -3756,7 +3828,7 @@ def train():
                     )
                     save_checkpoint(best_state_file, payload)
                     logging.info('saved best oracle critic checkpoint to %s', best_state_file)
-                if improved_best_primary:
+                if improved_best_primary or selected['best_observed_primary']:
                     payload = checkpoint_payload(
                         oracle_brain=oracle_brain,
                         value_net=value_net,
@@ -3766,6 +3838,7 @@ def train():
                         steps=steps,
                         best_val_loss=best_val_loss,
                         best_primary_loss=best_primary_loss,
+                        best_observed_primary_loss=best_observed_primary_loss,
                         init_info=init_info,
                         cfg=cfg,
                         train_info=train_info,
@@ -3775,11 +3848,15 @@ def train():
                         convergence_state=convergence_state,
                         adaptive_curriculum_state=adaptive_curriculum_state,
                     )
-                    save_checkpoint(best_primary_state_file, payload)
-                    logging.info(
-                        'saved best-primary oracle critic checkpoint to %s',
-                        best_primary_state_file,
-                    )
+                    if selected['best_observed_primary']:
+                        save_checkpoint(best_observed_primary_state_file, payload)
+                        logging.info('saved observed-primary candidate to %s', best_observed_primary_state_file)
+                    if improved_best_primary:
+                        save_checkpoint(best_primary_state_file, payload)
+                        logging.info(
+                            'saved best-primary oracle critic checkpoint to %s',
+                            best_primary_state_file,
+                        )
                 if (
                     adaptive_decision is not None
                     and adaptive_decision.action in {
@@ -3798,6 +3875,7 @@ def train():
                         steps=steps,
                         best_val_loss=best_val_loss,
                         best_primary_loss=best_primary_loss,
+                        best_observed_primary_loss=best_observed_primary_loss,
                         init_info=init_info,
                         cfg=cfg,
                         train_info=train_info,
@@ -3828,6 +3906,7 @@ def train():
                     steps=steps,
                     best_val_loss=best_val_loss,
                     best_primary_loss=best_primary_loss,
+                    best_observed_primary_loss=best_observed_primary_loss,
                     init_info=init_info,
                     cfg=cfg,
                     train_info=train_info,
@@ -3856,6 +3935,7 @@ def train():
                         steps=steps,
                         best_val_loss=best_val_loss,
                         best_primary_loss=best_primary_loss,
+                        best_observed_primary_loss=best_observed_primary_loss,
                         init_info=init_info,
                         cfg=cfg,
                         train_info=train_info,

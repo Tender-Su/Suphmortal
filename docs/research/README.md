@@ -6,6 +6,7 @@
 
 | 报告 | 影响范围 |
 | --- | --- |
+| [Oracle primary-with-diagnostics 选择协议](oracle-primary-selection-protocol.md) | 显式 opt-in 的 paired primary 晋级、诊断与候选保存解耦、checkpoint 角色及恢复契约 |
 | [研究意图与恢复后的决策 · 2026-09-30](research-intent-2026-09-30.md) | Oracle/GRP/C-D-E 设计、成熟度、SL 可塑性问题、MSE 保存与诊断解耦及恢复边界 |
 | [冻结 actor 的 critic pilot · 2026-09-30](frozen-actor-critic-probe-2026-09-30.md) | 不更新权重的 fixed-imputed 同轨迹诊断，复用三个已存 critic |
 | [存量权重与评测复用 · 2026-09-30](weight-reuse-2026-09-30.md) | 双机权重库存、可直接复用的评测、保存的早期分支与避免重复计算 |

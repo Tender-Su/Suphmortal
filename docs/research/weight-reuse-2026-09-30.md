@@ -47,4 +47,12 @@ ModelKits 的 2 个项目根、ABANDON 的 13 个项目/备份根，以及配置
 
 ## 决策
 
+### 同日既有报告复核（未新增推理）
+
+- `matched_completion_20260908_r1/completion_audit.json`：同一 monitor 3,186 局 / 64,676 状态，clean 的 p0 MSE 3.819599→2.362675，差值 CI [-1.515626,-1.398223]；warm 2.628318→2.353649，CI [-0.295419,-0.253919]。clean 被 exact-zero target 分组 veto，warm 被 abs-ge4 分组 veto；两者 MAE 均改善。10k 至 40k 各 gate 都受对应分组拒绝，原协议最终仍为 inconclusive。
+- 对应运行目录保留 step0 adaptive-best 与 40k latest，没有 best-primary 文件。warm 20k 记录值 2.353004 略低于 40k，但该目录未保存其权重；clean 资源迁移副本 31,144 / 33,069 仍存在，未经新评分不能认定更好。
+- `s70_sf_finalist_stage10_s190000_20260831_r1/paired_with_legacy_1600k_remainders123.json`：同旧目标下 1.6M / SF200-190k / SF100-190k 的 p0 MSE 为 3.201800 / 3.215777 / 3.218857。SF200−1.6M 差值 +0.013977，CI [0.009006,0.018948]，9,533 局 / 49,482 状态。这场历史比较无需重跑，也不能归因为单一 optimizer 效果。
+- 旧 Oracle adaptive B/C 转段均继承 A150k adaptive-best，manifest 的模型状态 hash 相同；不能将阶段名视为各自新胜者。旧 A1.2M 是总体 MSE 改善、主 p0 MSE 未改善，不能归入“主指标改善被诊断否决”的两例。
+- 旧 canonical 128局 / 512状态探针以及人类 dev 32局复算，不构成 C50k 当前策略分布上的充分对齐证据。
+
 新实验先写明尚未解决的疑问及它会改变的决定。优先重用原始结果和已存权重；只有缺失的预测、分布诊断或牌力比较确实影响选择时才新增有界推理。离线拟合是廉价诊断，不是对战实力证明；避免用一次筛选最高点或已实现结果分组硬门槛代替最终 actor 收益。当前没有依据重训整段 A 或重新跑两条 Oracle40k。

@@ -35,7 +35,7 @@ critic 应估计 **当前 visible policy 继续行动的回报**，而不是全�
 运行状态：8局工程 smoke 在 native imputation 接口预检处退出，实际0局，未加载权重或训练。新独立 runner 的 Python 源码已同步，但实际 native 扩展能力尚不匹配；恢复计算前须验证隔离运行环境，不能把旧 PyTorch/监督器测试通过等同于 Oracle 数据路径已通过。256局 pilot 与新训练仍未启动。恢复后 ModelKits 任务正整理历史指标与 import preflight；先复核存量长训权重并修改 MSE 保存逻辑，不默认将旧 256 局三模型 pilot 排为下一项必跑实验。
 
 1. **正确性和预算测量**：GPU AMP overflow、保存/停止、行为概率复算、固定模型 logits、玩家视角和原生扩展身份；记录两台机器实际吞吐和显存峰值
-2. **已有 critic 的用途**：在一致样本与目标下比较 step 0、40k、warm 和可用中间点。整体 MSE、均值校准、可观测局面分层是预测诊断；MAE 与事后回报分组保留，但不能未经用途论证直接否决条件均值模型。本轮将 primary MSE 保存与这些诊断的一票否决及停止逻辑解耦；这是待实现及测试的方案，不追溯修改旧实验。Oracle 依赖或高置信 advantage 不设额外资格门。最终判断仍依靠对 actor 学习的帮助
+2. **已有 critic 的用途**：在一致样本与目标下比较 step 0、40k、warm 和可用中间点。整体 MSE、均值校准、可观测局面分层是预测诊断；MAE 与事后回报分组保留，但不能未经用途论证直接否决条件均值模型。本轮将 primary MSE 保存与这些诊断的一票否决及停止逻辑解耦；显式 opt-in 实现已通过 24 项纯 CPU 回归及独立代码复审，真实 Torch checkpoint 集成仍待固定版本 runner 验证；见 [选择协议](oracle-primary-selection-protocol.md)。不追溯修改旧实验。Oracle 依赖或高置信 advantage 不设额外资格门。最终判断仍依靠对 actor 学习的帮助
 3. **RL 小闭环**：从同一已验证 SL 起点，让充分预训练且已对齐的 Oracle critic 指导 actor；先隔离 advantage/GAE 与策略更新机制的影响。只有当前决定确需 visible-only 对照时再分配该臂预算；普通 visible value 更新共享 actor trunk，Oracle 使用独立网络，二者整套比较不能全部归因于特权信息。显式独立 critic-only 阶段保持 actor 冻结，旧有限 warmup 不替代此契约
 4. **SL 课程问题**：4060 独立推进，问题是 A 过训/可塑性及提前切 B/C，优先复用早期 A 权重。先核对辅助标签修复、起点与旧域/现代域指标的语义，再做有限、可解释的探针；固定预算仅是测量工具，不是用户要求的最终阶段调度机制
 5. **筛选与确认**：探索结果只筛选候选；保留未使用的完整 seed 组做确认，最终报告名次效用、平均顺位、四位率、样本与不确定性。已存在 sealed test 不作为反复调参集

@@ -55,6 +55,7 @@ class AdaptiveCurriculumConfig:
     lr_levels: tuple[float, ...] = ()
     max_unresolved_gates: int = 4
     min_paired_games: int = 2
+    selection_protocol: str = 'legacy_guardrails'
 
     @classmethod
     def from_mapping(
@@ -68,6 +69,7 @@ class AdaptiveCurriculumConfig:
         }
         config = cls(
             phase_name=str(raw.get('phase_name') or '').strip(),
+            selection_protocol=str(raw.get('selection_protocol', 'legacy_guardrails')),
             primary=MetricSpec.from_mapping(primary_raw),
             final_phase=bool(raw.get('final_phase', False)),
             gate_every_steps=int(raw.get('gate_every_steps', 50_000)),
@@ -88,6 +90,8 @@ class AdaptiveCurriculumConfig:
         return config
 
     def validate(self) -> None:
+        if self.selection_protocol not in {'legacy_guardrails', 'primary_with_diagnostics'}:
+            raise ValueError('unsupported adaptive selection_protocol')
         if self.max_unresolved_gates < 1 or self.min_paired_games < 2:
             raise ValueError('adaptive evidence budget must be positive and min_paired_games >= 2')
         if not self.phase_name:
@@ -140,23 +144,29 @@ class AdaptiveCurriculumConfig:
 class AdaptiveCurriculumDecision:
     action: str
     state: dict[str, Any]
-    comparisons: dict[str, dict[str, float | int]]
+    comparisons: dict[str, dict[str, float | int | None]]
     target_lr: float | None = None
     reason: str = ''
 
 
 def _normalize_record(record: Any) -> list[float | int]:
     if isinstance(record, Mapping):
-        game_id = int(record['game_id'])
+        raw_game_id = record['game_id']
+        game_id = int(raw_game_id)
         loss_sum = float(record.get('sum', record.get('value_sum')))
-        count = int(record['count'])
+        raw_count = record['count']
+        count = int(raw_count)
     else:
-        game_id, loss_sum, count = record
-        game_id = int(game_id)
+        raw_game_id, loss_sum, raw_count = record
+        game_id = int(raw_game_id)
         loss_sum = float(loss_sum)
-        count = int(count)
+        count = int(raw_count)
+    if game_id != raw_game_id:
+        raise ValueError('cluster game id must be integral')
     if not math.isfinite(loss_sum):
         raise ValueError(f'cluster sum must be finite for game {game_id}')
+    if count != raw_count:
+        raise ValueError(f'cluster count must be integral for game {game_id}')
     if count <= 0:
         raise ValueError(f'cluster count must be positive for game {game_id}')
     return [game_id, loss_sum, count]
@@ -220,6 +230,9 @@ def paired_cluster_summary(
         cluster_se = 0.0
         game_balanced_mean = game_differences[0]
         game_balanced_se = 0.0
+    if not all(math.isfinite(value) for value in
+               (mean, cluster_se, game_balanced_mean, game_balanced_se)):
+        raise ValueError('paired cluster summary must be finite')
     return {
         'mean': mean,
         'cluster_se': cluster_se,
@@ -236,6 +249,8 @@ def initial_adaptive_curriculum_state(
     config: AdaptiveCurriculumConfig,
 ) -> dict[str, Any]:
     return {
+        **({'selection_protocol': config.selection_protocol}
+           if config.selection_protocol != 'legacy_guardrails' else {}),
         'schema_version': ADAPTIVE_CURRICULUM_STATE_SCHEMA_VERSION,
         'phase_name': config.phase_name,
         'gate_index': 0,
@@ -260,6 +275,8 @@ def normalize_adaptive_curriculum_state(
 ) -> dict[str, Any]:
     state = initial_adaptive_curriculum_state(config)
     if raw:
+        if raw.get('selection_protocol', 'legacy_guardrails') != config.selection_protocol:
+            raise ValueError('adaptive selection protocol changed; use an explicit new branch')
         state.update(dict(raw))
     if int(state.get('schema_version') or 0) != ADAPTIVE_CURRICULUM_STATE_SCHEMA_VERSION:
         raise ValueError(
@@ -289,11 +306,19 @@ def _normalize_observation(
     config: AdaptiveCurriculumConfig,
     metrics: Mapping[str, Any],
     cluster_records: Mapping[str, Sequence[Any]],
-) -> tuple[dict[str, float], dict[str, list[list[float | int]]]]:
+) -> tuple[dict[str, float | None], dict[str, list[list[float | int]]]]:
     specs = (config.primary, *config.guardrails)
-    normalized_metrics: dict[str, float] = {}
+    normalized_metrics: dict[str, float | None] = {}
     normalized_records: dict[str, list[list[float | int]]] = {}
     for spec in specs:
+        if (config.selection_protocol == 'primary_with_diagnostics'
+                and spec != config.primary and spec.name in cluster_records
+                and len(cluster_records[spec.name]) == 0):
+            if metrics.get(spec.name) is not None:
+                raise ValueError(f'empty diagnostic must have no metric value: {spec.name}')
+            normalized_metrics[spec.name] = None
+            normalized_records[spec.name] = []
+            continue
         if spec.name not in metrics:
             raise ValueError(f'adaptive observation missing metric: {spec.name}')
         value = float(metrics[spec.name])
@@ -310,10 +335,24 @@ def _normalize_observation(
     return normalized_metrics, normalized_records
 
 
+def validate_adaptive_observation(config, metrics, cluster_records, reference_state=None):
+    """Validate observation integrity without changing gate or promotion state."""
+    _, normalized = _normalize_observation(config, metrics, cluster_records)
+    if reference_state and reference_state.get('best_step') is not None:
+        _, reference = _normalize_observation(
+            config, reference_state['best_metrics'], reference_state['best_cluster_records']
+        )
+        for name, records in normalized.items():
+            if records or reference[name]:
+                paired_cluster_summary(records, reference[name], confidence_z=config.confidence_z)
+
+
 def inherit_adaptive_curriculum_baseline(
     config: AdaptiveCurriculumConfig,
     source_state: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if source_state.get('selection_protocol', 'legacy_guardrails') != config.selection_protocol:
+        raise ValueError('cannot inherit baseline across selection protocols; establish a new branch baseline')
     source_metrics = source_state.get('best_metrics')
     source_records = source_state.get('best_cluster_records')
     source_step = source_state.get('best_step')
@@ -466,20 +505,28 @@ def observe_adaptive_curriculum(
             reason=state['last_reason'],
         )
 
-    reference_records = state.get('best_cluster_records') or {}
+    _, reference_records = _normalize_observation(
+        config, state.get('best_metrics') or {}, state.get('best_cluster_records') or {}
+    )
+    diagnostic_only = config.selection_protocol == 'primary_with_diagnostics'
     comparisons = {
         spec.name: paired_cluster_summary(
             normalized_records[spec.name],
             reference_records[spec.name],
             confidence_z=config.confidence_z,
-        )
+        ) if normalized_records[spec.name] or reference_records[spec.name] else {
+            'mean': None, 'cluster_se': None, 'ci_low': None, 'ci_high': None,
+            'game_balanced_mean': None, 'game_balanced_se': None,
+            'num_samples': 0, 'num_games': 0,
+        }
         for spec in (config.primary, *config.guardrails)
     }
     primary_summary = comparisons[config.primary.name]
-    enough_games = all(
-        int(item['num_games']) >= config.min_paired_games for item in comparisons.values()
-    )
-    guards_pass = _guardrails_noninferior(config, comparisons)
+    enough_games = (int(primary_summary['num_games']) >= config.min_paired_games
+                    if diagnostic_only else all(
+                        int(item['num_games']) >= config.min_paired_games
+                        for item in comparisons.values()))
+    guards_pass = diagnostic_only or _guardrails_noninferior(config, comparisons)
     if enough_games and guards_pass and _is_clear_improvement(config.primary, primary_summary):
         state['best_step'] = optimizer_steps
         state['best_metrics'] = normalized_metrics
@@ -512,7 +559,7 @@ def observe_adaptive_curriculum(
 
     can_still_improve = _can_still_improve(config.primary, primary_summary)
     guardrail_compensation = False
-    if enough_games and guards_pass and _is_primary_noninferior(config, primary_summary):
+    if not diagnostic_only and enough_games and guards_pass and _is_primary_noninferior(config, primary_summary):
         guardrail_compensation = any(
             _is_clear_improvement(spec, comparisons[spec.name])
             for spec in config.guardrails
@@ -546,6 +593,8 @@ def observe_adaptive_curriculum(
         state['last_action'] = 'observe'
         if guardrail_compensation:
             state['last_reason'] = 'guardrail compensation keeps the phase open'
+        elif not enough_games and diagnostic_only:
+            state['last_reason'] = 'paired primary evidence has insufficient games'
         elif not enough_games or not guards_pass:
             state['last_reason'] = 'paired evidence does not establish every guardrail as noninferior'
         elif can_still_improve:
@@ -583,7 +632,8 @@ def observe_adaptive_curriculum(
         state['last_action'] = 'transition'
         state['last_reason'] = (
             f'{config.required_futile_gates} consecutive paired gates cannot '
-            'show a meaningful gain or guardrail compensation'
+            + ('show a meaningful primary gain' if diagnostic_only
+               else 'show a meaningful gain or guardrail compensation')
         )
         _record_history(
             state,
