@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
-$python = (Join-Path $env:USERPROFILE 'miniconda3\envs\mortal\python.exe')
-$script = (Join-Path $env:USERPROFILE 'Desktop\MahjongAI\scripts\decompress_dataset_json.py')
-$srcRoot = (Join-Path $env:USERPROFILE 'mahjong_data_root\dataset_rebuilt')
-$dstRoot = (Join-Path $env:USERPROFILE 'mahjong_data_root\dataset_json_rebuilt')
+$python = 'C:\Users\numbe\miniconda3\envs\mortal\python.exe'
+$script = 'C:\Users\numbe\Desktop\MahjongAI\scripts\decompress_dataset_json.py'
+$srcRoot = 'C:\Users\numbe\mahjong_data_root\dataset_rebuilt'
+$dstRoot = 'C:\Users\numbe\mahjong_data_root\dataset_json_rebuilt'
 $pollSeconds = 15
 
 Write-Output 'WAIT_EXTRACT_BEGIN'

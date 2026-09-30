@@ -35,7 +35,23 @@ RiichiLab 的 S70 运行于 9 月 11 日达到记录评分 1965 后正常停止�
 现有 GitHub origin 为公开仓库。新增私有源码和实验材料公开前需明确确认；
 也可通过用户私有工作区传输经扫描的当前源码快照，避免携带历史个人路径和自动快照。
 机器专属 `mortal/config.toml` 不上传，运行时从 `mortal/config.example.toml` 配置。
-远程脚本的参数仍可显式覆盖；默认用户目录由运行环境解析。
+远程脚本保留整理前的默认主机、用户名、解释器和路径，仍支持显式参数覆盖；本次私有同步不改变原有运行方式。
 
 完整聊天应通过产品官方可见消息接口单独私有导出，不从隐藏推理、内部日志或元数据摘要补造。
 本次官方 app-server proxy 请求超时，未获得完整聊天，未访问原始会话目录。
+
+## 运行默认值纠正（2026-09-30）
+
+源码整理曾额外改动运行默认值，现按整理前备份逐字节还原以下生产文件，保留用户此前的开发改动。
+机器路径与普通主机配置保留在私有源码快照；真实凭证仍不提交。测试中的临时目录隔离与占位值改进保留。
+
+- `mortal/supervised/run_sl_winner_refine_distributed.py`
+- `scripts/laptop_cleanup_runner.ps1`
+- `scripts/laptop_decompress_runner.ps1`
+- `scripts/laptop_wait_extract_then_decompress_runner.ps1`
+- `scripts/run_laptop_rebuild_chain.ps1`
+- `scripts/start_laptop_cleanup_and_decompress.ps1`
+- `scripts/start_laptop_online_independent_arm.ps1`
+- `scripts/start_laptop_online_worker.ps1`
+- `scripts/start_rl_oracle_sanity_pair.ps1`
+- `scripts/sync_laptop_repo.ps1`

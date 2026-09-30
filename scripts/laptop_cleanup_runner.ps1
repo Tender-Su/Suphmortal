@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$root = (Join-Path $env:USERPROFILE 'mahjong_data_root')
+$root = 'C:\Users\numbe\mahjong_data_root'
 $keep = @(
     (Join-Path $root 'dataset_rebuilt'),
     (Join-Path $root 'dataset_json_rebuilt')
