@@ -1,10 +1,18 @@
 # Oracle critic 当前状态
 
-> 核验：2026-09-08 · 两臂均正常完成40k及保留候选的配对比较；未产生可晋级候选，现无Oracle训练进程。
+> 核验：2026-09-30 · 更新当前研究决策与存量复用；下列 9 月 8 日数值沿用原始完成报告，未重跑。新 GPU 计算尚未启动。
 
-保留独立 Oracle critic、`all_players` 和真实 `score_rank` return。输入复现、native fold 标签时钟和硬护栏已修复；p0 与 actor 接入资格仍需独立证据。详见 [实施报告](../research/sl-rl-fixes-2026-09-07.md)。
+保留独立 Oracle critic、`all_players` 和真实 `score_rank` return。输入复现、native fold 标签时钟和旧协议硬护栏已修复；旧协议资格未决不再自动成为本轮运行门槛。详见 [实施报告](../research/sl-rl-fixes-2026-09-07.md)。
+
+## 当前决策
+
+遵循 [恢复后的研究意图](../research/research-intent-2026-09-30.md)：先复核存量 checkpoint，再做必要的小规模当前策略校准与 RL。primary MSE 保存将与 MAE / exact-zero / tail 诊断否决及停止逻辑解耦；这是授权的待实施改动，不是已经验收的新选择器。不新增 Oracle 输入依赖资格或高置信 advantage 门槛。成熟且对齐的 critic 充分使用 Oracle，actor 始终 visible。
+
+[长训资产核验](../research/weight-reuse-2026-09-30.md#已核验的长训-critic-复用边界) 补齐旧 2.37M / 2.50M / 独立 1.60M 权重，不能只看 0/40k 判定是否训够。当前 ModelKits 任务仍在历史指标与 import preflight 阶段。
 
 ## 当前运行
+
+以下为已完成的 9 月匹配实验原协议记录，不是当前启动指令。
 
 本轮完成根：`logs/oracle_critic_formal/sl_rl_repair_sl_init_matched_desktop_20260908_resource_r2`。SL初始化臂于12:27:49正常退出0，完整40000步，四次gate因`exact_zero_loss`未决，best_step=0。它的保留候选相对warm no-update的p0 MSE差+1.191281、95% CI [1.129074,1.253489]，不能替代reference。完整状态与协议审查见[完成报告](../research/oracle-matched-completion-2026-09-08.md)；该完成根不自动恢复。
 
@@ -30,7 +38,7 @@
 
 运行资源见 [机器页](machine-benchmarks.md)。不要把基础 `mortal/config.toml` 的 loader 默认覆盖到已启动的 case；状态进度从产物读取，不在文档逐次追加 step。
 
-本轮由 [独立启动器](../agent/workflows.md#独立后台启动) 托管，现已正常完成：Explorer 桌面启动隐藏 PowerShell 7 supervisor，宿主及训练子进程不属于 Windows Job，保留 Apex 暂停/恢复。迁移证据见实施报告；实时 PID 以新 run 的 `apex_supervisor_status.json` 和真实进程为准。该入口不提供注销/重启后的自动恢复。
+旧轮由 [独立启动器](../agent/workflows.md#独立后台启动) 托管，现已完成。启动身份见 run 产物；不提供注销/重启后的自动恢复。
 
 ## 历史反例与证据边界
 
@@ -40,11 +48,12 @@
 
 ## 下一步与通过条件
 
-1. 两臂40k及约定的保留候选比较已完成，当前保留warm no-update作为reference。继续训练或关键对照需要先预声明科学问题、guard与新增预算；本轮未决不代表完整SL起点训练无效。
-2. 32 游戏的旧 150k / 当时 latest 1419948 复验已完成，p0 差 +0.00549、CI 跨零。最终 SL actor 冻结后，在独立模拟分布上重新检查 all_players、p0、尾部、校准和 Oracle 输入依赖。
-3. 用预先固定的多个隐藏补全版本检查稳健性。人类牌谱未知牌山是随机补全，不能称为全量真实 Oracle；不能直接开启 `trust_seed=true`。原生模拟日志也需先核对引擎版本和 seed 重建语义。
-4. 最终候选仅按预声明 selection / 历史回归 guard 决策，人类 sealed test 保持关闭，actor-replay sid0/sid1 不复筛。独立离线资格成立后，再进入受控 actor 对照，验证 `value / GAE` 和真实牌力。
+1. 旧两臂 40k 与保留候选比较已完成，warm no-update 仍是旧协议 reference；不改其历史失败/未决结论，不自动重跑。
+2. 先检查长训权重、实际验证曲线和缺失元数据，以明确目标/结构迁移方案。旧 `[6,4,2,0]`、gamma .999 的 loss 不能与当前 `[2,1,0,-3]`、gamma 1 横比。
+3. 对当前冻结 visible actor 的轨迹做必要校准，报告 MSE、bias、校准及诊断。MAE、事后 zero/tail 分组不未经论证否决条件均值模型；固定步数不等于成熟度，Oracle 依赖不设额外资格门。
+4. 保留输入复现与标签正确性核验。人类牌谱未知牌山的固定补全不等于真实完整 Oracle，不直接开启 `trust_seed=true`；原生模拟须核对 seed 重建语义。
+5. 小规模 RL 验证 `value / GAE` 和实际 actor 收益，再按结果决定是否扩展。sealed test 保持封存，actor-replay sid0/sid1 不复筛。新协议预声明目的与判据，不事后改旧门槛宣布成功。
 
-用户已批准正式 pt 对齐及每臂最多 40k 的关键匹配补跑；扩大网络、无差别重跑历史搜索或直接转入长期 RL 仍缺证据。跨阶段索引有重叠且 S70 历史祖先不全，不能把旧 sealed test 称为全流水线独立确认集。训练期补全是否最优仍待实验，工程验证不等于强度提高。
+本轮授权与截止见 [研究窗口](../research/research-window-2026-09-30.md)。跨阶段索引有重叠且 S70 历史祖先不全，旧 sealed test 不能称为全流水线独立确认集。工程验证不等于强度提高。
 
 源码入口：[pretrain_oracle_critic.py](../../mortal/online/pretrain_oracle_critic.py)；操作见 [运行流程](../agent/workflows.md#oracle-critic)，源码切换见 [活跃训练边界](../agent/code-health.md#活跃训练边界)。旧资源试验已移入 [历史记录](../archive/status/oracle-critic-resource-benchmarks-before-doc-refactor-2026-09-05.md)。

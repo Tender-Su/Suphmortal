@@ -1,8 +1,8 @@
 # 在线 RL 当前状态
 
-> 核验：2026-09-08 · 依据：审计修复、资源相关89项回归及多轮真实三角色容量测试；诊断副本已停止，尚未启动正式PPO训练。
+> 核验：2026-09-30 · 更新当前研究入口；历史回归与容量数值沿用 9 月 8 日证据，未新增正式 PPO 训练。
 
-历史 RL 候选尚未证明稳定强于 SL。保留可复验的实现与实验记录，下一轮先明确奖励目标、建立可靠的 Oracle 资格，再用独立正式评测判断增益。
+历史 RL 候选尚未证明稳定强于 SL。保留可复验的实现与实验记录，下一轮先复核既有 critic、补当前策略对齐，再用小规模 RL 和独立正式评测判断增益；不新增 Oracle 输入依赖资格或高置信 advantage 门槛。当前决策见 [研究意图](../research/research-intent-2026-09-30.md)。
 
 ## 已有证据
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 历史 C/D/E | 33 个完整评测含 canonical，共 66,000 局；32 个 RL 候选的名义配对 95% CI 下界均未为正 | 探索记录，不能宣布正式增益 |
 | E 9k / E 10k policy-stop | actor 与 policy 权重逐张量完全相同 | 两次对局点估计差不能解释为策略学习变化 |
-| 独立 Oracle critic | 已切换固定输入和新奖励校准，p0 资格仍待确认 | 见 [Oracle 状态](oracle-critic-mainline.md) |
+| 独立 Oracle critic | 旧协议 p0 资格未决；新方案先复核存量、校准当前策略 | 见 [Oracle 状态](oracle-critic-mainline.md) |
 | replay / actor 契约修复 | PPO/V-trace actor 分离；拒绝旧 hybrid 静默续跑；提前过滤未知/过旧/未来行为版本，增加 KL / clip fraction 门槛 | 解析梯度与加载测试通过，未证明对局收益 |
 
 证据、名义区间的多重比较限制和已实施代码改动见 [独立审计](../research/sl-rl-audit-2026-09-05.md)。旧路线的完整结果保留在 [历史 RL 快照](../archive/status/online-rl-mainline-before-doc-refactor-2026-09-05.md)。
@@ -30,10 +30,10 @@
 ## 下一轮最小协议
 
 1. 明确主目标，冻结可执行配置、SL 起点、对手、源码/扩展摘要与随机 seeds。保留 no-update SL 对照。
-2. 先完成 [Oracle 资格](oracle-critic-mainline.md#下一步与通过条件)，再在同一恢复状态和数据条件下比较 visible value 与 Oracle critic；checkpoint 必须包含 optimizer / scaler / scheduler / data cursor。
+2. 按 [Oracle 当前计划](oracle-critic-mainline.md#下一步与通过条件) 复核预训练与当前策略对齐；小规模 critic-only 后再更新 actor，不能用任意步数上限替代成熟度。只有实际决策需要才增设 visible-only 对照；若要精确续训，核验 optimizer / scaler / scheduler / data cursor，缺失则明确 weights-only 初始化。
 3. 先验证 replay 新旧策略对应、reward 语义、`value / GAE`、IS / V-trace 和 train / eval 模式，再扩大训练。步数不自动赋予晋级资格。
 4. 正式比较固定对手、四座轮换和独立 seeds，按 seed 组做配对统计；候选筛选结束后做独立确认。`test_play=200/400` 与短 ranked 曲线只作诊断。
-5. 报告主指标、全部 guardrail、样本数、不确定性和失败/超时处理。不能只报最高点、单个 seed 或一次赢家。
+5. 报告主指标、诊断、样本数、不确定性和失败/超时处理。新方案将 MSE 保存与 MAE / zero / tail 诊断否决及停止解耦，不继承旧协议的全部 guard 作为新门槛；旧结果保持不变。不能只报最高点、单个 seed 或一次赢家。
 
 ## 运行契约
 

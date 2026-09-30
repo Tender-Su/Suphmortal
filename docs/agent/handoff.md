@@ -1,23 +1,22 @@
 # 接手摘要
 
-> 核验：2026-09-12 · 本次仅更新SL课程与独立正式确认完成状态；其他条目以对应状态页为准，启动或恢复前复核真实进程。
+> 核验：2026-09-30 · 依据：恢复的 b20ffc3 工作副本、可见历史和 CPU 权重核验回报；未新增 GPU 训练。旧实验细节以对应状态页为准，启动前复核真实进程。
 
-SL/RL 审计修复已落到主树并完成双机回归；新 Oracle 校准与独立正式评测已部署。当前实现、证据和未完成资格见 [实施报告](../research/sl-rl-fixes-2026-09-07.md)，原始诊断保留于 [独立审计](../research/sl-rl-audit-2026-09-05.md)。
+云端已从 bundle 恢复 `b20ffc3`；丢失的后续文档提交未逐字恢复，现重新整理 [研究意图](../research/research-intent-2026-09-30.md)。actor visible、critic 完整 Oracle 已是主线；GRP 指真实结果预测任务。成熟度与当前策略对齐不能用任意小 warmup 或步数上限替代。
 
 | 主题 | 当前边界 | 详情 |
 | --- | --- | --- |
-| SL | C50k独立正式确认通过，canonical保留发布身份；两seed十臂课程对照仍inconclusive | [SL 状态](../status/supervised-mainline.md) |
-| Oracle critic | 两臂 40k 及候选比较已完成，均未决；保留 warm reference，独立资格未定 | [Oracle 状态](../status/oracle-critic-mainline.md) |
-| 在线 RL | 完成独立三角色容量测试；正式PPO待critic资格及AMP成功更新时钟核对，历史候选未证明稳定强于SL | [RL 状态](../status/online-rl-mainline.md) |
-| 笔记本 | 本轮SL课程与正式确认均正常结束并完整验收；不重启旧运行 | [SL 状态](../status/supervised-mainline.md) |
-| 平台客户端 | 台式机 RiichiLab 客户端在运行；ranked 结果不替代正式 `1v3` | [接入说明](../../integrations/riichilab/README.md) |
+| SL | C50k 独立确认通过、canonical 发布身份不变；旧十臂晚期课程仍未决，新问题是 A 过训/可塑性与早期 B/C | [SL 状态](../status/supervised-mainline.md) |
+| Oracle critic | 旧两臂 40k 按旧协议均未决；先重审存量长训权重，再补当前策略校准，不重跑旧资格赛 | [Oracle 状态](../status/oracle-critic-mainline.md) |
+| 在线 RL | 未启动本轮正式 PPO；从成熟且对齐的 critic 做小闭环，保留奖励、GAE、更新时钟核验 | [RL 状态](../status/online-rl-mainline.md) |
+| 运行 | ModelKits 正整理指标及 import preflight，尚无本轮新 GPU 计算；5070 Ti 负责 critic/RL，4060 负责 SL | [研究窗口](../research/research-window-2026-09-30.md) |
 
 下一步顺序：
 
-1. SL独立正式确认已通过，后续发布另行安排；Oracle本轮未决，保留no-update，后续实验先明确问题与新增预算。
-2. 最终 actor 冻结后在独立模拟分布验证 critic 的主指标、全部 guard、校准与 Oracle 输入依赖；offline finalist 前保持 sealed test 封存。
-3. 合格 critic 才进入近 on-policy PPO 与 Oracle 的多训练种子对照；不直接沿用旧 hybrid 或混用奖励/replay。
+1. 复核现成 checkpoint 的血缘、奖励目标、结构、指标和加载能力，优先复用 [已核验资产](../research/weight-reuse-2026-09-30.md)；旧新奖励下的 loss 不能直接比较。
+2. 实现并验证 primary MSE 保存与 MAE / zero / tail 诊断否决及停止逻辑解耦。保留旧协议结果，不追溯放宽规则。Oracle 依赖诊断、高置信 advantage 门槛不作为新增资格要求。
+3. 先完成必要的小规模当前策略 critic 校准，再进入受控 RL，评估 actor 收益。SL 从早期 A 资产设计有明确决策价值的探针；已存在 sealed test 不反复用于调参。
 
-本轮SL课程与正式确认已经完成；critic资格与RL强度仍以对应状态页为准。其他活跃运行的源码及恢复链路保持冻结，后续主树修正不能热覆盖活跃worker。
+源码仅在云端开发与提交，两台 runner 同步到独立固定 commit 工作树，不热覆盖活跃 worker。算力授权到北京时间 2026-10-08 19:00（UTC 11:00），所有本轮进程必须有独立本机截止管理及保存停止余量；不为填满时窗增设实验。
 
-启动、恢复或评测参考 [运行流程](workflows.md)；涉及运行中源码参考 [活跃训练边界](code-health.md#活跃训练边界)，涉及另一台机器参考 [远程流程](remote-ops.md)。当前数值和实验路径只在对应状态页维护，不在本页追加流水记录。
+启动与恢复见 [运行流程](workflows.md)、[活跃训练边界](code-health.md#活跃训练边界) 和 [远程流程](remote-ops.md)。

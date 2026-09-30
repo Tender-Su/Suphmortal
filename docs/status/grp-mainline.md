@@ -2,7 +2,7 @@
 
 > 核验：2026-09-05 · 依据：本地有效配置与训练代码。这里记录下游契约，不把旧 benchmark 当成新模型选择结果。
 
-`GRP` 是结果预测前置模型。当前配置使用 `hidden_size=384 / num_layers=3 / dtype=float32`；本轮没有重新训练 GRP，也没有重新证明该容量最优。
+研究语境中的 `GRP` 指 game result prediction 真实结果预测任务，不限定为历史小型模型，也不默认用它为 Oracle critic 生成伪标签；当前主线见 [研究意图](../research/research-intent-2026-09-30.md)。以下仅记录历史具体 GRP 模型的工程契约。当前配置使用 `hidden_size=384 / num_layers=3 / dtype=float32`；本轮没有重新训练 GRP，也没有重新证明该容量最优。
 
 ## checkpoint 用途
 

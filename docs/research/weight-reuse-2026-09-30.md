@@ -29,6 +29,22 @@ ModelKits 的 2 个项目根、ABANDON 的 13 个项目/备份根，以及配置
 - A2.88M 到旧动态 B 是 weights-only 初始化，重置主 optimizer/global steps，且验证 split 不同；不能把跨阶段 loss 直接相减或忽略辅助目标变化来解释课程因果收益
 - 旧 Oracle A1.55M、B250k、C170446 也保留，只作历史目标下的诊断端点，不替代新目标匹配对照
 
+旧 32 游戏复验比较 150k / 当时 latest 1,419,948，p0 差 +0.00549、CI 跨零；这一已完成历史结果继续保留，不改写成当前长训权重的比较结论。
+
+## 已核验的长训 critic 复用边界
+
+2026-09-30 补充依据为 ModelKits 任务的三份旧权重 CPU 核验回报；云端未加载这些大权重，清单不替代 checkpoint 内部证据。候选 ID 对应原库存定位，尚未进行新推理或 GPU 训练。
+
+| 资产 | 核验值 | 可用结论 |
+| --- | --- | --- |
+| MK0174，旧 formal best | 内部 steps 2,370,000；记录 loss 2.9381111465 | 有长训候选，不能把旧 formal 全部简化为短 warmup |
+| MK0176，旧 formal latest | 内部 steps 2,500,000；实际最后 validation loss 2.9660594597 | 终点与 best 分开，不能用 best_loss 字段冒充最后一次验证 |
+| MK0223，constant_low latest | 内部 steps 1,600,000，独立 1.58M + 20k 链路 | 不是从 2.50M 继续训练的后续终点 |
+
+三者均为旧 `env.pts=[6,4,2,0]`、gamma .999，不能与当前 `[2,1,0,-3]`、gamma 1 的 loss 直接比较。旧 formal 为 192×40 towers、`all_players`、`score_rank_mc`；1.60M 为 hand-aligned、`residual_mlp` fusion 1024、head 256，带 exact-zero 配置和 weight decay .03。这些差异先做加载和目标迁移预检，不要求以旧 optimizer 原样续训。
+
+旧 checkpoint 未提供可确认的 norm、成功更新计数、optimizer class 和 ScheduleFree train/eval mode 字段。不能凭文件名、配置惯例或 tensor 数量补出这些身份，也不能宣称 exact resume 或导出模式已验证。下一步先补历史曲线与 import preflight；若需要新评分，明确统一标签、结构和模式后再比较。现有 fixed-imputed 三模型 pilot 入口严格要求新标签与 0/40k 身份，不能把这些长训旧权重直接塞入该接口或关闭契约检查冒充兼容。
+
 ## 决策
 
 新实验先写明尚未解决的疑问及它会改变的决定。优先重用原始结果和已存权重；只有缺失的预测、分布诊断或牌力比较确实影响选择时才新增有界推理。离线拟合是廉价诊断，不是对战实力证明；避免用一次筛选最高点或已实现结果分组硬门槛代替最终 actor 收益。当前没有依据重训整段 A 或重新跑两条 Oracle40k。
