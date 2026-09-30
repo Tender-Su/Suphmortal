@@ -23,6 +23,40 @@ CRITICS = ('warm0', 'warm40k', 'clean40k')
 PAIRS = (('warm40k', 'warm0'), ('clean40k', 'warm0'), ('clean40k', 'warm40k'))
 
 
+class ProbePhaseTimings:
+    """Exclusive wall-clock intervals; repeated phases accumulate, never nest."""
+    def __init__(self):
+        self.started = self.phase_started = time.perf_counter()
+        self.phase = 'preflight_input_fingerprint_model_load'
+        self.finished = None
+        self.seconds = {}
+
+    def switch(self, phase):
+        if self.finished is not None:
+            raise RuntimeError('probe timings already finished')
+        now = time.perf_counter()
+        self.seconds[self.phase] = self.seconds.get(self.phase, 0.0) + (now - self.phase_started)
+        self.phase, self.phase_started = phase, now
+
+    def finish(self):
+        self.switch(None)
+        self.finished = self.phase_started
+
+    def report(self):
+        now = self.finished if self.finished is not None else time.perf_counter()
+        return {
+            'schema': 1, 'clock': 'time.perf_counter',
+            'status': 'complete' if self.finished is not None else 'incomplete',
+            'total_seconds': now - self.started,
+            'phase_seconds': dict(self.seconds),
+            'incomplete_phase': ({'name': self.phase, 'seconds': now - self.phase_started}
+                                 if self.finished is None else None),
+            'scope': 'before request.json write through final integrity checks and metrics/provenance publication; excludes interpreter startup, CLI parsing, output reservation, timing.json/failure.json publication and final stdout',
+            'accounting': 'exclusive wall intervals, repeated phases summed; total equals phase_seconds sum plus incomplete_phase seconds when present; absent phases did not run',
+            'cuda_timing': 'wall time, not kernel time; synchronize only after generated arena and critic device placement; inference includes existing blocking .cpu() results, no added per-batch synchronization',
+        }
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('config', 'actor', 'opponent', 'warm0', 'warm40k', 'clean40k', 'output-dir'):
@@ -270,7 +304,7 @@ def load_policy(path, torch):
     return brain, policy, cfg, state.get('steps')
 
 
-def run(args, root):
+def run(args, root, *, timings):
     # Must precede any module importing mortal.config or the native Rayon pool.
     os.environ['MORTAL_CFG'] = str(Path(args.config).resolve())
     os.environ['TRAIN_PLAY_PROFILE'] = 'frozen_critic_probe'
@@ -338,6 +372,7 @@ def run(args, root):
     def git_output(*arguments):
         return subprocess.check_output(['git', *arguments], cwd=source_root, text=True).strip()
     provenance = {'schema': 1, 'status': 'running', 'started_unix': time.time(),
+                  'timing_report': 'timing.json',
                   'arguments': vars(args), 'weights_and_config': {
                       name: {'path': str(path), 'sha256': hashes[name]} for name, path in files.items()},
                   'source_commit': git_output('rev-parse', 'HEAD'),
@@ -388,6 +423,7 @@ def run(args, root):
         provenance.setdefault('critics', {})[name] = {'steps': state.get('steps'), 'contract': pre}
         del state
     atomic_write_json(root / 'provenance.json', provenance)
+    timings.switch('rollout_reuse_validation' if args.reuse_rollout_dir else 'arena_generation_validation')
     if args.reuse_rollout_dir:
         games, reuse = load_verified_rollout(args.reuse_rollout_dir, provenance,
                                             load_games=load_games, duplicate_sets=duplicate_sets)
@@ -417,14 +453,19 @@ def run(args, root):
             game['kyoku_count'] = verify_complete_log(game['log_path'])
             game['sha256'] = file_sha256(game['log_path'])
         del player
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
     atomic_write_json(root / 'outcomes.json', games)
     atomic_write_json(root / 'provenance.json', provenance)
+    timings.switch('scoring_setup')
     # Free actor GPU storage before critic scoring. No policy calls thereafter.
     actor.cpu(); policy.cpu(); opponent.cpu(); opponent_policy.cpu()
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     for brain, value in critics.values():
         brain.to(device); value.to(device)
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
     targets, all_context = [], []
     predictions = {name: [] for name in CRITICS}
     shuffled_predictions = {name: [] for name in CRITICS}
@@ -436,6 +477,7 @@ def run(args, root):
     with atomic_output_path(root / 'predictions.jsonl.gz') as temporary:
         with gzip.open(temporary, 'wt', encoding='utf-8', compresslevel=3) as stream:
             for game_index, game in enumerate(games):
+                timings.switch('replay_decode_validation')
                 path = game['log_path']
                 dataset = FileDatasetsIter(version=version, file_list=[path], pts=pts, oracle=True,
                                            player_names=['trainee'], value_target_mode='all_players',
@@ -472,20 +514,24 @@ def run(args, root):
                                              'indices_sha256': hashlib.sha256(shuffle_indices.astype('<i8').tobytes()).hexdigest()})
                 per_game, per_game_shuffled = {}, {}
                 for name, (brain, value) in critics.items():
+                    timings.switch('critic_inference')
                     with torch.inference_mode():
                         pred = torch.cat([value(brain(
                             torch.as_tensor(obs[i:i + args.batch_size], device=device, dtype=torch.float32),
                             invisible_obs=torch.as_tensor(invisible[i:i + args.batch_size], device=device, dtype=torch.float32)
                         )).cpu() for i in range(0, len(obs), args.batch_size)]).numpy()
+                    timings.switch('aggregation_statistics')
                     summary = summarize_predictions(target, pred)
                     cluster_key = (game['seed'], game['seed_key'])
                     clustered[name][cluster_key].append((len(target), summary['p0_mse'], summary['all_players_mse']))
                     if args.shuffle_hidden:
+                        timings.switch('critic_inference')
                         with torch.inference_mode():
                             shuffled = torch.cat([value(brain(
                                 torch.as_tensor(obs[i:i + args.batch_size], device=device, dtype=torch.float32),
                                 invisible_obs=torch.as_tensor(invisible[shuffle_indices[i:i + args.batch_size]], device=device, dtype=torch.float32)
                             )).cpu() for i in range(0, len(obs), args.batch_size)]).numpy()
+                        timings.switch('aggregation_statistics')
                         shuffle_summary = summarize_predictions(target, shuffled)
                         clustered[name + '_shuffle'][cluster_key].append(
                             (len(target), shuffle_summary['p0_mse'], shuffle_summary['all_players_mse']))
@@ -502,6 +548,7 @@ def run(args, root):
                     if not np.isfinite(adv95).all():
                         raise ValueError('non-finite production GAE')
                     advantages[name].append(adv95)
+                timings.switch('prediction_write')
                 for i in range(len(target)):
                     stream.write(json.dumps({'game_index': game_index, 'seed': game['seed'], 'seed_key': game['seed_key'],
                                              'trainee_seat': game['challenger_seat'], 'state_index': i,
@@ -512,6 +559,7 @@ def run(args, root):
                                              'target': target[i].tolist(),
                                              'pred': {name: per_game[name][i].tolist() for name in CRITICS}},
                                             separators=(',', ':'), allow_nan=False) + '\n')
+                timings.switch('aggregation_statistics')
                 zero_summary = summarize_predictions(target, np.zeros_like(target))
                 clustered['constant_zero'][(game['seed'], game['seed_key'])].append(
                     (len(target), zero_summary['p0_mse'], zero_summary['all_players_mse']))
@@ -519,6 +567,8 @@ def run(args, root):
                 all_context.append(context)
                 game_counts.append(len(target))
                 print(json.dumps({'scored_games': game_index + 1, 'total_games': len(games), 'states': sum(game_counts)}), flush=True)
+                timings.switch('prediction_write')  # Includes gzip close and atomic publication on the last game.
+    timings.switch('aggregation_statistics')
     target, context = np.concatenate(targets), np.concatenate(all_context)
     result = {'games': len(games), 'seed_groups': len(groups), 'states': len(target), 'game_state_counts': game_counts,
               'rankings': rankings.tolist(), 'head_coordinate': 'relative_to_trainee_seat; p0=trainee',
@@ -569,6 +619,7 @@ def run(args, root):
                                        replicates=args.bootstrap_replicates, seed=args.bootstrap_seed),
                   'seed_groups': len(groups), 'games': len(games), 'states': len(target)}
             for i, key in enumerate(('p0_mse', 'all_players_mse'))}
+    timings.switch('final_integrity_write')
     if hashes != {name: file_sha256(path) for name, path in files.items()}:
         raise RuntimeError('input checkpoint or configuration changed during probe')
     if args.reuse_rollout_dir:
@@ -584,7 +635,7 @@ def run(args, root):
                       artifact_sha256={name: file_sha256(root / name) for name in
                                        ('outcomes.json', 'metrics.json', 'predictions.jsonl.gz', 'effective_config.json')})
     atomic_write_json(root / 'provenance.json', provenance)
-    print(json.dumps({'status': 'complete', 'output_dir': str(root), 'states': len(target)}), flush=True)
+    return {'status': 'complete', 'output_dir': str(root), 'states': len(target)}
 
 
 def main(argv=None):
@@ -592,11 +643,17 @@ def main(argv=None):
     if args.reuse_rollout_dir and Path(args.output_dir).resolve().is_relative_to(Path(args.reuse_rollout_dir).resolve()):
         raise ValueError('new output must be outside the read-only original rollout directory')
     root = reserve_output(args.output_dir)
-    atomic_write_json(root / 'request.json', vars(args))
+    timings = ProbePhaseTimings()
     try:
-        run(args, root)
+        atomic_write_json(root / 'request.json', vars(args))
+        completion = run(args, root, timings=timings)
+        timings.finish()
+        timing_report = timings.report()
+        atomic_write_json(root / 'timing.json', timing_report)
+        print(json.dumps({**completion, 'timing': timing_report}), flush=True)
     except BaseException as exc:
-        atomic_write_json(root / 'failure.json', {'status': 'failed', 'type': type(exc).__name__, 'error': str(exc), 'unix': time.time()})
+        atomic_write_json(root / 'failure.json', {'status': 'failed', 'type': type(exc).__name__,
+                                                'error': str(exc), 'unix': time.time(), 'timing': timings.report()})
         raise
 
 

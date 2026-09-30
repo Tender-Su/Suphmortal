@@ -37,9 +37,29 @@ actor 按 production TrainPlayer 的 categorical 分布采样，explore_rate=1�
 - 三组候选差异及各 critic − constant-zero 使用配对四座 seed groups 的 cluster bootstrap，报告 count、SE、95% interval。估计量为各 seed group 内状态等权 MSE，再对独立组等权；与全样本状态等权 MSE 明确分列。CI 不包含训练 seed 变异或候选筛选校正
 - 核心结果原子写入；失败留下 failure.json，未完整写完的预测文件不对外标成完成。没有按已实现 outcome 分组的硬护栏，也没有任意 readiness 阈值
 
+### 分阶段耗时
+
+`timing.json` 为可选、附加的单调 wall-clock 报告，`provenance.json.timing_report` 指向它；完成 stdout 也附带相同 `timing` 字段。原有 schema、指标和 reuse 核验不变。报告在核心产物完整发布后才写入，不进入 provenance 的 artifact hash 列表；在这个间隙中断时，报告可能缺失，不能据此否定已经完整核验的核心产物。
+
+`total_seconds` 从写 `request.json` 前开始，到最终输入/产物 hash 检查和 metrics/provenance 发布结束。不含解释器启动、CLI 解析、输出目录预留、计时报告自身落盘和最终 stdout，不能直接视为外部 supervisor 的进程总耗时。`phase_seconds` 是互斥区间累计，不嵌套、不重复计数，完成时总和等于 total（允许浮点舍入误差）：
+
+- `preflight_input_fingerprint_model_load`：导入、输入/源码/native 指纹、模型 CPU 加载、契约验证与初始配置/provenance 写入
+- `arena_generation_validation`：新 arena 的初始化、actor/opponent 设备放置、完整对局、日志检查及 outcomes/provenance 写入；并非仅纯打牌时间
+- `rollout_reuse_validation`：只读原 rollout 核验和新 outcomes/provenance 写入；复用时只有这一项，不伪造 arena 为 0 秒
+- `scoring_setup`：actor 转回 CPU、critic 设备放置及评分容器/输出流初始化
+- `replay_decode_validation`：轨迹解码、首场固定补全 A/A、reward/target 构建、形状/有限值检查，以及可选隐藏置换映射
+- `critic_inference`：三个 critic 的全部 normal/可选 shuffled forward、输入设备传输及已有的 CPU 结果取回
+- `aggregation_statistics`：逐游戏指标与 GAE 核验、汇总、分层、bootstrap 及进度输出
+- `prediction_write`：逐状态 JSON/gzip、最终关闭与原子发布
+- `final_integrity_write`：末尾输入/reuse 完整性复核、metrics 写入、产物 hash 与完整 provenance 发布
+
+arena 区间包含 TrainPlayer 构造、其内部设备准备、采样种子设置及完整性检查，不能直接当作稳态纯对局吞吐。
+
+CUDA 仅在新 arena 完成、critic 设备放置完成这两个粗边界同步（reuse 只有后者）；forward 时间依赖原有阻塞 `.cpu()` 已完成结果，不新增逐 batch 同步，也不将 CPU 提交耗时称为 GPU kernel 时间。核心流程中途失败时 `failure.json.timing` 标记 `incomplete`，只把已结束区间放进 `phase_seconds`；当前区间单独记为 `incomplete_phase`，不把失败阶段或未运行阶段标成完成；若仅后续计时报告发布失败，已完成的核心区间仍如实保留 `complete`。
+
 ## 验证边界
 
-轻量测试 `python -m unittest mortal.tests.test_frozen_actor_critic_probe mortal.tests.test_value_coordinate_contracts` 覆盖路径保护、参数校验、标签契约、分箱/误差算术、完整日志检查、可选 seed API 与 production reward/GAE 算术。无 torch 的云端仅运行这些测试及语法检查；真实 torch/native 加载、arena、显存与固定补全 A/A 必须在 runner 的 smoke 确认，不将轻量测试称为集成通过。
+轻量测试 `python -m unittest mortal.tests.test_frozen_actor_critic_probe mortal.tests.test_frozen_actor_critic_probe_timing mortal.tests.test_value_coordinate_contracts` 覆盖路径保护、参数校验、标签契约、分箱/误差算术、完整日志检查、可选 seed API 与 production reward/GAE 算术；新增计时测试用确定性时钟核对互斥累计/失败区间，并以本地 host stub 执行八游戏控制流，核对 smoke/reuse 分支、原有产物 hash、可选 shuffle 与固定次数 CUDA 边界调用。该 host 测试不执行真实模型、native 对局或 CUDA。无 torch 的云端仅运行这些测试及语法检查；真实 torch/native 加载、arena、显存与固定补全 A/A 必须在 runner 的 smoke 确认，不将轻量测试称为集成通过，也不为新增计时单独重跑八局。
 
 ## 只读复用已生成的 rollout
 

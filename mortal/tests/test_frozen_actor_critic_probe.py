@@ -213,6 +213,13 @@ class RolloutReuseTests(unittest.TestCase):
         self.assertEqual(evidence['source_status_at_read'], 'running')
         self.assertEqual(before, {p: file_sha256(p) for p in self.source.rglob('*') if p.is_file()})
 
+    def test_optional_timing_report_is_not_required_for_verified_rollout_reuse(self):
+        self.provenance['timing_report'] = 'timing.json'
+        self.save()
+        self.assertFalse((self.source / 'timing.json').exists())
+        games, _ = self.load()
+        self.assertEqual(len(games), 8)
+
     def test_completed_rollout_requires_matching_outcomes_artifact_hash(self):
         self.provenance['status'] = 'complete'
         self.provenance['artifact_sha256'] = {'outcomes.json': 'wrong'}
