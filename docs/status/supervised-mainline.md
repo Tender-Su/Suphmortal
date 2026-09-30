@@ -4,7 +4,7 @@
 
 保留现有 canonical 的发布身份。S70 和后续 Long-ABC 是候选；四月协议完成不代表此后的 SL 工作已经结束，也不代表 canonical 对所有候选的优势已被证明。
 
-[9月30日权重复用](../research/weight-reuse-2026-09-30.md) 已完成。
+[9月30日权重盘点](../research/weight-reuse-2026-09-30.md) 已完成。
 
 ## 模型与证据
 
@@ -55,4 +55,4 @@
 | `latest` | 恢复模型与 optimizer / scaler / scheduler；data cursor / RNG 是否齐全须核对具体产物，不能仅凭文件名断言逐 batch 精确续跑 |
 | [自动 snapshot](supervised-fidelity-results.md) | runner 生成的单次运行摘要，不覆盖本页 |
 
-本轮计算与验收已完成，后续发布或新实验另行安排。命令见 [运行流程](../agent/workflows.md)，勿重启已完成的旧运行。
+命令见 [运行流程](../agent/workflows.md)，勿重启已完成的旧运行。
