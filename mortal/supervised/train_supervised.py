@@ -16,18 +16,35 @@ import torch
 from torch.utils.data._utils.collate import default_collate
 
 from mortal._repo import MORTAL_ROOT, REPO_ROOT
+from mortal.core.artifacts import atomic_torch_save, atomic_write_json
+from mortal.core.external_pause import (
+    EXTERNAL_PAUSE_ENV_VAR,
+    EXTERNAL_PAUSE_EXIT_CODE,
+    external_pause_requested,
+    resolve_external_pause_file,
+)
+from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
 from mortal.supervised.adaptive_curriculum import (
     AdaptiveCurriculumConfig,
     initial_adaptive_curriculum_state,
     normalize_adaptive_curriculum_state,
     observe_adaptive_curriculum,
 )
-from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
+from mortal.supervised.auxiliary_config import (
+    auxiliary_step_offset_from_state,
+    resolve_effective_aux_cfg,
+    resolve_effective_config_section,
+    validate_exact_resume_auxiliary_recipe,
+)
 from mortal.supervised.convergence import (
     ConvergenceConfig,
     initial_convergence_state,
     observe_convergence,
     select_bounded_pareto_candidates,
+)
+from mortal.supervised.metric_reporting import (
+    ClusterMetricAccumulator,
+    write_metric_scalars,
 )
 
 
@@ -42,19 +59,6 @@ LEGACY_PATHS_FOR_SCRIPT_IMPORTS = {
     REPO_ROOT / 'scripts',
 }
 
-EXTERNAL_PAUSE_ENV_VAR = 'MORTAL_ORACLE_PAUSE_FILE'
-EXTERNAL_PAUSE_EXIT_CODE = 75
-
-
-def resolve_external_pause_file():
-    value = os.environ.get(EXTERNAL_PAUSE_ENV_VAR, '').strip()
-    return Path(value).resolve() if value else None
-
-
-def external_pause_requested(file_path):
-    return file_path is not None and file_path.is_file()
-
-
 def sanitize_sys_path_for_spawn():
     """Keep Windows DataLoader workers from importing script modules as packages."""
     repo_text = str(REPO_ROOT)
@@ -64,29 +68,6 @@ def sanitize_sys_path_for_spawn():
         if item and str(Path(item).resolve() if path.isabs(item) else item) not in legacy_texts
     ]
     sys.path[:] = [repo_text, *[item for item in filtered if item != repo_text]]
-
-
-def resolve_effective_config_section(config, config_section):
-    if not isinstance(config, dict):
-        return {}
-    section_cfg = config.get(config_section)
-    if isinstance(section_cfg, dict):
-        return section_cfg
-    return {}
-
-
-def resolve_effective_aux_cfg(config, config_section):
-    if not isinstance(config, dict):
-        return {}
-    base_aux_cfg = config.get('aux', {})
-    if not isinstance(base_aux_cfg, dict):
-        base_aux_cfg = {}
-    aux_cfg = dict(base_aux_cfg)
-    section_cfg = resolve_effective_config_section(config, config_section)
-    section_aux_cfg = section_cfg.get('aux', {}) if isinstance(section_cfg, dict) else {}
-    if isinstance(section_aux_cfg, dict):
-        aux_cfg.update(section_aux_cfg)
-    return aux_cfg
 
 
 def checkpoint_optional_head_flags_for_state(state, *, config_section):
@@ -343,20 +324,6 @@ def validate_init_checkpoint_identity(state, expected_provenance, *, cfg_prefix)
         )
 
 
-def atomic_torch_save(state, target):
-    target_path = Path(target)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_name(
-        f'.{target_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp'
-    )
-    try:
-        torch.save(state, temp_path)
-        os.replace(temp_path, target_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
 def normalize_numpy_bool_scalars(value):
     if isinstance(value, np.bool_):
         return bool(value)
@@ -469,6 +436,7 @@ def train(
     *,
     stage_label='Supervised Training',
     checkpoint_label='supervised',
+    probe=None,
 ):
     import copy
     import gzip
@@ -697,6 +665,9 @@ def train(
     best_acc_state_file = supervised_cfg.get('best_acc_state_file', best_state_file)
     best_rank_state_file = supervised_cfg.get('best_rank_state_file', best_state_file)
     init_state_file = supervised_cfg.get('init_state_file', '')
+    init_auxiliary_schedule = supervised_cfg.get('init_auxiliary_schedule', 'reset')
+    if init_auxiliary_schedule not in {'inherit', 'reset'}:
+        raise ValueError(f'{cfg_prefix}.init_auxiliary_schedule must be inherit or reset')
     tensorboard_dir = supervised_cfg['tensorboard_dir']
     file_index = supervised_cfg['file_index']
     candidate_portfolio_dir = supervised_cfg.get('candidate_portfolio_dir', '')
@@ -1791,7 +1762,10 @@ def train(
             + danger_mix_weights[2] * player_loss_vec
         )
         if danger_ramp_steps > 0:
-            ramp = min(float(optimizer_steps) / max(float(danger_ramp_steps), 1.0), 1.0)
+            ramp = min(
+                float(optimizer_steps + auxiliary_step_offset) / max(float(danger_ramp_steps), 1.0),
+                1.0,
+            )
         else:
             ramp = 1.0
         overall = max(float(danger_weight), 0.0)
@@ -2300,17 +2274,29 @@ def train(
             rayon_num_threads=phase_rayon_num_threads,
             emit_opponent_state_labels=phase_emit_opponent_state_labels,
             track_danger_labels=enable_danger_aux,
-            emit_game_id=adaptive_config is not None and not training,
+            emit_game_id=(adaptive_config is not None or probe is not None) and not training,
         )
+        if training and probe is not None:
+            dataset = probe.build_dataset({
+                'version': version, 'enable_augmentation': enable_augmentation,
+                'augmented_first': augmented_first,
+                'emit_opponent_state_labels': phase_emit_opponent_state_labels,
+                'track_danger_labels': enable_danger_aux,
+            })
+        elif not training and probe is not None and hasattr(probe, 'build_validation_dataset'):
+            dataset = probe.build_validation_dataset(dataset)
         kwargs = {
             'dataset': dataset,
-            'batch_size': batch_size,
+            'batch_size': batch_size if training else supervised_cfg.get('val_batch_size', batch_size),
             'drop_last': False,
             'num_workers': phase_num_workers,
             'pin_memory': phase_pin_memory,
             'worker_init_fn': worker_init_fn,
             'collate_fn': safe_default_collate,
         }
+        if probe is not None:
+            # Creating a DataLoader iterator must not advance model RNG on resume.
+            kwargs['generator'] = torch.Generator().manual_seed(seed)
         if phase_num_workers > 0:
             kwargs['prefetch_factor'] = phase_prefetch_factor
             kwargs['persistent_workers'] = phase_persistent_workers
@@ -2485,6 +2471,7 @@ def train(
 
     steps = 0
     optimizer_steps = 0
+    auxiliary_step_offset = 0
     skipped_optimizer_steps = 0
     nonfinite_batches = 0
     start_epoch = 0
@@ -2575,6 +2562,7 @@ def train(
             run_provenance,
             cfg_prefix=cfg_prefix,
         )
+        validate_exact_resume_auxiliary_recipe(state, config, config_section=cfg_prefix)
         validate_exact_resume_heads(state)
         load_optional_head_states(state)
         optimizer_loaded = load_optimizer_state_compat(
@@ -2596,6 +2584,9 @@ def train(
             state,
             opt_step_every=opt_step_every,
             default=optimizer_steps,
+        )
+        auxiliary_step_offset = auxiliary_step_offset_from_state(
+            state, optimizer_steps=optimizer_steps, source_optimizer_steps=optimizer_steps,
         )
         skipped_optimizer_steps = int(state.get('skipped_optimizer_steps') or 0)
         nonfinite_batches = int(state.get('nonfinite_batches') or 0)
@@ -2653,6 +2644,16 @@ def train(
             run_provenance,
             cfg_prefix=cfg_prefix,
         )
+        if init_auxiliary_schedule == 'inherit':
+            validate_exact_resume_auxiliary_recipe(state, config, config_section=cfg_prefix)
+            source_opt_step_every = (state.get('config', {}).get('control') or {}).get('opt_step_every', 1)
+            auxiliary_step_offset = auxiliary_step_offset_from_state(
+                state,
+                optimizer_steps=optimizer_steps,
+                source_optimizer_steps=resume_optimizer_steps_from_state(
+                    state, opt_step_every=source_opt_step_every,
+                ),
+            )
         bridge_info = load_brain_state_with_input_bridge(mortal, state['mortal'])
         policy_net.load_state_dict(state['policy_net'])
         if state.get('aux_net') is not None:
@@ -2666,6 +2667,10 @@ def train(
             f'initialized {checkpoint_label} weights from checkpoint: {init_state_file} ({timestamp}); '
             f'brain bridge loaded={len(bridge_info["loaded_keys"])} '
             f'skipped={len(bridge_info["skipped_keys"])}'
+        )
+        logging.info(
+            'auxiliary schedule initialization: %s; auxiliary_optimizer_steps=%s',
+            init_auxiliary_schedule, optimizer_steps + auxiliary_step_offset,
         )
 
     if adaptive_config is not None and adaptive_config.final_phase:
@@ -2701,7 +2706,7 @@ def train(
         remaining = len(batch) - idx
         expected_without_opponent = 4 if enable_danger_aux else 0
         batch_has_game_id = False
-        if adaptive_config is not None and remaining in {
+        if (adaptive_config is not None or probe is not None) and remaining in {
             expected_without_opponent + 1,
             expected_without_opponent + 3,
         }:
@@ -2994,40 +2999,6 @@ def train(
 
         return total_loss, batch_metrics
 
-    def merge_adaptive_cluster_values(target, source):
-        if source is None:
-            return
-        for metric_name, (game_ids, values) in source.items():
-            metric_target = target.setdefault(metric_name, {})
-            unique_ids, inverse = torch.unique(
-                game_ids.reshape(-1),
-                sorted=True,
-                return_inverse=True,
-            )
-            sums = torch.zeros(
-                unique_ids.numel(),
-                dtype=torch.float64,
-                device='cpu',
-            )
-            sums.scatter_add_(0, inverse, values.reshape(-1))
-            counts = torch.bincount(inverse, minlength=unique_ids.numel())
-            for game_value, value_sum, count in zip(unique_ids, sums, counts):
-                key = int(game_value.item())
-                current_sum, current_count = metric_target.get(key, (0.0, 0))
-                metric_target[key] = (
-                    current_sum + float(value_sum.item()),
-                    current_count + int(count.item()),
-                )
-
-    def finalize_adaptive_cluster_values(cluster_totals):
-        return {
-            metric_name: [
-                [game_id, value_sum, count]
-                for game_id, (value_sum, count) in sorted(records.items())
-            ]
-            for metric_name, records in cluster_totals.items()
-        }
-
     def evaluate(
         file_list,
         log_step,
@@ -3048,7 +3019,7 @@ def train(
         if danger_aux_net is not None:
             danger_aux_net.eval()
 
-        def run_eval_loop(totals, cluster_totals):
+        def run_eval_loop(totals, cluster_metrics):
             val_loader = None
             val_batches_on_device = None
             batch_count = 0
@@ -3079,9 +3050,8 @@ def train(
                         )
                         merge_metrics(totals, batch_metrics)
                         if collect_cluster_records:
-                            merge_adaptive_cluster_values(
-                                cluster_totals,
-                                batch_metrics['adaptive_cluster_values'],
+                            cluster_metrics.merge(
+                                batch_metrics['adaptive_cluster_values']
                             )
                         batch_count += 1
                         if max_batches > 0 and batch_count >= max_batches:
@@ -3095,11 +3065,11 @@ def train(
 
         def run_eval_attempt():
             totals = init_metric_dict(include_detailed_metrics=True, include_sliced_metrics=True)
-            cluster_totals = {}
-            batch_count = run_eval_loop(totals, cluster_totals)
-            return totals, batch_count, cluster_totals
+            cluster_metrics = ClusterMetricAccumulator()
+            batch_count = run_eval_loop(totals, cluster_metrics)
+            return totals, batch_count, cluster_metrics
 
-        totals, batch_count, cluster_totals = run_with_validation_retries(
+        totals, batch_count, cluster_metrics = run_with_validation_retries(
             run_eval_attempt,
             device_type=device.type,
             context='validation',
@@ -3107,49 +3077,14 @@ def train(
 
         metrics = finalize_metrics(totals)
         if collect_cluster_records:
-            metrics['_adaptive_cluster_records'] = finalize_adaptive_cluster_values(
-                cluster_totals
-            )
-        writer.add_scalar(f'{scalar_prefix}/loss', metrics['loss'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/policy_loss', metrics['policy_loss'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/aux_loss', metrics['aux_loss'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/rank_aux_raw_loss', metrics['rank_aux_raw_loss'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/rank_aux_weight_mean', metrics['rank_aux_weight_mean'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/opponent_turn_weight_mean', metrics['opponent_turn_weight_mean'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/danger_turn_weight_mean', metrics['danger_turn_weight_mean'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/search_distill_loss', metrics['search_distill_loss'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/search_teacher_gap', metrics['search_teacher_gap'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/search_active_fraction', metrics['search_active_fraction'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/search_hard_fraction', metrics['search_hard_fraction'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/action_quality_score', metrics['action_quality_score'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/scenario_quality_score', metrics['scenario_quality_score'], log_step)
-        if 'selection_quality_score' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/selection_quality_score', metrics['selection_quality_score'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/action_acc', metrics['action_acc'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/macro_action_acc', metrics['macro_action_acc'], log_step)
-        writer.add_scalar(f'{scalar_prefix}/rank_acc', metrics['rank_acc'], log_step)
-        if 'discard_nll' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/discard_nll', metrics['discard_nll'], log_step)
-        if 'chi_exact_nll' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/chi_exact_nll', metrics['chi_exact_nll'], log_step)
-        if 'discard_top3_acc' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/discard_top3_acc', metrics['discard_top3_acc'], log_step)
-        if 'opponent_aux_loss' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/opponent_aux_loss', metrics['opponent_aux_loss'], log_step)
-        if 'danger_aux_loss' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/danger_aux_loss', metrics['danger_aux_loss'], log_step)
-            writer.add_scalar(f'{scalar_prefix}/danger_any_loss', metrics['danger_any_loss'], log_step)
-            writer.add_scalar(f'{scalar_prefix}/danger_value_loss', metrics['danger_value_loss'], log_step)
-            writer.add_scalar(f'{scalar_prefix}/danger_player_loss', metrics['danger_player_loss'], log_step)
-        if 'opponent_shanten_macro_acc' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/opponent_shanten_macro_acc', metrics['opponent_shanten_macro_acc'], log_step)
-        if 'opponent_tenpai_macro_acc' in metrics:
-            writer.add_scalar(f'{scalar_prefix}/opponent_tenpai_macro_acc', metrics['opponent_tenpai_macro_acc'], log_step)
-        for name in decision_metric_names:
-            for suffix in ('balanced_acc', 'balanced_bce', 'pred_rate', 'target_rate'):
-                key = f'{name}_{suffix}'
-                if key in metrics:
-                    writer.add_scalar(f'{scalar_prefix}/{key}', metrics[key], log_step)
+            metrics['_adaptive_cluster_records'] = cluster_metrics.records()
+        write_metric_scalars(
+            writer,
+            scalar_prefix,
+            metrics,
+            log_step,
+            decision_metric_names=decision_metric_names,
+        )
         log_group_acc(f'{scalar_prefix}_acc', totals['group_stats'], log_step)
         log_decision_acc(f'{scalar_prefix}_decision', totals['decision_stats'], log_step)
         log_sliced_decision_metrics(f'{scalar_prefix}_decision_slice', totals['sliced_decision_stats'], log_step)
@@ -3867,7 +3802,7 @@ def train(
         )
         adaptive_should_stop = (
             adaptive_decision is not None
-            and adaptive_decision.action in {'transition', 'stop'}
+            and adaptive_decision.action in {'transition', 'stop', 'inconclusive'}
         )
         should_stop = (
             legacy_should_stop
@@ -3912,6 +3847,7 @@ def train(
             'scaler': scaler.state_dict(),
             'steps': steps,
             'optimizer_steps': optimizer_steps,
+            'auxiliary_optimizer_steps': optimizer_steps + auxiliary_step_offset,
             'skipped_optimizer_steps': skipped_optimizer_steps,
             'nonfinite_batches': nonfinite_batches,
             'epoch': epoch,
@@ -3941,6 +3877,7 @@ def train(
             'stage_label': stage_label,
             'checkpoint_label': checkpoint_label,
             'config': config,
+            **({'curriculum_probe': probe.state_dict()} if probe is not None else {}),
         }
 
     def save_latest_state(epoch, *, epoch_complete, reason):
@@ -3955,22 +3892,6 @@ def train(
     def save_named_state(state, checkpoint_path, *, label):
         atomic_torch_save(state, checkpoint_path)
         logging.info(f'saved {label} to {checkpoint_path}')
-
-    def write_json_atomically(target: Path, payload: dict[str, Any]):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = target.with_name(
-            f'.{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp'
-        )
-        try:
-            temp_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding='utf-8',
-                newline='\n',
-            )
-            os.replace(temp_path, target)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
 
     def save_candidate_portfolio(state, selection_metrics):
         if not candidate_portfolio_dir or candidate_portfolio_limit <= 0:
@@ -4054,7 +3975,7 @@ def train(
             'updated_at': datetime.now().isoformat(timespec='seconds'),
             'candidates': selected,
         })
-        write_json_atomically(manifest_path, manifest)
+        atomic_write_json(manifest_path, manifest)
         for entry in removed:
             if not entry.get('managed'):
                 continue
@@ -4080,8 +4001,18 @@ def train(
         atomic_torch_save(state, target)
         logging.info(f'saved convergence milestone checkpoint to {target}')
 
+    if probe is not None:
+        if not path.exists(state_file):
+            raise ValueError('matched probes require a prepared common-parent checkpoint')
+        probe.restore(state)
+        if optimizer_steps == 0 or optimizer_steps in probe.horizons:
+            probe.observe(optimizer_steps, evaluate, build_state, save_latest_state, start_epoch)
+        if optimizer_steps >= probe.stop_at:
+            return
+
     if (
-        steps > 0
+        probe is None
+        and steps > 0
         and val_every_steps > 0
         and validation_checks == 0
         and best_val_loss == float('inf')
@@ -4142,6 +4073,14 @@ def train(
                 EXTERNAL_PAUSE_EXIT_CODE,
             )
             raise SystemExit(EXTERNAL_PAUSE_EXIT_CODE)
+
+        if probe is not None:
+            should_stop = probe.after_update(
+                optimizer_steps, evaluate, build_state, save_latest_state, epoch,
+            )
+            for model in all_models:
+                model.train()
+            return should_stop
 
         post_step_actions = plan_post_optimizer_step_actions(
             steps=steps,
@@ -4227,6 +4166,8 @@ def train(
                 training=True,
             )
             if not bool(torch.isfinite(total_loss.detach()).item()):
+                if probe is not None:
+                    raise FloatingPointError('nonfinite probe loss; retain last atomic cursor checkpoint')
                 nonfinite_batches += 1
                 optimizer.zero_grad(set_to_none=True)
                 accum = 0
@@ -4278,43 +4219,7 @@ def train(
                     f'rank_acc={metrics["rank_acc"]:.4f} '
                     f'lr={current_lr:.3e}'
                 )
-                writer.add_scalar('train/loss', metrics['loss'], steps)
-                writer.add_scalar('train/policy_loss', metrics['policy_loss'], steps)
-                writer.add_scalar('train/aux_loss', metrics['aux_loss'], steps)
-                writer.add_scalar('train/rank_aux_raw_loss', metrics['rank_aux_raw_loss'], steps)
-                writer.add_scalar('train/rank_aux_weight_mean', metrics['rank_aux_weight_mean'], steps)
-                writer.add_scalar('train/opponent_turn_weight_mean', metrics['opponent_turn_weight_mean'], steps)
-                writer.add_scalar('train/danger_turn_weight_mean', metrics['danger_turn_weight_mean'], steps)
-                writer.add_scalar('train/search_distill_loss', metrics['search_distill_loss'], steps)
-                writer.add_scalar('train/search_teacher_gap', metrics['search_teacher_gap'], steps)
-                writer.add_scalar('train/search_active_fraction', metrics['search_active_fraction'], steps)
-                writer.add_scalar('train/search_hard_fraction', metrics['search_hard_fraction'], steps)
-                writer.add_scalar('train/action_acc', metrics['action_acc'], steps)
-                writer.add_scalar('train/macro_action_acc', metrics['macro_action_acc'], steps)
-                writer.add_scalar('train/rank_acc', metrics['rank_acc'], steps)
-                if 'action_quality_score' in metrics:
-                    writer.add_scalar('train/action_quality_score', metrics['action_quality_score'], steps)
-                if 'scenario_quality_score' in metrics:
-                    writer.add_scalar('train/scenario_quality_score', metrics['scenario_quality_score'], steps)
-                if 'selection_quality_score' in metrics:
-                    writer.add_scalar('train/selection_quality_score', metrics['selection_quality_score'], steps)
-                if 'discard_nll' in metrics:
-                    writer.add_scalar('train/discard_nll', metrics['discard_nll'], steps)
-                if 'chi_exact_nll' in metrics:
-                    writer.add_scalar('train/chi_exact_nll', metrics['chi_exact_nll'], steps)
-                if 'discard_top3_acc' in metrics:
-                    writer.add_scalar('train/discard_top3_acc', metrics['discard_top3_acc'], steps)
-                if 'opponent_aux_loss' in metrics:
-                    writer.add_scalar('train/opponent_aux_loss', metrics['opponent_aux_loss'], steps)
-                if 'danger_aux_loss' in metrics:
-                    writer.add_scalar('train/danger_aux_loss', metrics['danger_aux_loss'], steps)
-                    writer.add_scalar('train/danger_any_loss', metrics['danger_any_loss'], steps)
-                    writer.add_scalar('train/danger_value_loss', metrics['danger_value_loss'], steps)
-                    writer.add_scalar('train/danger_player_loss', metrics['danger_player_loss'], steps)
-                if 'opponent_shanten_macro_acc' in metrics:
-                    writer.add_scalar('train/opponent_shanten_macro_acc', metrics['opponent_shanten_macro_acc'], steps)
-                if 'opponent_tenpai_macro_acc' in metrics:
-                    writer.add_scalar('train/opponent_tenpai_macro_acc', metrics['opponent_tenpai_macro_acc'], steps)
+                write_metric_scalars(writer, 'train', metrics, steps)
                 writer.add_scalar('train/lr', current_lr, steps)
                 log_group_acc('train_acc', running['group_stats'], steps)
                 log_decision_acc('train_decision', running['decision_stats'], steps)

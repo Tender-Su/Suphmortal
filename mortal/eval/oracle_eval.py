@@ -4,18 +4,12 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from mortal.core.config_utils import get_dict_section as _cfg_section
 from mortal.eval.oracle_experiments import normalize_oracle_input_mode
 
 
 DEFAULT_DEPENDENCY_EVAL_MODES = ("true", "zero", "shuffled")
 DEFAULT_PT_RULE = (90, 45, 0, -135)
-
-
-def _cfg_section(config_dict: Any, key: str) -> dict[str, Any]:
-    if not isinstance(config_dict, dict):
-        return {}
-    section = config_dict.get(key, {})
-    return section if isinstance(section, dict) else {}
 
 
 def oracle_dependency_eval_cfg(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -119,4 +113,3 @@ def write_oracle_dependency_report(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-

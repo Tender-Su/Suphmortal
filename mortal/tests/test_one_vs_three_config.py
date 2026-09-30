@@ -1,12 +1,17 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+import torch
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mortal.eval.one_vs_three as one_vs_three
+from mortal.core.model import Brain, DQN
 
 
 class ResolveSeedCountTest(unittest.TestCase):
@@ -105,6 +110,42 @@ class PlanShardsTest(unittest.TestCase):
 
     def test_clamps_to_total_seed_count(self):
         self.assertEqual([1, 1], one_vs_three.plan_shards(2, 4))
+
+
+class LoadMortalEngineTest(unittest.TestCase):
+    def test_loads_legacy_batch_norm_dqn_checkpoint(self):
+        brain = Brain(version=4, conv_channels=32, num_blocks=1, Norm='BN')
+        dqn = DQN(version=4)
+        checkpoint = {
+            'mortal': brain.state_dict(),
+            'current_dqn': dqn.state_dict(),
+            'config': {
+                'control': {'version': 4},
+                'resnet': {'conv_channels': 32, 'num_blocks': 1},
+                'search': {'enabled': False},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / 'legacy.pth'
+            torch.save(checkpoint, state_file)
+            engine = one_vs_three.load_mortal_engine({
+                'state_file': str(state_file),
+                'device': 'cpu',
+                'enable_compile': False,
+                'enable_amp': False,
+                'enable_rule_based_agari_guard': True,
+                'name': 'legacy',
+            })
+
+        obs = np.zeros((1, 1012, 34), dtype=np.float32)
+        masks = np.zeros((1, 46), dtype=np.bool_)
+        masks[0, (0, 4, 45)] = True
+        actions, scores, _, _ = engine.react_batch(obs, masks, None)
+
+        self.assertEqual('dqn', engine.policy_kind)
+        self.assertIn(actions[0], (0, 4, 45))
+        self.assertTrue(np.isneginf(scores[0][1]))
+        self.assertTrue(any(isinstance(mod, torch.nn.BatchNorm1d) for mod in engine.brain.modules()))
 
 
 class ResolveEnableMetadataTest(unittest.TestCase):

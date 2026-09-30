@@ -1,198 +1,56 @@
-# 监督学习主线结论
+# 监督学习当前状态
 
-这份文档合并原来的监督学习核对状态、`P1` 统一口径和 formal triplet 结论，只保留当前仍然有效的单一真相。
+> 核验：2026-09-12 · 依据：冻结课程完成；C50k独立64k正式确认与两臂全量原始验收通过，未自动发布。
 
-## 当前结论
+保留现有 canonical 的发布身份。S70 和后续 Long-ABC 是候选；四月协议完成不代表此后的 SL 工作已经结束，也不代表 canonical 对所有候选的优势已被证明。
 
-- 核对日期：`2026-04-06`
-- 监督学习阶段已经完成
-- 当前 `P1` 协议 winner：
-  - `C_A2x_cosine_broad_to_recent_strong_24m_12m`
-- 当前已验证 winner 点位：
-  - `0.12 + A2x`
-- 当前正式 supervised winner：
-  - `anchor*1.0`
-- 当前第一替补：
-  - `opp_lean*0.85`
-- 当前 canonical supervised checkpoint：
-  - `./checkpoints/sl_canonical.pth`
-- `2026-04-12` 的补充核查：
-  - `sl_canonical.pth` 对旧 `baseline.pth` 的 `3000` 局 `1v3`
-  - `avg_rank=2.4917`
-  - `avg_pt=-0.075`
-  - 结论：当前 `sl_canonical` 至少可以认为与旧 `baseline` 基本接近，但还不是明显压制
+## 模型与证据
 
-## checkpoint 语义
+| 对象 | 当前身份 | 已有证据与边界 |
+| --- | --- | --- |
+| canonical / `anchor*1.0` | 已发布基准 | 历史 playoff 对 `opp_lean*0.85` 各 39,936 局，只差 0.087891 pt；combined stderr 0.598451，已触发 close-call |
+| S70 | 后续正式候选、当前 Oracle 的初始化来源 | checkpoint 内部 step 390000；保存的 full-recent NLL 为 0.447225，canonical 为 0.476685；历史输入指纹未完全匹配，不能据此直接发布 |
+| Long-ABC | C50k独立正式确认通过，未发布 | Phase C 于9月6日11:10在300k正常停止，低LR未改善配对phase-best；summary选择phase_b_adaptive_best，其actor与C50k相同。本轮C50k通过独立formal_1v3，sealed test未打开、发布身份未切换。见 [训练完成审计](../../logs/sl_monitor/20260907_112958_phase_c_completed.json) 与 [正式确认结果](../research/sl-formal-confirmation-result-2026-09-12.md) |
 
-- `state_file`
-  - 当前 run 的 live training / resume 状态
-- `best_state_file`
-  - canonical supervised winner 的导出别名
-- `best_loss_state_file`
-  - 当前默认下游种子别名
-  - 在当前 canonical 口径下应与 `best_state_file` 一起落到正式 winner
-- `best_acc_state_file`
-  - 作为 secondary candidate 保留
-- `best_rank_state_file`
-  - 作为 secondary candidate 保留
-- formal child run 内部仍保留 `best_loss / best_acc / best_rank`
-- 在线 RL 如果没有单独配置 `[online].init_state_file`，会继续回退到 `[supervised].best_loss_state_file -> [supervised].best_state_file`
+默认 canonical 路径为 `mortal/checkpoints/sl_canonical.pth`。本次读取的 S70 是 `logs/sl_fidelity/sl_anchor_longabc_s70_20260609_r1_1v3_compare/best_action_score.pth`。这些是本地实验产物，不是源码仓库必备文件。
 
-## 已冻结事实
+原始数值与适用范围见 [审计报告](../research/sl-rl-audit-2026-09-05.md)；更早阶段记录见 [旧 SL 状态快照](../archive/status/supervised-mainline-before-doc-refactor-2026-09-05.md)。
 
-### `P0`
+## 选择与发布
 
-官方 `top3` 顺序固定为：
+1. 固定数据窗口、validation 输入与 action mask，记录 checkpoint 内部 step、源码/配置/数据摘要。
+2. 用 `comparison_recent_loss` / `recent_policy_loss` 比较策略拟合；`full_loss` 含 auxiliary 项，只用于相应诊断，不能跨辅助权重直接裁决策略强弱。
+3. `protocol_decide`、`winner_refine` 和离线 checkpoint 选择用于筛选；正式 `1v3` 决定发布资格。`test_play=200/400` 是诊断。
+4. 最终候选在独立 seeds、同一对手、四座轮换上比较，报告配对差值与不确定性；重复挑选候选后还需独立确认。近似平局保持未决。
+5. 未完成正式确认前，候选不得覆盖 canonical。新发布记录必须能追到 checkpoint、配置、完整对局与决策文件。
 
-1. `C_A2y_cosine_broad_to_recent_strong_12m_6m`
-2. `C_A2x_cosine_broad_to_recent_strong_24m_12m`
-3. `C_A1x_cosine_broad_to_recent_mild_24m_12m`
+历史 selector 参数的统计校准与启发式边界保留在 [selector 审计](../archive/research/supervised/selector-stat-audit.md)。不把其训练 proxy 自动提升为牌力证据。
 
-### 三类辅助头内部 shape
+修复后的 adaptive 选择要求全部非劣护栏通过，样本不足、缺失或连续未决不得选优/晋级。[正式确认入口](../../mortal/eval/confirmation_protocol.py) 限制最多 3 个不同 actor；固定 canonical 对手、四座位、源码/native/权重指纹，先 A/A，再每臂 16k 筛选、一个 finalist 进入独立 64k 确认。完整 chunk 可续跑；到预算 CI 仍跨零则保留 canonical。
 
-- `rank = 18K_ROUND_ONLY`
-- `opp = HYBRID_GRAD`
-- `danger = 18K_STAT`
+本轮冻结 shortlist 为 S70、Phase C 100k、Phase C 50k；后者与 Phase B adaptive best 的 actor 相同，已去重。运行根为笔记本 `MahjongAI_1v3_bulk_20260907` 的 `logs/formal_confirmation_20260907_laptop_batch64_r1`，chunk64、256+256局 A/A 事件完全一致。固定种子、16k/64k预算和判定门槛保持冻结，旧chunk32产物未混入新manifest。完成状态见 [执行记录](../../logs/sl_curriculum_audit_20260907/sl_1v3_execution_state.json)，修复背景见 [实施报告](../research/sl-rl-fixes-2026-09-07.md)。
 
-### `P1` 主线结构
+用户要求的 finalist 对三家 S70 独立比较已完成，两臂各 2,000 局，A/A 通过；SL 平均 pt +0.7425、顺位 2.4905，pt 差值 95% 配对区间 [-2.1825, +3.6675]，尚不能确认强于 S70，不替代上面的 canonical 发布协议。见 [完整结果](../../logs/sl_curriculum_audit_20260907/s70_1v3_2000/comparison.json)。
 
-- `calibration -> protocol_decide -> winner_refine`
-- `ablation` 只保留为手动诊断轮
+四臂16k筛选、原始事件与身份均已核验，按冻结screen最高均值选择唯一finalist **C50k**；详见 [筛选核验](../../logs/sl_curriculum_audit_20260907/heartbeat_20260909_0710/report.md)。独立确认两臂各64k全部完成，C50k相对reference **+2.9313 pt，95%配对区间 [2.3801,3.4727]**，顺位2.458359；按冻结下界>0规则为 **qualified**。两臂16000组四座seed、全部原始事件/native名次与冻结身份通过，原decision逐字段复现。该区间不含训练seed或其他对手不确定性，canonical发布身份保持；见 [最终结果](../research/sl-formal-confirmation-result-2026-09-12.md)。
 
-## `P1` 唯一有效评估口径
+[课程预算审计](../research/sl-curriculum-budget-audit-2026-09-07.md) 确认旧 A/B/C 实际新增约 380/20/25 万步，且 B/C 固定池缩小、A→B 辅助目标改变、完整验证集不同。主树已补完整辅助配方继承（含 `supervised.aux`）、恢复系数校验和辅助 ramp 时钟保留。用户批准的 [机制方案](../research/sl-curriculum-mechanism-proposal-2026-09-07.md) 已迁至笔记本同一 parent 和匹配输入：两 seed 的 A/B/C 先 U1024 再 U4096，AC/CC 延迟迁移各 U4096，总上限 40960 次成功更新。保留 Adam/scaler/辅助时钟，固定 LR 5e-6，完整域轮换采样；不按 A/B/C 先后无限延长 patience。
 
-### 结果边界
+本轮 SL 已于9月10日正常结束，产物根为 `MahjongAI_sl_ordered_20260908/logs/sl_curriculum_probe/20260908_laptop_ordered_r1`。采用train/val有序准备进程4/4、每块四draw、验证文件批4、Rayon4；保留精确消费游标与迁移来源链，匹配吞吐提高65.8%。参数选择及恢复证据见 [实测报告](../../logs/sl_curriculum_audit_20260907/ordered_preparation_report_20260908.md)，最终验收见 [完成报告](../../logs/sl_curriculum_audit_20260907/heartbeat_20260910_0916/report.md)。
 
-- `protocol_decide` 负责协议 winner
-- `winner_refine` 负责 winner 协议内的 pre-formal 第一梯队
-- 官方 supervised winner 只由 `formal triplet -> formal_1v3` 产生
+两seed的A/B/C U1024均已完整结束。近期policy loss在两个seed中均为C低于B、B低于A，B/C相对A的主指标校正区间均越过改善阈值；但六个分支相对共同parent均未同时证明主指标增益和全部非劣条件，仍无课程推荐。统计按seed分别报告，未合并或提前选择；见 [短跨度汇总](../../logs/sl_curriculum_audit_20260907/heartbeat_20260908_1650/report.md)。
 
-### 排名核心
+两seed A/B/C U4096与AC–CC均未通过全部条件，十臂完整结果为 **inconclusive，无课程推荐**。第一seed AC–CC仅旧域非劣通过，第二seed三项均未过；复用旧统计，仅新增最后三个指标。见 [最终研究结果](../research/sl-curriculum-result-2026-09-10.md) 与 [全量验收](../../logs/sl_curriculum_audit_20260907/heartbeat_20260910_0916/report.md)。该结果不证明已劣化、现代数据无价值或模型达到全局上限。
 
-1. `ranking_mode = policy_quality`
-2. 主比较字段固定为 `recent_policy_loss`
-3. `eligible` 必须按 `protocol_arm` 组内判断，不能跨协议混排
-4. 组内先过门槛：
-   - `recent_policy_loss <= group_best_recent_policy_loss + 0.003`
-   - 如果存在 `old_regression_policy_loss`，再要求 `<= group_best_old_regression_policy_loss + 0.0035`
-5. 进入 `eligible` 后，再按以下顺序排序：
-   - `selection_quality_score`
-   - `-recent_policy_loss`
-   - `-old_regression_policy_loss`
+本轮累计40960成功updates、41943040成功决策，含15次AMP跳步的持久消费41958400；U1024不双计，重启丢失/重放的物理成本存在计数缺口。生产约0.296–0.299updates/s，完整验证约19–21分钟；最低可用RAM14.687GiB、显存峰值2595/8188MiB，见 [完整生产验收](../../logs/sl_curriculum_audit_20260907/C_U1024_acceptance_20260908/report.md)。SL与本轮独立正式确认均已结束；容量余量不代表各阶段吞吐最优。
 
-### 关键字段
+## 产物语义
 
-- `selection_quality_score = action_quality_score + 0.20 * scenario_quality_score`
-- 自动摘要里的 `cmp_policy` 对应 `recent_policy_loss`
-- 自动摘要里的 `full_loss(diag)` 对应 `full_recent_loss`
+| 字段或阶段 | 意义 |
+| --- | --- |
+| `[supervised].best_state_file` / `best_loss_state_file` | 当前 canonical 的下游导出约定；实际配置须一起核对 |
+| formal child 的 `best_loss / best_acc / best_rank` | 单次训练内部候选，名称本身不是正式发布判定 |
+| `latest` | 恢复模型与 optimizer / scaler / scheduler；data cursor / RNG 是否齐全须核对具体产物，不能仅凭文件名断言逐 batch 精确续跑 |
+| [自动 snapshot](supervised-fidelity-results.md) | runner 生成的单次运行摘要，不覆盖本页 |
 
-### 当前 `P1` 冻结配置
-
-- `calibration`
-  - `A2y-only + combo_only`
-- `protocol_decide`
-  - `coordinate_mode = projected_effective_from_budget_grid_v2`
-  - `total_budget_ratios = [0.09, 0.12]`
-  - `mixes = anchor / rank_lean / opp_lean / danger_lean`
-  - `ambiguity_mode = flip_or_gap`
-  - `gap_threshold = 0.001`
-- `winner_refine`
-  - 协议范围：`A2x`
-  - `center_mode = top_ranked_keep`
-  - `center_keep = 4`
-  - center：`anchor / rank_lean / opp_lean / danger_lean`
-  - `total_scale_factors = [0.85, 1.0, 1.15]`
-  - `transfer_delta = 0.01`
-  - `step_scale = 1.5`
-
-### 命名口径
-
-- center 只写：
-  - `anchor / rank_lean / opp_lean / danger_lean`
-- 全头统一缩放只写：
-  - `*0.85 / *1.0 / *1.15`
-- center 内部再分配只写：
-  - `rank+ / rank++ / opp- / danger++`
-- canonical 文档统一使用结构别名，不手写原始 `W_r..._o..._d...` 名字
-
-### calibration 输出如何被读取
-
-- `protocol_decide / winner_refine` 读取 `triple_combo_factor`
-- `drop_rank` 读取 `opp_danger_combo_factor`
-- `drop_opp` 读取 `rank_danger_combo_factor`
-- `drop_danger` 读取 `rank_opp_combo_factor`
-- `joint_combo_factor` 仍保留为 `opp_danger_combo_factor` 的 legacy alias
-
-## formal triplet -> 官方 winner
-
-### 当前 triplet
-
-送入 `formal_train` 的三个候选是：
-
-1. `opp_lean*0.85`
-2. `anchor*1.0`
-3. `opp_lean(rank--/danger++)`
-
-### child formal 结果
-
-- `3 / 3` child formal 已完成
-- `3 / 3` 的 `offline_checkpoint_winner` 都是 `best_loss`
-- cross-run offline 顺序：
-  1. `opp_lean*0.85`
-  2. `opp_lean(rank--/danger++)`
-  3. `anchor*1.0`
-- 关键标量：
-  - `opp_lean*0.85`
-    - `best_full_recent_loss = 0.480049`
-    - offline front-runner
-  - `opp_lean(rank--/danger++)`
-    - `best_full_recent_loss = 0.480872`
-    - hedge challenger
-  - `anchor*1.0`
-    - `best_full_recent_loss = 0.480868`
-    - `rank_acc` 最强
-
-### `formal_1v3` 最终顺序
-
-判据：
-
-- `avg_pt` 为主
-- `avg_rank` 为辅
-- 位次分：`90 / 45 / 0 / -135`
-
-最终顺序：
-
-1. `anchor*1.0`
-2. `opp_lean*0.85`
-3. `opp_lean(rank--/danger++)`
-
-### 运行长度
-
-- `phase_a / phase_b / phase_c = 45000 / 30000 / 15000`
-- `2026-04-05` 实测 wall-clock：
-  - 台式机单条约 `4.5 h`
-  - 笔记本单条约 `11.2 h`
-
-## Long-ABC 全动态续训
-
-- 目标仍是从头训练 `anchor*1.0`；`anchor` 的辅助头配比来自 P1 坐标搜索，且旧 formal triplet 最终由 `formal_1v3` 选中。
-- 不再预先指定 `phase_a / phase_b / phase_c` 的固定 steps。旧 `90k / 288k / 630k / 1.26M` 只保留为算力尺度参考，不再充当阶段切换条件。
-- 继续使用已验证的 `broad_to_recent + 24m_12m` A/B/C 数据课程，每 `10k` 做 monitor，每 `50k` 在同一 full-recent 集上做 current-vs-phase-best paired gate。
-- 只有连续两次 gate 的乐观 `95% CI` 都无法容纳有意义的 `policy_loss` 改善，并且 `action_accuracy` 与 `old_regression_policy_loss` 没有显著补偿，才进入下一数据阶段。
-- 阶段交接完整保留模型、AdamW、AMP scaler、scheduler 和 phase-best baseline；因为训练 split 改变，SL 明确重启该阶段的数据遍历，不伪装成可精确恢复的 data cursor。
-- 从成熟 A checkpoint 进入 B 时不重置到大 LR：读取来源 checkpoint 的实际 LR，以它为 warmup 起点，在 `5k` steps 内最多温和回热 `2x`。当前 A 最佳点对应 `5e-6 -> 1e-5`。
-- 最终阶段保留 checkpointed 动态 LR 候选层级直到 `1e-6`，但不是机械一路衰减。每个更低 LR 必须先在 paired gate 上刷新 phase-best，才有资格继续下探；若该层连续两次 gate 都没有有效改善，就停止并保留此前的 `adaptive_best`，避免后段越训越不动。
-- 长训可由 Apex supervisor 托管：检测到 `r5apex_dx12.exe` 后，SL 在当前 optimizer batch 边界原子保存 exact 状态并以退出码 `75` 释放 GPU；Apex 关闭后从该 checkpoint 自动恢复。课程阶段变更本来就会重启数据遍历，不把它表述成不存在的 SL sample cursor 精确恢复。
-- 代码入口是 `python -m mortal.supervised.run_sl_ab --ab adaptive --adaptive-curriculum-profile full_dynamic`。offline 只产生 finalist，最终发布仍由 `formal_1v3` 决定。
-- 长训产物未通过 `formal_1v3` 前不得覆盖 `sl_canonical.pth`；通过后才发布为下一版 supervised canonical。
-
-## 当前证据路径
-
-- 当前活跃监督学习 source run：
-  - `logs/sl_fidelity/sl_fidelity_p1_top3_cali_slim_20260329_001413/`
-- downstream coordinator run：
-  - `logs/sl_fidelity/sl_formal_triplet_20260405/`
-- downstream playoff run：
-  - `logs/sl_fidelity/sl_formal_triplet_20260405_winner_playoff_1v3/`
-- 自动 snapshot：
-  - `docs/status/supervised-fidelity-results.md`
+本轮计算与验收已完成，后续发布或新实验另行安排。命令见 [运行流程](../agent/workflows.md)，勿重启已完成的旧运行。

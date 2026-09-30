@@ -163,7 +163,7 @@ def observe_convergence(
         state['recent_metrics'] = []
         state['last_action'] = 'core'
         state['last_reason'] = (
-            f'cosine core active: {optimizer_steps:,}/'
+            f'core schedule active: {optimizer_steps:,}/'
             f'{config.core_optimizer_steps:,} optimizer steps'
         )
         return ConvergenceDecision(

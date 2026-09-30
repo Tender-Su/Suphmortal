@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -22,18 +23,53 @@ from mortal.data.oracle_value import (
     terminal_rank_delta_values_by_kyoku,
     terminal_rank_value_target,
     terminal_rank_values_by_player,
+    deterministic_state_fold_indices,
+    deterministic_game_id,
+    normalize_state_fold_backend,
 )
 from mortal.data.dataloader import (
     FileDatasetsIter,
     SupervisedFileDatasetsIter,
+    iter_loaded_gameplay_batches,
     normalize_value_reward_source,
     replay_param_version_from_path,
     rotate_values_to_relative_order,
     select_value_targets,
+    stable_source_game_id,
+    worker_init_fn,
 )
 
 
 class SupervisedFileDatasetsIterTests(unittest.TestCase):
+    def test_event_cache_bulk_loading_uses_one_native_call(self):
+        loader = Mock()
+        loader.load_log_files.return_value = [['game-a'], ['game-b']]
+        files = ['a.events.zst', 'b.events.zst']
+
+        batches = list(iter_loaded_gameplay_batches(
+            loader,
+            files,
+            bulk_event_cache=True,
+        ))
+
+        loader.load_log_files.assert_called_once_with(files)
+        self.assertEqual(
+            [('a.events.zst#0', ['game-a']), ('a.events.zst#1', ['game-b'])],
+            batches,
+        )
+
+    def test_event_cache_default_preserves_per_cache_source_names(self):
+        loader = Mock()
+        loader.load_log_files.side_effect = [[['game-a']], [['game-b']]]
+        files = ['a.events.zst', 'b.events.zst']
+
+        batches = list(iter_loaded_gameplay_batches(loader, files))
+
+        self.assertEqual(
+            [('a.events.zst', ['game-a']), ('b.events.zst', ['game-b'])],
+            batches,
+        )
+
     def test_rotate_values_to_relative_order_puts_self_first(self):
         values = np.array([[10.0, 20.0, 30.0, 40.0]], dtype=np.float32)
         rotated = rotate_values_to_relative_order(values, 2)
@@ -89,6 +125,31 @@ class SupervisedFileDatasetsIterTests(unittest.TestCase):
         self.assertTrue(kwargs['track_opponent_states'])
         self.assertFalse(kwargs['track_danger_labels'])
 
+    def test_supervised_validation_can_emit_stable_source_game_id(self):
+        dataset = SupervisedFileDatasetsIter(
+            version=4,
+            file_list=['dummy.json'],
+            emit_opponent_state_labels=False,
+            track_danger_labels=False,
+            emit_game_id=True,
+            shuffle_files=False,
+        )
+        dataset.buffer = []
+        dataset.loader = object()
+
+        with patch(
+            'mortal.data.dataloader.iter_loaded_gameplay_batches',
+            return_value=iter([('dummy.json', [_FakeGame()])]),
+        ):
+            dataset.populate_buffer(['dummy.json'])
+
+        self.assertEqual(2, len(dataset.buffer))
+        self.assertTrue(all(len(row) == 6 for row in dataset.buffer))
+        self.assertTrue(all(
+            int(row[-1]) == stable_source_game_id('dummy.json')
+            for row in dataset.buffer
+        ))
+
 
 class _FakeGrp:
     def take_feature(self):
@@ -134,6 +195,12 @@ class _FakeGame:
 
 
 class _FakeOracleGame(_FakeGame):
+    def take_full_at_kyoku_batch(self):
+        return np.array([0, 1], dtype=np.int64)
+
+    def take_sample_indices_batch(self):
+        return np.array([0, 1], dtype=np.int64)
+
     def take_invisible_obs_batch(self):
         return np.ones((2, 2, 34), dtype=np.float32)
 
@@ -422,6 +489,30 @@ class OracleTerminalValueDatasetTests(unittest.TestCase):
             np.array([-4.0, 0.0, 2.0, 2.0], dtype=np.float32),
         )
 
+    def test_oracle_validation_dataset_emits_stable_game_id(self):
+        dataset = OracleTerminalValueDataset(
+            version=4,
+            file_list=['dummy.json'],
+            pts=[6.0, 4.0, 2.0, 0.0],
+            file_batch_size=1,
+            shuffle_files=False,
+            emit_game_id=True,
+        )
+        buffer = []
+
+        with patch(
+            'mortal.data.oracle_value.iter_loaded_gameplay_batches',
+            return_value=iter([('dummy.json', [_FakeOracleGame()])]),
+        ):
+            dataset.populate_buffer(object(), ['dummy.json'], buffer)
+
+        self.assertEqual(deterministic_game_id('dummy.json'), int(buffer[0][-1]))
+        self.assertEqual(int(buffer[0][-1]), int(buffer[1][-1]))
+        self.assertNotEqual(
+            deterministic_game_id('dummy.json'),
+            deterministic_game_id('other.json'),
+        )
+
     def test_oracle_validation_dataset_does_not_shuffle_files_or_buffer(self):
         dataset = OracleTerminalValueDataset(
             version=4,
@@ -430,7 +521,9 @@ class OracleTerminalValueDatasetTests(unittest.TestCase):
             file_batch_size=1,
             shuffle_files=False,
         )
-        dataset.populate_buffer = Mock(side_effect=lambda _loader, files, buffer: buffer.extend(files))
+        dataset.populate_buffer = Mock(
+            side_effect=lambda _loader, files, buffer, **_kwargs: buffer.extend(files)
+        )
 
         with patch(
             'mortal.data.oracle_value.random.shuffle',
@@ -448,13 +541,190 @@ class OracleTerminalValueDatasetTests(unittest.TestCase):
             file_batch_size=1,
             shuffle_files=True,
         )
-        dataset.populate_buffer = Mock(side_effect=lambda _loader, files, buffer: buffer.extend(files))
+        dataset.populate_buffer = Mock(
+            side_effect=lambda _loader, files, buffer, **_kwargs: buffer.extend(files)
+        )
 
         with patch('mortal.data.oracle_value.random.shuffle') as shuffle:
             rows = list(dataset.load_files(augmented=False))
 
         self.assertEqual(['dummy.json'], rows)
         self.assertGreaterEqual(shuffle.call_count, 2)
+
+    def test_native_state_fold_is_configured_before_feature_loading(self):
+        dataset = OracleTerminalValueDataset(
+            version=4,
+            file_list=['dummy.json'],
+            pts=[6.0, 4.0, 2.0, 0.0],
+            file_batch_size=1,
+            shuffle_files=False,
+            state_fold_count=8,
+            state_fold_seed=99,
+            state_fold_backend='native_hash',
+        )
+        loader = Mock()
+        dataset.populate_buffer = Mock(
+            side_effect=lambda _loader, files, buffer, **_kwargs: buffer.extend(files)
+        )
+
+        with patch('mortal.data.oracle_value.GameplayLoader', return_value=loader):
+            rows = list(dataset.load_files(False, stream_pass=3))
+
+        self.assertEqual(['dummy.json'], rows)
+        loader.set_sample_fold.assert_called_once_with(8, 3, 99)
+
+    def test_native_state_fold_does_not_filter_decoded_rows_twice(self):
+        dataset = OracleTerminalValueDataset(
+            version=4,
+            file_list=['dummy.json'],
+            pts=[6.0, 4.0, 2.0, 0.0],
+            file_batch_size=1,
+            shuffle_files=False,
+            state_fold_count=64,
+            state_fold_backend='native_hash',
+        )
+        buffer = []
+
+        with patch(
+            'mortal.data.oracle_value.iter_loaded_gameplay_batches',
+            return_value=iter([('dummy.json', [_FakeOracleGame()])]),
+        ):
+            dataset.populate_buffer(object(), ['dummy.json'], buffer, state_fold_index=37)
+
+        self.assertEqual(2, len(buffer))
+
+    def test_state_fold_backend_aliases_are_explicit(self):
+        self.assertEqual('python_permutation', normalize_state_fold_backend('python'))
+        self.assertEqual('native_hash', normalize_state_fold_backend('native'))
+        with self.assertRaisesRegex(ValueError, 'unsupported state_fold_backend'):
+            normalize_state_fold_backend('magic')
+
+    def test_oracle_stream_resume_replays_current_chunk_then_continues_deterministically(self):
+        def make_dataset(resume_cursors=None):
+            dataset = OracleTerminalValueDataset(
+                version=4,
+                file_list=[f'{idx}.json' for idx in range(6)],
+                pts=[6.0, 4.0, 2.0, 0.0],
+                file_batch_size=1,
+                shuffle_files=True,
+                shuffle_seed=123,
+                resume_cursors=resume_cursors,
+                emit_progress=True,
+            )
+
+            def populate(_loader, files, buffer, *, progress_token=None, **_kwargs):
+                buffer.extend((filename, None, None, None, progress_token) for filename in files)
+
+            dataset.populate_buffer = Mock(side_effect=populate)
+            return dataset
+
+        full_rows = list(make_dataset().load_files(False, stream_pass=0))
+        resumed_rows = list(
+            make_dataset({0: (0, 2)}).load_files(
+                False,
+                stream_pass=0,
+                start_file_offset=2,
+            )
+        )
+
+        self.assertEqual([row[0] for row in full_rows[2:]], [row[0] for row in resumed_rows])
+        self.assertTrue(all(tuple(row[-1]) >= (0, 0, 2) for row in resumed_rows))
+
+    def test_oracle_workers_consume_disjoint_complete_file_shards(self):
+        def rows_for_worker(worker_id, resume_offset=0):
+            dataset = OracleTerminalValueDataset(
+                version=4,
+                file_list=[f'{idx}.json' for idx in range(12)],
+                pts=[6.0, 4.0, 2.0, 0.0],
+                file_batch_size=1,
+                shuffle_files=True,
+                shuffle_seed=123,
+                emit_progress=True,
+            )
+
+            def populate(_loader, files, buffer, *, progress_token=None, **_kwargs):
+                buffer.extend((filename, None, None, None, progress_token) for filename in files)
+
+            dataset.populate_buffer = Mock(side_effect=populate)
+            worker_info = Mock(id=worker_id, num_workers=2, seed=10_000 + worker_id)
+            with patch('mortal.data.oracle_value.get_worker_info', return_value=worker_info):
+                return list(dataset.load_files(
+                    False,
+                    stream_pass=0,
+                    start_file_offset=resume_offset,
+                ))
+
+        worker_0 = rows_for_worker(0)
+        worker_1 = rows_for_worker(1)
+        files_0 = [row[0] for row in worker_0]
+        files_1 = [row[0] for row in worker_1]
+
+        self.assertFalse(set(files_0) & set(files_1))
+        self.assertEqual({f'{idx}.json' for idx in range(12)}, set(files_0) | set(files_1))
+        self.assertEqual(files_0[2:], [row[0] for row in rows_for_worker(0, resume_offset=2)])
+        self.assertEqual(files_1[2:], [row[0] for row in rows_for_worker(1, resume_offset=2)])
+        self.assertTrue(all(int(row[-1][0]) == 0 for row in worker_0))
+        self.assertTrue(all(int(row[-1][0]) == 1 for row in worker_1))
+
+    def test_worker_init_does_not_pre_shard_oracle_file_list(self):
+        dataset = OracleTerminalValueDataset(
+            version=4,
+            file_list=[f'{idx}.json' for idx in range(8)],
+            pts=[6.0, 4.0, 2.0, 0.0],
+        )
+        worker_info = Mock(id=1, num_workers=2, dataset=dataset)
+
+        with (
+            patch('mortal.data.dataloader.maybe_configure_process_affinity'),
+            patch('mortal.data.dataloader.torch.utils.data.get_worker_info', return_value=worker_info),
+            patch('mortal.data.dataloader.torch.set_num_threads'),
+            patch('mortal.data.dataloader.torch.set_num_interop_threads'),
+        ):
+            worker_init_fn()
+
+        self.assertEqual([f'{idx}.json' for idx in range(8)], dataset.file_list)
+
+    def test_worker_init_still_shards_legacy_file_dataset(self):
+        dataset = SimpleNamespace(
+            file_list=[f'{idx}.json' for idx in range(8)],
+            rayon_num_threads=0,
+            worker_torch_num_threads=1,
+            worker_torch_num_interop_threads=1,
+        )
+        worker_info = Mock(id=1, num_workers=2, dataset=dataset)
+
+        with (
+            patch('mortal.data.dataloader.maybe_configure_process_affinity'),
+            patch('mortal.data.dataloader.torch.utils.data.get_worker_info', return_value=worker_info),
+            patch('mortal.data.dataloader.torch.set_num_threads'),
+            patch('mortal.data.dataloader.torch.set_num_interop_threads'),
+        ):
+            worker_init_fn()
+
+        self.assertEqual([f'{idx}.json' for idx in range(4, 8)], dataset.file_list)
+
+    def test_oracle_state_folds_are_deterministic_disjoint_and_complete(self):
+        kwargs = {
+            'size': 23,
+            'fold_count': 4,
+            'seed': 99,
+            'source_name': 'game.json',
+            'game_index': 0,
+            'player_id': 2,
+        }
+        folds = [
+            deterministic_state_fold_indices(fold_index=fold_index, **kwargs)
+            for fold_index in range(4)
+        ]
+
+        self.assertEqual(
+            folds[0].tolist(),
+            deterministic_state_fold_indices(fold_index=0, **kwargs).tolist(),
+        )
+        self.assertEqual(list(range(23)), sorted(np.concatenate(folds).tolist()))
+        for left in range(4):
+            for right in range(left + 1, 4):
+                self.assertFalse(set(folds[left]) & set(folds[right]))
 
 
 class FileDatasetsIterRewardTests(unittest.TestCase):

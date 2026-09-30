@@ -1,0 +1,88 @@
+{
+  "verified_at": "2026-09-30",
+  "scope": "Existing summary artifacts and source inspection only; no new training or evaluation.",
+  "interpretation": "Decisions below are outcomes under historical protocols. The user requests a fresh examination of the evaluation design and guardrails; these are not endorsed future requirements.",
+  "sl_curriculum": {
+    "status": "completed",
+    "arms": 10,
+    "successful_updates": 40960,
+    "historical_decision": "inconclusive",
+    "sources": [
+      "logs/sl_curriculum_audit_20260907/heartbeat_20260910_0916/frozen_curriculum_summary.json"
+    ],
+    "source_sha256": {
+      "logs/sl_curriculum_audit_20260907/heartbeat_20260910_0916/frozen_curriculum_summary.json": "12176fc8f5dd20cf10fc9aab8f9197503d5241749d2dbe4940d044d613ec62d9"
+    }
+  },
+  "sl_c50k_confirmation": {
+    "games_per_arm": 64000,
+    "delta_mean_pt": 2.931328125,
+    "paired_ci95": [
+      2.380060546875,
+      3.472734375
+    ],
+    "historical_decision": "qualified",
+    "scope": "Frozen C50k checkpoint versus three canonical opponents; no training-seed or opponent-population uncertainty",
+    "model_published": false,
+    "source": "logs/sl_curriculum_audit_20260907/heartbeat_20260912_0011/final_decision_verification.json",
+    "source_sha256": {
+      "logs/sl_curriculum_audit_20260907/heartbeat_20260912_0011/final_decision_verification.json": "3c5989fec3e2899a1e79f7715b30c8e72bfb08cb5fddd5729fe6b9c8cb05c193"
+    }
+  },
+  "riichilab": {
+    "completed_at_local": "2026-09-11T10:16:16+08:00",
+    "completed_games_local": 5784,
+    "rating_games_server": 5866,
+    "recorded_rating": 1965,
+    "requested_stop_rating": 1956,
+    "stop_reason": "rating_target_reached",
+    "source": "logs/external_model_eval/riichilab_s70_ranked_1000_20260809/progress.json",
+    "scope": "Stored platform result, not current ranking or a controlled strength comparison",
+    "source_sha256": {
+      "logs/external_model_eval/riichilab_s70_ranked_1000_20260809/progress.json": "d0e183548edefae3fa3c94eee37efdeb5401e2727a7f96f6c305ab3ad9ad8bbe"
+    }
+  },
+  "oracle": {
+    "updates_per_arm": 40000,
+    "historical_qualification_status": "not_established",
+    "sl_init_p0_mse": [
+      3.819599,
+      2.362675
+    ],
+    "sl_init_exact_zero_mse": [
+      0.08103,
+      1.11269
+    ],
+    "reward_points": [
+      2,
+      1,
+      0,
+      -3
+    ],
+    "gamma": 1,
+    "return_definition": "Final rank utility minus utility at current kyoku start; possible range [-5,5]",
+    "exact_zero": "Observed return target equals zero; distinct from the all-player zero-sum output constraint",
+    "source": "logs/oracle_critic_formal/matched_completion_20260908_r1/completion_audit.json",
+    "source_sha256": {
+      "logs/oracle_critic_formal/matched_completion_20260908_r1/completion_audit.json": "12582c84aee7091dd74ce60b001b629ac2cbbfd43d1c1cf10bc7f7199dff5c5b"
+    }
+  },
+  "ppo": {
+    "formal_training_started_in_available_evidence": false,
+    "resource_test_counted_steps": 256,
+    "resource_test_actual_adam_updates": 255,
+    "confirmed_code_issue": "Online loop advances optimizer_steps/scheduler after GradScaler.step without testing whether the update succeeded",
+    "source": "docs/research/rl-resource-tuning-2026-09-08.md",
+    "source_sha256": {
+      "docs/research/rl-resource-tuning-2026-09-08.md": "8b19a31a266c7f851b6ebc40e33e1c6cc7d02795642ce9a1fcd4479a9e15c911"
+    }
+  },
+  "excluded": [
+    "weights",
+    "datasets",
+    "raw game logs",
+    "sealed test payloads",
+    "credentials",
+    "chat transcripts"
+  ]
+}

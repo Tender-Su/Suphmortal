@@ -36,7 +36,7 @@ class OnlineMachineModesTests(unittest.TestCase):
                         "log_dir = './logs/train_play'",
                         "",
                         "[online.remote]",
-                        "host = '192.168.1.3'",
+                        "host = '192.0.2.10'",
                         "port = 5000",
                         "",
                         "[online.server]",
@@ -97,7 +97,7 @@ class OnlineMachineModesTests(unittest.TestCase):
                         "history_state_files = ['./checkpoints/h1.pth', './checkpoints/h2.pth']",
                         "",
                         "[online.remote]",
-                        "host = '192.168.1.3'",
+                        "host = '192.0.2.10'",
                         "port = 5000",
                         "",
                         "[online.server]",
@@ -131,7 +131,7 @@ class OnlineMachineModesTests(unittest.TestCase):
             built = online_machine_modes.build_worker_mode_config(
                 base_config,
                 runtime_root=runtime_root,
-                remote_host="192.168.1.9",
+                remote_host="192.0.2.20",
                 remote_port=5200,
             )
 
@@ -140,7 +140,7 @@ class OnlineMachineModesTests(unittest.TestCase):
             self.assertEqual(expected_champion, built["baseline"]["train"]["champion_state_file"])
             self.assertEqual(expected_anchor, built["baseline"]["train"]["anchor_state_file"])
             self.assertEqual(expected_history, built["baseline"]["train"]["history_state_files"])
-            self.assertEqual("192.168.1.9", built["online"]["remote"]["host"])
+            self.assertEqual("192.0.2.20", built["online"]["remote"]["host"])
             self.assertEqual(5200, built["online"]["remote"]["port"])
             self.assertEqual(str((runtime_root / "logs" / "train_play" / "default").resolve()), built["train_play"]["default"]["log_dir"])
             self.assertEqual(str((runtime_root / "server" / "buffer").resolve()), built["online"]["server"]["buffer_dir"])

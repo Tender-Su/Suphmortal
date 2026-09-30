@@ -2452,27 +2452,15 @@ def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
     dispatch_state = load_dispatch_state(dispatch_state_path)
     local_label = str(dispatch_state.get('local_label') or common_dispatch.DEFAULT_LOCAL_LABEL)
     remote_label = dispatch_state.get('remote_label')
-    if dispatch_control_path.exists():
-        control_state = common_dispatch.load_dispatch_control(dispatch_control_path)
-    else:
-        control_state = common_dispatch.initialize_dispatch_control_state(
-            local_label=local_label,
-            remote_label=remote_label,
-            remote_launch_mode=common_dispatch.DEFAULT_REMOTE_LAUNCH_MODE,
-        )
-    common_dispatch.ensure_control_state_workers(
-        control_state=control_state,
+    entry = common_dispatch.update_worker_pause_control(
+        dispatch_control_path,
         local_label=local_label,
         remote_label=remote_label,
         remote_launch_mode=common_dispatch.DEFAULT_REMOTE_LAUNCH_MODE,
-    )
-    entry = common_dispatch.set_worker_pause(
-        control_state,
         worker_label=args.worker_label,
         paused=paused,
         stop_active=bool(getattr(args, 'stop_active', False)),
     )
-    common_dispatch.write_dispatch_control(dispatch_control_path, control_state)
     payload = {
         'round_kind': ROUND_KIND_FORMAL_1V3,
         'run_name': args.run_name,

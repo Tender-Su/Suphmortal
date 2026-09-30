@@ -1,5 +1,7 @@
 # 2026-03-28 项目进度与人机协同方法复盘
 
+> 历史复盘 · 整理：2026-09-05。正文保留当时的个人判断和协作语境，不作为当前运行依据。当前入口见 [文档地图](../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 ## 1. 这份文档要解决什么问题
 
 这个项目一开始就是个人兴趣项目，不是为了先做一个最省事的 demo，而是为了同时训练三种能力：
@@ -56,9 +58,9 @@
 
 当前仓库里的对应风格也已经存在，例如：
 
-- [engineering-playbook.md](../research/supervised/engineering-playbook.md)
-- [p1-aux-adjustment-2026-03-22.md](../research/supervised/p1-aux-adjustment-2026-03-22.md)
-- [a2y-aux-shape-freeze-2026-03-25.md](../research/supervised/a2y-aux-shape-freeze-2026-03-25.md)
+- [engineering-playbook.md](../archive/research/supervised/engineering-playbook.md)
+- [p1-aux-adjustment-2026-03-22.md](../archive/research/supervised/p1-aux-adjustment-2026-03-22.md)
+- [a2y-aux-shape-freeze-2026-03-25.md](../archive/research/supervised/a2y-aux-shape-freeze-2026-03-25.md)
 
 结论：
 

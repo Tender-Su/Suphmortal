@@ -273,146 +273,149 @@ impl Stat {
         let mut cur_oya = 0;
         let mut jun = 0;
         let mut fuuro_num = 0;
-        events.iter().for_each(|ev| match *ev {
-            Event::StartKyoku { oya, scores, .. } => {
-                stat.round += 1;
-                cur_scores = scores;
-                riichi_declared = false;
-                riichi_accepted = false;
-                others_riichi_declared = false;
-                cur_oya = oya;
-                if cur_oya == player_id {
-                    stat.oya += 1;
-                }
-                jun = 0;
-                fuuro_num = 0;
-            }
-
-            Event::Dahai { actor, .. } if actor == player_id => {
-                jun += 1;
-            }
-
-            Event::Chi { actor, .. }
-            | Event::Pon { actor, .. }
-            | Event::Daiminkan { actor, .. }
-                if actor == player_id =>
-            {
-                fuuro_num += 1;
-            }
-
-            Event::Reach { actor } => {
-                if actor == player_id {
-                    riichi_declared = true;
-                    stat.riichi += 1;
-                    stat.riichi_jun += jun;
+        for ev in events {
+            match *ev {
+                Event::StartKyoku { oya, scores, .. } => {
+                    stat.round += 1;
+                    cur_scores = scores;
+                    riichi_declared = false;
+                    riichi_accepted = false;
+                    others_riichi_declared = false;
+                    cur_oya = oya;
                     if cur_oya == player_id {
-                        stat.riichi_as_oya += 1;
+                        stat.oya += 1;
                     }
-                    if others_riichi_declared {
-                        stat.chasing_riichi += 1;
-                    }
-                } else if riichi_declared {
-                    stat.riichi_got_chased += 1;
-                } else {
-                    others_riichi_declared = true;
+                    jun = 0;
+                    fuuro_num = 0;
                 }
-            }
 
-            Event::ReachAccepted { actor } => {
-                cur_scores[actor as usize] -= 1000;
-                if actor == player_id {
-                    riichi_accepted = true;
+                Event::Dahai { actor, .. } if actor == player_id => {
+                    jun += 1;
                 }
-            }
 
-            Event::Hora {
-                actor,
-                target,
-                deltas,
-                ..
-            } => {
-                let deltas = deltas.expect("deltas is required for analyzing");
-                vec_add_assign(&mut cur_scores, &deltas);
+                Event::Chi { actor, .. }
+                | Event::Pon { actor, .. }
+                | Event::Daiminkan { actor, .. }
+                    if actor == player_id =>
+                {
+                    fuuro_num += 1;
+                }
 
-                if actor == player_id {
-                    let point = deltas[player_id as usize] as i64 - riichi_accepted as i64 * 1000;
-                    stat.agari += 1;
-                    stat.agari_jun += jun;
-                    if cur_oya == player_id {
-                        stat.agari_as_oya += 1;
-                        stat.agari_point_oya += point;
+                Event::Reach { actor } => {
+                    if actor == player_id {
+                        riichi_declared = true;
+                        stat.riichi += 1;
+                        stat.riichi_jun += jun;
+                        if cur_oya == player_id {
+                            stat.riichi_as_oya += 1;
+                        }
+                        if others_riichi_declared {
+                            stat.chasing_riichi += 1;
+                        }
+                    } else if riichi_declared {
+                        stat.riichi_got_chased += 1;
                     } else {
-                        stat.agari_point_ko += point;
+                        others_riichi_declared = true;
                     }
+                }
 
-                    if riichi_accepted {
-                        stat.riichi_agari += 1;
-                        stat.riichi_agari_jun += jun;
-                        stat.riichi_agari_point += point;
-                        stat.riichi_point += point;
-                    } else if fuuro_num > 0 {
-                        stat.fuuro_agari += 1;
-                        stat.fuuro_agari_jun += jun;
-                        stat.fuuro_agari_point += point;
-                        stat.fuuro_point += point;
-                    } else {
-                        stat.dama_agari += 1;
-                        stat.dama_agari_jun += jun;
-                        stat.dama_agari_point += point;
+                Event::ReachAccepted { actor } => {
+                    cur_scores[actor as usize] -= 1000;
+                    if actor == player_id {
+                        riichi_accepted = true;
                     }
+                }
 
-                    if point >= Point::yakuman(cur_oya == player_id, 1).ron as i64 {
-                        stat.yakuman += 1;
+                Event::Hora {
+                    actor,
+                    target,
+                    deltas,
+                    ..
+                } => {
+                    let deltas = deltas.expect("deltas is required for analyzing");
+                    vec_add_assign(&mut cur_scores, &deltas);
+
+                    if actor == player_id {
+                        let point =
+                            deltas[player_id as usize] as i64 - riichi_accepted as i64 * 1000;
+                        stat.agari += 1;
+                        stat.agari_jun += jun;
+                        if cur_oya == player_id {
+                            stat.agari_as_oya += 1;
+                            stat.agari_point_oya += point;
+                        } else {
+                            stat.agari_point_ko += point;
+                        }
+
+                        if riichi_accepted {
+                            stat.riichi_agari += 1;
+                            stat.riichi_agari_jun += jun;
+                            stat.riichi_agari_point += point;
+                            stat.riichi_point += point;
+                        } else if fuuro_num > 0 {
+                            stat.fuuro_agari += 1;
+                            stat.fuuro_agari_jun += jun;
+                            stat.fuuro_agari_point += point;
+                            stat.fuuro_point += point;
+                        } else {
+                            stat.dama_agari += 1;
+                            stat.dama_agari_jun += jun;
+                            stat.dama_agari_point += point;
+                        }
+
+                        if point >= Point::yakuman(cur_oya == player_id, 1).ron as i64 {
+                            stat.yakuman += 1;
+                        }
+                    } else if target == player_id {
+                        let point = deltas[player_id as usize] as i64;
+                        stat.houjuu += 1;
+                        stat.houjuu_jun += jun;
+                        if cur_oya == actor {
+                            stat.houjuu_to_oya += 1;
+                            stat.houjuu_point_to_oya += point;
+                        } else {
+                            stat.houjuu_point_to_ko += point;
+                        }
+
+                        if riichi_declared {
+                            stat.riichi_houjuu += 1;
+                            stat.riichi_point += point;
+                        } else if fuuro_num > 0 {
+                            stat.fuuro_houjuu += 1;
+                            stat.fuuro_point += point;
+                        }
                     }
-                } else if target == player_id {
+                }
+
+                Event::Ryukyoku { deltas } => {
+                    let deltas = deltas.expect("deltas is required for analyzing");
+                    vec_add_assign(&mut cur_scores, &deltas);
+
                     let point = deltas[player_id as usize] as i64;
-                    stat.houjuu += 1;
-                    stat.houjuu_jun += jun;
-                    if cur_oya == actor {
-                        stat.houjuu_to_oya += 1;
-                        stat.houjuu_point_to_oya += point;
-                    } else {
-                        stat.houjuu_point_to_ko += point;
-                    }
-
-                    if riichi_declared {
-                        stat.riichi_houjuu += 1;
-                        stat.riichi_point += point;
+                    stat.ryukyoku += 1;
+                    stat.ryukyoku_point += point;
+                    if riichi_accepted {
+                        stat.riichi_ryukyoku += 1;
+                        stat.riichi_point += point - 1000;
                     } else if fuuro_num > 0 {
-                        stat.fuuro_houjuu += 1;
                         stat.fuuro_point += point;
                     }
+
+                    if point >= 8000 {
+                        stat.nagashi_mangan += 1;
+                    }
                 }
+
+                Event::EndKyoku => {
+                    if fuuro_num > 0 {
+                        stat.fuuro += 1;
+                        stat.fuuro_num += fuuro_num;
+                    }
+                }
+
+                _ => (),
             }
-
-            Event::Ryukyoku { deltas } => {
-                let deltas = deltas.expect("deltas is required for analyzing");
-                vec_add_assign(&mut cur_scores, &deltas);
-
-                let point = deltas[player_id as usize] as i64;
-                stat.ryukyoku += 1;
-                stat.ryukyoku_point += point;
-                if riichi_accepted {
-                    stat.riichi_ryukyoku += 1;
-                    stat.riichi_point += point - 1000;
-                } else if fuuro_num > 0 {
-                    stat.fuuro_point += point;
-                }
-
-                if point >= 8000 {
-                    stat.nagashi_mangan += 1;
-                }
-            }
-
-            Event::EndKyoku => {
-                if fuuro_num > 0 {
-                    stat.fuuro += 1;
-                    stat.fuuro_num += fuuro_num;
-                }
-            }
-
-            _ => (),
-        });
+        }
 
         let rk = Rankings::new(cur_scores);
 

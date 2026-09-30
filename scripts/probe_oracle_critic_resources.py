@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
         description="Probe Oracle critic pretrain throughput and CPU/GPU/memory pressure."
     )
     parser.add_argument("--name", required=True)
+    parser.add_argument("--run-name", default="")
     parser.add_argument("--base-config", default="mortal/config.toml")
     parser.add_argument("--output-root", default="logs/oracle_critic_resource_probe")
     parser.add_argument("--python-exe", default=sys_executable())
@@ -71,12 +72,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=30)
     parser.add_argument("--save-every", type=int, default=1000000)
     parser.add_argument("--val-every-steps", type=int, default=1000000)
+    parser.add_argument("--dependency-val-every-steps", type=int, default=0)
     parser.add_argument("--val-batches", type=int, default=1)
     parser.add_argument("--max-train-files", type=int, default=256)
     parser.add_argument("--max-val-files", type=int, default=64)
+    parser.add_argument(
+        "--full-file-pool",
+        action="store_true",
+        help="Use the base config train/val file pool instead of probe-size file caps.",
+    )
     parser.add_argument("--sample-interval", type=float, default=2.0)
     parser.add_argument("--post-target-wait-sec", type=float, default=4.0)
     parser.add_argument("--fresh", action="store_true", default=True)
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Write the case config without launching the resource monitor.",
+    )
     return parser.parse_args()
 
 
@@ -134,7 +146,7 @@ def resolve_mortal_path(path_text: str) -> str:
 def make_case_config(base_cfg: dict[str, Any], case_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     cfg = deepcopy(base_cfg)
     pretrain_cfg = cfg.setdefault("oracle_critic_pretrain", {})
-    run_name = f"resource_probe_{args.name}"
+    run_name = args.run_name or f"resource_probe_{args.name}"
     init_state_file = args.init_state_file or str(pretrain_cfg.get("init_state_file", ""))
 
     pretrain_cfg.update(
@@ -157,11 +169,15 @@ def make_case_config(base_cfg: dict[str, Any], case_dir: Path, args: argparse.Na
             "log_every": int(args.log_every),
             "save_every": int(args.save_every),
             "val_every_steps": int(args.val_every_steps),
+            "dependency_val_every_steps": int(args.dependency_val_every_steps),
             "val_batches": int(args.val_batches),
             "max_train_files": int(args.max_train_files),
             "max_val_files": int(args.max_val_files),
         }
     )
+    if args.full_file_pool:
+        pretrain_cfg.pop("max_train_files", None)
+        pretrain_cfg.pop("max_val_files", None)
     if init_state_file:
         pretrain_cfg["init_state_file"] = resolve_mortal_path(init_state_file)
     if args.teacher_state_file:
@@ -252,6 +268,38 @@ foreach ($proc in $processes) {{
     }
 
 
+def query_tree_cpu_percent(pids: set[int]) -> float | None:
+    if not pids:
+        return None
+    pid_filter = ",".join(str(pid) for pid in sorted(pids))
+    script = rf"""
+$ErrorActionPreference = 'SilentlyContinue'
+$target = @({pid_filter})
+$proc = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+    Where-Object {{ $target -contains [int]$_.IDProcess }}
+$sum = 0.0
+foreach ($item in $proc) {{
+    $sum += [double]$item.PercentProcessorTime
+}}
+[pscustomobject]@{{ tree_cpu_percent = $sum }} | ConvertTo-Json -Compress
+"""
+    try:
+        proc = subprocess.run(
+            [POWERSHELL_EXE, "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
+        text = proc.stdout.strip()
+        if text:
+            payload = json.loads(text)
+            return float(payload["tree_cpu_percent"])
+    except Exception:
+        pass
+    return None
+
+
 def merge_windows_and_tree_metrics(root_pid: int) -> tuple[dict[str, Any], set[int]]:
     windows_metrics, pids = current_pid_set(root_pid)
     tree_metrics = query_tree_process_snapshot(root_pid)
@@ -267,6 +315,9 @@ def merge_windows_and_tree_metrics(root_pid: int) -> tuple[dict[str, Any], set[i
     }
     if tree_pids:
         pids = tree_pids
+    tree_cpu_percent = query_tree_cpu_percent(pids)
+    if tree_cpu_percent is not None:
+        windows_metrics["tree_cpu_percent"] = tree_cpu_percent
     for key in ("process_count", "tree_rss_gb", "tree_private_gb"):
         value = tree_metrics.get(key)
         if value is not None:
@@ -274,7 +325,7 @@ def merge_windows_and_tree_metrics(root_pid: int) -> tuple[dict[str, Any], set[i
     return windows_metrics, pids
 
 
-def run_probe(args: argparse.Namespace) -> dict[str, Any]:
+def prepare_case(args: argparse.Namespace) -> tuple[Path, Path]:
     output_root = resolve_config_path(args.output_root)
     case_dir = output_root / args.name
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -283,6 +334,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     cfg = make_case_config(base_cfg, case_dir, args)
     config_path = case_dir / "config.toml"
     write_toml_file(config_path, cfg)
+    return case_dir, config_path
+
+
+def run_probe(args: argparse.Namespace) -> dict[str, Any]:
+    case_dir, config_path = prepare_case(args)
 
     env = os.environ.copy()
     env["MORTAL_CFG"] = str(config_path)
@@ -310,6 +366,23 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     started_at = time.time()
     last_sample_at = 0.0
     target_seen_at: float | None = None
+    live_console_path = case_dir / "console.live.txt"
+    live_path = case_dir / "live.json"
+
+    def write_live_snapshot() -> None:
+        latest_sample = samples[-1] if samples else {}
+        atomic_write_text(live_console_path, console_text.replace("\r", "\n"))
+        atomic_write_json(
+            live_path,
+            {
+                "name": args.name,
+                "elapsed_sec": round(time.time() - started_at, 3),
+                "latest_step": latest_step(console_text),
+                "returncode": proc.poll(),
+                "training": parse_training_summary(console_text),
+                "last_sample": latest_sample,
+            },
+        )
 
     while True:
         drained = False
@@ -345,6 +418,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
             last_sample_at = now
+            write_live_snapshot()
 
         should_force_stop_at_target = int(args.target_step) < int(args.max_steps)
         if (
@@ -431,6 +505,18 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    if args.prepare_only:
+        case_dir, config_path = prepare_case(args)
+        print(json.dumps(
+            {
+                "name": args.name,
+                "case_dir": str(case_dir),
+                "config_path": str(config_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return
     summary = run_probe(args)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

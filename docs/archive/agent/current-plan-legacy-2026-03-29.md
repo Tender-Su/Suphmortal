@@ -1,5 +1,7 @@
 # 最强麻将 AI 当前计划
 
+> 历史归档 · 归档整理：2026-09-05。正文保留当时的事实、判断和命令，不作为当前运行依据。当前入口见 [文档地图](../../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 > Archive note (`2026-04-04`)：
 > 本文档只保留 `2026-03-29` 当时的阶段判断，不能当当前主线入口。
 > 其中 `监督学习阶段 / P2` checkpoint 去重层已从当前主线删除；当前 `formal` 直接接在 `P1 winner_refine` 之后，不读取任何 `P2` 输出。
@@ -13,8 +15,8 @@
 - `README.md`：项目简介和快速启动
 - `docs/README.md`：给你看的文档总索引
 - `docs/status/supervised-mainline.md`：人工核对后的当前监督学习主线结论
-- `docs/research/stage0/grp-experience.md`：`Stage 0` 的架构、精度与训练配置实验记录
-- `docs/research/supervised/engineering-playbook.md`：`监督学习阶段` 排障经验
+- `docs/archive/research/stage0/grp-experience.md`：`Stage 0` 的架构、精度与训练配置实验记录
+- `docs/archive/research/supervised/engineering-playbook.md`：`监督学习阶段` 排障经验
 - `docs/status/supervised-fidelity-results.md`：监督学习阶段 `fidelity / P0 / P1` 的自动生成短结果
 - 本文档：当前最强方案、已定主线、待做 A/B
 
@@ -34,7 +36,7 @@
 - `latest` 只用于断点续训，不用于默认下游
 - 效率优先 fallback：`256x3`
 - `512x4` 是当前最高优先级的大模型继续探索候选
-- 详细实验记录见 `docs/research/stage0/grp-experience.md`
+- 详细实验记录见 `docs/archive/research/stage0/grp-experience.md`
 
 ### 3. 监督学习阶段（监督预训练）主线
 
@@ -103,7 +105,7 @@
   - 三类调度器为 `plateau / cosine / phasewise`
   - 其中 `phasewise` 在当前三阶段实现里已经等价于 `warmup + cosine + plateau`
   - 不再把 `AB1` 与 `AB234` 人为拆开后再拼接成主线
-- 详细实验记录见 `docs/research/supervised/engineering-playbook.md`
+- 详细实验记录见 `docs/archive/research/supervised/engineering-playbook.md`
 
 ### 4. 监督学习阶段 + 监督学习阶段 联合主线
 
@@ -333,7 +335,7 @@
 - `监督学习阶段`：`P1` 的主线 winner 选择（`protocol_decide / winner_refine / ablation / final_compare`）继续使用多 seed 聚合；单 seed 只作排错或方向判断，不直接宣告 winner
 - `监督学习阶段`：`P1 calibration` 本身是“量纲定标”而不是“winner 判决”；默认先依赖单 seed + 多 batch 中位数探针，只有当 `loss/grad` 两条轴给出的排序冲突、或不同协议之间定标结果波动过大时，才把 calibration 升级到和 winner 相同的 3-seed 级别
 - `监督学习阶段`：`phase-wise auxiliary schedule` 暂不直接进主线；只有在固定 `P1` 静态权重基线后，通过受控 A/B 同时打赢静态方案和小预算 `监督学习阶段 transfer`，才允许升级为默认主线
-- `监督学习阶段`：当前默认执行方案为“保真版”，详见 `docs/research/supervised/engineering-playbook.md`
+- `监督学习阶段`：当前默认执行方案为“保真版”，详见 `docs/archive/research/supervised/engineering-playbook.md`
 - action-side 综合评分权重
 - `best_loss` / `best_acc` / `best_rank` 对下游 `监督学习阶段` 的迁移差异
 - 新 `监督学习阶段`：`oracle-dropout` 是否应使用 `P0` 的 `top3` 全部复筛，还是先在单一 backbone 上筛损失设计

@@ -104,6 +104,29 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         self.assertFalse(entry['paused'])
         self.assertFalse(entry['interrupt_requested'])
 
+    def test_update_worker_pause_control_initializes_and_persists_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            control_path = Path(temp_dir) / 'control.json'
+
+            entry = distributed.update_worker_pause_control(
+                control_path,
+                local_label='desktop',
+                remote_label='laptop',
+                remote_launch_mode='interactive_window',
+                worker_label='laptop',
+                paused=True,
+                stop_active=True,
+            )
+
+            self.assertTrue(entry['paused'])
+            self.assertTrue(entry['interrupt_requested'])
+            persisted = fidelity.load_json(control_path)
+            self.assertTrue(persisted['workers']['laptop']['paused'])
+            self.assertEqual(
+                'interactive_window',
+                persisted['workers']['laptop']['launch_mode'],
+            )
+
     def test_reset_task_after_operator_interrupt_requeues_without_consuming_retry_budget(self):
         task_state = {
             'status': 'running',
@@ -143,21 +166,21 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
 
         command = dispatch_module.build_remote_python_command(
             worker=worker,
-            script_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py'),
-            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
+            script_path=Path(distributed.__file__),
+            remote_result_path=Path(r'C:\Users\fixture_user\Desktop\MahjongAI\logs\result.json'),
             command_args=['run-task', '--run-name', 'demo'],
         )
 
         self.assertEqual('ssh', command[0])
         script = dispatch_module.decode_remote_powershell_command_arg(command[-1])
         self.assertIn(
-            r"C:\Users\numbe\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py",
+            r"C:\Users\fixture_user\Desktop\MahjongAI\mortal\supervised\run_sl_winner_refine_distributed.py",
             script,
         )
         self.assertIn('$env:PYTHONPATH', script)
@@ -171,8 +194,8 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
         task_state = {
             'task_id': 'seed1__s1__demo_arm',
@@ -184,8 +207,8 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             worker=worker,
             run_name='demo_run',
             task_state=task_state,
-            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
-            remote_runtime_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\runtime\seed1__s1__demo_arm'),
+            remote_result_path=Path(r'C:\Users\fixture_user\Desktop\MahjongAI\logs\result.json'),
+            remote_runtime_root=Path(r'C:\Users\fixture_user\Desktop\MahjongAI\logs\runtime\seed1__s1__demo_arm'),
             screening_overrides={
                 'num_workers': 4,
                 'file_batch_size': 10,
@@ -201,7 +224,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
         self.assertIn('-EncodedCommand', command)
         script = dispatch_module.decode_remote_powershell_command_arg(command[-1])
         self.assertIn(
-            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
+            r"C:\Users\fixture_user\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
             script,
         )
         self.assertIn('-PythonArgsBase64', script)
@@ -361,7 +384,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
             task_state = {
                 'status': 'running',
                 'remote_task_name': 'MahjongAI-WinnerRefine-seed1__s1__demo_arm',
-                'remote_runtime_root': r'C:\Users\numbe\Desktop\MahjongAI\logs\demo_run\distributed\remote_runtime\seed1__s1__demo_arm',
+                'remote_runtime_root': r'C:\Users\fixture_user\Desktop\MahjongAI\logs\demo_run\distributed\remote_runtime\seed1__s1__demo_arm',
             }
             active = dispatch_module.ActiveTask(
                 worker=dispatch_module.WorkerSpec(
@@ -369,7 +392,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
                     label='laptop',
                     python='python',
                     host='mahjong-laptop',
-                    ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+                    ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
                 ),
                 stage_name='seed1',
                 task_id='seed1__s1__demo_arm',
@@ -378,7 +401,7 @@ class WinnerRefineDistributedTests(unittest.TestCase):
                 log_path=Path(tmp_dir) / 'task.log',
                 local_result_path=Path(tmp_dir) / 'result.json',
                 remote_result_path=Path(
-                    r'C:\Users\numbe\Desktop\MahjongAI\logs\demo_run\distributed\remote_results\seed1__s1__demo_arm.json'
+                    r'C:\Users\fixture_user\Desktop\MahjongAI\logs\demo_run\distributed\remote_results\seed1__s1__demo_arm.json'
                 ),
             )
 

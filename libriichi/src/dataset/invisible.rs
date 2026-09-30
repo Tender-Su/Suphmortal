@@ -11,6 +11,7 @@ use std::mem;
 use ndarray::prelude::*;
 use rand::prelude::*;
 use rand::rng;
+use rand_chacha::ChaCha8Rng;
 
 /// All fields are sorted early -> late.
 #[derive(Default)]
@@ -22,13 +23,16 @@ pub struct Invisible {
 }
 
 impl Invisible {
-    pub fn new(game: &[Event], trust_seed: bool) -> Vec<Self> {
+    pub fn new(game: &[Event], trust_seed: bool, imputation_seed: Option<u64>) -> Vec<Self> {
         let mut ret = vec![];
         let mut cur = Self::default();
         let mut seed = None;
         let mut from_rinshan = false;
         let mut ura_is_recorded = false;
         let mut unknown_tiles = new_unknown_tiles();
+        // A local RNG makes validation independent of Rayon scheduling and batch order.
+        // This completes unobserved tiles; it does not claim to recover the real wall.
+        let mut imputation_rng = imputation_seed.map(ChaCha8Rng::seed_from_u64);
 
         for event in game {
             match event {
@@ -116,9 +120,13 @@ impl Invisible {
                         .into_iter()
                         .enumerate()
                         .filter(|&(_, count)| count > 0)
-                        .flat_map(|(tid, count)| iter::repeat(must_tile!(tid)).take(count as usize))
+                        .flat_map(|(tid, count)| iter::repeat_n(must_tile!(tid), count as usize))
                         .collect();
-                    filler.shuffle(&mut rng());
+                    if let Some(rng) = imputation_rng.as_mut() {
+                        filler.shuffle(rng);
+                    } else {
+                        filler.shuffle(&mut rng());
+                    }
 
                     while cur.yama.len() < 70 {
                         cur.yama.push(filler.pop().unwrap());

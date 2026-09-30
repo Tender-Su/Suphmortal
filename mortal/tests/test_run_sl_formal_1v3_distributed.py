@@ -324,8 +324,8 @@ class Formal1v3DistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
         completed = formal_1v3.subprocess.CompletedProcess(
             args=['ssh'],
@@ -349,8 +349,8 @@ class Formal1v3DistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
 
         command = formal_1v3.build_remote_budget_command(
@@ -912,10 +912,10 @@ class Formal1v3DistributedTests(unittest.TestCase):
                 local_python=sys.executable,
                 local_label='desktop',
                 remote_host='mahjong-laptop',
-                remote_repo=r'C:\Users\numbe\Desktop\MahjongAI',
+                remote_repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
                 remote_python=sys.executable,
                 remote_label='laptop',
-                ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+                ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
                 remote_launch_mode='interactive_window',
                 poll_seconds=0.01,
                 max_attempts=1,
@@ -962,8 +962,8 @@ class Formal1v3DistributedTests(unittest.TestCase):
                 label='laptop-renamed',
                 python=sys.executable,
                 host='mahjong-laptop',
-                repo=r'C:\Users\numbe\Desktop\MahjongAI',
-                ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+                repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+                ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
             ),
         ]
 
@@ -1024,7 +1024,7 @@ class Formal1v3DistributedTests(unittest.TestCase):
                 python=r'C:\Python\python.exe',
                 host='mahjong-laptop',
                 repo=r'D:\MahjongRemote',
-                ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+                ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
             )
             context = {
                 'state': state,
@@ -1065,8 +1065,8 @@ class Formal1v3DistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
         task_state = {
             'task_id': 'seed1__coarse__best_acc__laptop__demo_run',
@@ -1079,12 +1079,12 @@ class Formal1v3DistributedTests(unittest.TestCase):
             'shard_count': 3,
         }
 
-        with patch.object(formal_1v3, 'launch_remote_task', return_value='remote-active') as launch_remote_task:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(formal_1v3, 'launch_remote_task', return_value='remote-active') as launch_remote_task:
             active = formal_1v3.launch_task_for_worker(
                 worker=worker,
                 run_name='demo_run',
                 task_state=task_state,
-                dispatch_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\sl_fidelity\demo_run\distributed\formal_1v3_dispatch'),
+                dispatch_root=Path(tmp_dir) / 'formal_1v3_dispatch',
                 launch_mode='interactive_window',
             )
 

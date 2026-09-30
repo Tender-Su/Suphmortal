@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-train-device", default=None)
     parser.add_argument("--baseline-test-device", default=None)
     parser.add_argument("--train-play-profile", default=None)
+    parser.add_argument("--windows-high-qos", action="store_true",
+                        help="Disable execution-speed throttling for this role only.")
     return parser.parse_args()
 
 
@@ -65,6 +67,9 @@ def apply_runtime_config_overrides(
 
 def main() -> None:
     args = parse_args()
+    if args.windows_high_qos:
+        from mortal.core.process_resources import configure_windows_high_qos
+        configure_windows_high_qos(True)
     apply_runtime_env(
         config_path=args.config,
         arm=args.arm,

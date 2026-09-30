@@ -1,78 +1,60 @@
-# 代码地图与整理边界
+# 代码地图
 
-这份文档记录当前代码整理后的职责边界。它不替代 `handoff.md` 的当前结论，只回答“代码在哪里、该往哪里放”。
+> 核验：2026-09-05 · 本页维护模块职责；阶段状态、有效参数和命令分别由状态页与运行流程维护。
 
-## 根目录
+## 分层
 
-| 路径 | 职责 |
+| 目录 | 职责 |
 | --- | --- |
-| `libriichi/` | Rust 牌局引擎、状态机、特征提取、PyO3 模块 |
-| `mortal/` | Python 训练、评测、实验编排 |
-| `exe-wrapper/` | 小型 Rust helper binary crate |
-| `scripts/` | 仓库内 Windows 入口脚本和机器操作脚本 |
-| `docs/` | 当前状态、证据、接手说明和历史归档 |
-| `checkpoints/`, `logs/`, `target/` | 本地产物，不参与源码整理 |
+| [libriichi/src/](../../libriichi/src/) | Rust 引擎、状态、特征、日志数据、PyO3 |
+| [mortal/core/](../../mortal/core/) | 模型、checkpoint、复现与训练公共机制 |
+| [mortal/data/](../../mortal/data/) | 数据迭代器、标签和奖励 |
+| [mortal/supervised/](../../mortal/supervised/) | GRP、SL 主循环、selector 与阶段编排 |
+| [mortal/online/](../../mortal/online/) | Oracle critic 预训练、RL 角色与配置生成 |
+| [mortal/eval/](../../mortal/eval/) | 推理、1v3、Oracle 对照、配对统计与搜索 |
+| [mortal/research/](../../mortal/research/) | 探针、审计、辅助实验；稳定后再迁入阶段目录 |
+| [mortal/tests/](../../mortal/tests/) | Python 回归测试 |
+| [scripts/](../../scripts/) | Windows 入口、机器操作与独立审计工具 |
 
-## `libriichi/` 边界
+## 关键入口
 
-- PyO3 对外模块包括 `consts`、`state`、`dataset`、`arena`、`stat`、`mjai`。
-- `consts` 提供 Python 侧直接导入的形状和动作空间常数，改动时必须同步 Rust 特征提取、Python 模型输入和相关测试。
-- `dataset` 负责从日志解析训练样本，核心链路是 Rust loader -> Python `FileDatasetsIter` / `SupervisedFileDatasetsIter` -> PyTorch `DataLoader`。
-- `state` / `arena` 的测试通常用 mjai 事件驱动状态更新，Rust 测试优先放在同模块 `#[cfg(test)]`。
-
-## `mortal/` 分层
-
-| 路径 | 放什么 | 不放什么 |
-| --- | --- | --- |
-| `mortal/core/` | 模型、checkpoint、配置、复现、通用训练小工具 | 阶段特定实验编排 |
-| `mortal/data/` | 数据集迭代器、加载器、奖励/标签构造 | 训练主循环 |
-| `mortal/supervised/` | 监督学习训练入口、P0/P1/formal/fidelity 编排、SL 选择逻辑 | 在线 RL 专用逻辑 |
-| `mortal/online/` | 在线 RL 训练、server/client、角色启动、机器模式配置 | 监督学习 A/B 编排 |
-| `mortal/eval/` | `1v3`、mjai engine、Oracle 评测、搜索运行时 | 训练主循环 |
-| `mortal/research/` | 一次性探针、审计脚本、历史 A/B 辅助脚本 | 当前默认训练入口 |
-| `mortal/tests/` | Python 测试 | 训练产物、临时日志 |
-
-## 关键 Python 模块
-
-| 文件 | 职责 |
+| 文件 | 所有权 / 契约 |
 | --- | --- |
-| `mortal/config.py` | 读取 `mortal/config.toml` 或 `MORTAL_CFG` 指向的 TOML，不做完整 schema 校验，类型安全由调用方负责 |
-| `mortal/core/prelude.py` | 进程级预设：日志、warning、UTF-8 stdin、CPU affinity opt-in 等 |
-| `mortal/core/model.py` | `Brain`、policy、value / aux head、`GRP` 等模型定义 |
-| `mortal/data/dataloader.py` | 监督学习 / 在线 RL 训练数据迭代器和 worker 初始化 |
-| `mortal/online/server.py` | 本机 `ThreadingTCPServer` 参数分发与 replay buffer 管理 |
-| `mortal/online/client.py` | self-play worker，拉取参数、运行 `TrainPlayer.train_play()`、回传 replay |
-| `mortal/online/train_online.py` | 在线 RL trainer，drain replay、PPO 更新、发布新参数 |
-| `mortal/eval/engine.py` | 模型推理 wrapper，`MortalEngine.react_batch()` 接 obs / mask 并返回动作 |
-| `mortal/eval/one_vs_three.py` | `1v3` challenger vs champion 评测入口 |
+| [config.py](../../mortal/config.py) | 配置读取和指定路径字段归一化；不提供完整 schema 校验 |
+| [prelude.py](../../mortal/core/prelude.py) | 日志、warning、stdin、CPU affinity opt-in 等进程预设 |
+| [artifacts.py](../../mortal/core/artifacts.py) | 原子 JSON / TOML / checkpoint 与稳定摘要 |
+| [config_utils.py](../../mortal/core/config_utils.py) | 配置 section、递归合并、布尔解析 |
+| [external_pause.py](../../mortal/core/external_pause.py) | 外部程序触发的安全暂停协议 |
+| [model.py](../../mortal/core/model.py) | Brain、OracleDualTowerBrain、policy / value / aux、GRP |
+| [dataloader.py](../../mortal/data/dataloader.py) | SL / RL 迭代器与 worker 初始化 |
+| [oracle_value.py](../../mortal/data/oracle_value.py) | OracleTerminalValueDataset 与真实结果标签 |
+| [metric_reporting.py](../../mortal/supervised/metric_reporting.py) | 指标输出与按 game 聚合，不决定 winner |
+| [distributed_dispatch.py](../../mortal/supervised/distributed_dispatch.py) | worker 启动、传输与生命周期 |
+| [pretrain_oracle_critic.py](../../mortal/online/pretrain_oracle_critic.py) | 独立 Oracle critic 主循环 |
+| [server.py](../../mortal/online/server.py) / [client.py](../../mortal/online/client.py) | 参数 / replay 服务与自博弈 |
+| [train_online.py](../../mortal/online/train_online.py) | PPO 更新与参数发布 |
+| [engine.py](../../mortal/eval/engine.py) | MortalEngine 的 batch 推理与动作接口 |
+| [one_vs_three.py](../../mortal/eval/one_vs_three.py) | challenger / champion 加载与 1v3 |
+| [paired_1v3.py](../../mortal/eval/paired_1v3.py) | 原始对局的 seed 组配对统计 |
 
-## 模型结构速查
+## 原生与模型接口
 
-- 当前主线 encoder 配置来自 `[resnet]`：`conv_channels=192`、`num_blocks=40`，实际入口显式使用 `Norm="GN"`。
-- `Brain` 是 1D ResNet encoder；V3/V4 是 pre-activation ResBlock，每个 ResBlock 都有 SE-style `ChannelAttention`。
-- `CategoricalPolicy`：`Linear(1024 -> 256)` + `tanh` + `Linear(256 -> ACTION_SPACE)`。
-- `DQN`：dueling value / advantage；V4 形态是 `Linear(1024 -> 1 + ACTION_SPACE)`。
-- `AuxNet` / 后续 aux heads 只属于辅助监督或诊断接口，不应混进评测入口。
-- `GRP`：GRU 输入维度是 `GRP_SIZE=7`，当前默认主线配置是 `hidden_size=384`、`num_layers=3`、`dtype=float32`。
+PyO3 暴露 `consts / state / dataset / arena / stat / mjai`。Rust loader 解析牌谱和生成特征，Python 迭代器组织文件、batch 与 worker；可下推的逐样本处理优先留在 Rust。
 
-## 当前入口
+特征尺寸和 norm 约束只在 [AGENTS.md](../../AGENTS.md#环境与代码契约) 维护。模型结构定位：`Brain` 为 1D ResNet；V3/V4 pre-activation ResBlock 含 ChannelAttention；CategoricalPolicy 输出动作分布，旧 DQN 是另一套头。checkpoint 加载不能仅靠输入尺寸相同来判断兼容。
 
-仓库内入口统一从 `scripts/` 进入：
+Oracle 验证需区分真实已知隐藏状态与随机补全；相关逻辑在 [invisible.rs](../../libriichi/src/dataset/invisible.rs)，当前问题见 [Oracle 状态](../status/oracle-critic-mainline.md)。
 
-| 阶段 | 入口 |
+## 平台与宿主
+
+| 入口 | 边界 |
 | --- | --- |
-| Rust/PyO3 构建 | `scripts/build_libriichi.bat` |
-| GRP | `scripts/run_grp.bat` |
-| 监督学习主线 | `scripts/run_supervised.bat` |
-| 手动 P1 | `scripts/run_sl_p1_only.bat` |
-| 在线 RL | `scripts/run_online.bat` |
-| 在线 RL fidelity | `scripts/run_online_fidelity.bat` |
-| Oracle dependency eval | `scripts/run_oracle_dependency_eval.bat` |
+| [雀魂](../../integrations/majsoul/README.md) | 浏览器连接与执行适配；当前未包含 protobuf → MJAI 完整解码 |
+| [RiichiLab](../../integrations/riichilab/README.md) | 本地权重推理、WebSocket 客户端与日志 |
+| [MahjongCopilot](../../MahjongCopilot/readme.md) | 独立宿主，已存在本地 GN / policy 适配；ABI、依赖和端到端接入需在宿主内验证 |
 
-## 迁移纪律
+独立 MJAI smoke 只证明该运行时边界，不自动证明宿主集成完成或模型牌力提升。宿主引擎在 [bot/local/engine.py](../../MahjongCopilot/bot/local/engine.py)，兼容测试在 [test_local_engine.py](../../MahjongCopilot/tests/test_local_engine.py)。
 
-- 入口脚本和测试必须跟随文件移动同步更新。
-- 训练产物路径不随代码目录移动自动改名，避免破坏已存在 checkpoint 和日志。
-- 大训练文件优先拆出无副作用工具函数；主循环最后拆。
-- `docs/status/` 的当前结论优先级高于 `docs/research/` 和 `docs/archive/`。
-- 新的一次性实验脚本默认进入 `mortal/research/`，只有成为稳定入口后才移入 `supervised/`、`online/` 或 `eval/`。
+## 文件放置与迁移
+
+共享机制放在已有公共模块，阶段文件保留策略；独立职责才拆模块，不加纯转发层。新增研究脚本放 `mortal/research/`，实验产物放独立 run。移动入口时同步调用方、测试、配置和文档；checkpoint 反序列化引用也要检查。具体证据要求见 [重构与验证](code-health.md)。

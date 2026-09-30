@@ -1,125 +1,55 @@
-# 机器级冻结默认
+# 机器与资源
 
-这份文档只保留会影响当前运行口径的机器级默认，不再把 loader 和 `1v3` 的结论分成两份文档。
+> 核验：2026-09-08 · 依据：台式机Oracle/在线RL资源实测，以及笔记本有序准备、持续吞吐与恢复收据。参数不构成吞吐保证。
 
-## 当前默认
+## 台式机
 
-硬件口径：
+硬件为 i5-13600KF + RTX 5070 Ti 16 GB。解释器见 [运行流程](../agent/workflows.md#环境与构建)。
 
-- 台式机：Intel Core i5-13600KF + NVIDIA GeForce RTX 5070 Ti
-- 笔记本：Intel Core i9-13900HX + NVIDIA GeForce RTX 4060 Laptop GPU（8 GB VRAM）+ 32 GB DDR5
+| 来源 / 用途 | batch | train workers / file batch / prefetch | validation |
+| --- | --- | --- | --- |
+| 基础配置的 SL | 1024 | 4 / 10 / 3 | workers 0，file batch 8 |
+| 基础配置的 Oracle | 512 | 4 / 10 / 3 | file batch 8，其余按生成配置解析 |
+| Oracle 匹配臂资源续跑 | 640 | 2 / 2 / 2；Rayon4、Torch1、HighQoS | workers0、file batch2、native fold32、完整monitor；保留原批布局 |
+| 在线 RL 已测资源档 | 192 | GAE路径workers0；每轮128局、Rayon4、Torch1、HighQoS | GAE物理inference block512，logical chunk50；顺序近on-policy协议 |
 
-| 场景 | 台式机 | 笔记本 |
+Oracle相同状态的1000-step资源对照为2.964→4.373 updates/s（+47.55%）；独立后台另需显式HighQoS，500-step验收为4.114 updates/s，最低可用RAM8.96GiB。训练allocated/reserved峰值7.67/8.31GiB，完整验证含optimizer常驻时11.40/11.45GiB；allocator上限0.72。
+
+在线三角色在4GiB RAM预留档完成多轮交换；后台256计数步中有255次实际AdamW更新、1次AMP跳过，有效吞吐0.621 updates/s，最低可用RAM4.42GiB。trainer/client allocator上限0.68/0.17，RAM余量紧，保留资源监控与停止条件。相关细节、失败档位和测量限制见[资源实测报告](../research/rl-resource-tuning-2026-09-08.md)。
+
+运行身份、源码/native摘要与暂停边界只在[Oracle状态](oracle-critic-mainline.md#当前运行)维护；RL资格见[在线状态](online-rl-mainline.md)。RiichiLab CPU客户端保持运行。吞吐实测不能替代模型强度判断。
+
+workers 为 0 时，保存的 prefetch 参数不代表启用了多进程预取。运行中的配置和恢复源码不得按基础 TOML 热覆盖；使用独立运行目录和原生扩展，不在活跃环境执行 maturin develop。
+
+## 1v3 默认来源
+
+[one_vs_three.py](../../mortal/eval/one_vs_three.py) 的旧通用内建值：
+
+| GPU | seed_count | shard_count |
 | --- | --- | --- |
-| 监督学习 train loader | `num_workers=4, file_batch_size=10, prefetch_factor=3` | `num_workers=4, file_batch_size=10, prefetch_factor=4` |
-| 监督学习 val loader | `val_file_batch_size=8, val_prefetch_factor=5` | `val_file_batch_size=7, val_prefetch_factor=5` |
-| `1v3` 默认 | `seed_count=1024, shard_count=4` | `seed_count=640, shard_count=3` |
-| `GRP 384x3 fp32` loader | `num_workers=10, file_batch_size=50, prefetch_factor=4` | 未冻结 |
+| RTX 5070 Ti | 1024 | 4 |
+| RTX 4060 Laptop GPU | 640 | 3 |
 
-补充：
+解析优先级为环境变量→machine profile→GPU 配置→内建 GPU 默认→通用配置。seed_count 表示四座 seed 组，不能当作总局数。
 
-- 台式机监督学习 loader 当前冻结操作点是 train `4/10/3`、val `8/5`
-- 如果台式机验证阶段再次出现资源问题，优先重试同一配置；当前确认过的修法是显式 iterator/worker teardown，不是退回单进程
-- `GRP` 当前默认仍是 `384x3 fp32`；更大模型是否值得上主线看 `docs/research/stage0/grp-experience.md`，不要把旧的“已完全排除”说法当当前结论
+9 月 7 日独立正式协议另行明确每臂 16k 筛选/64k 确认。当前新运行固定 chunk 为64 seed组，不套用上表通用默认；各次旧运行不改写。实际 GPU/native/源码和 chunk 数进入评测 provenance，同协议各臂必须一致；吞吐以完整 chunk 记录估算。当前运行与 A/A 状态见 [SL 状态](supervised-mainline.md)。
 
-## 监督学习 loader 证据
+## 笔记本与资源边界
 
-### 笔记本
+硬件为 i9-13900HX + RTX 4060 Laptop 8 GB + 32 GB RAM。9 月 7 日已直连确认旧 Phase C 于 9 月 6 日 11:10 在 300k 正常停止，runner exit 0；详见 [SL 状态](supervised-mainline.md) 与 [完成审计](../../logs/sl_monitor/20260907_112958_phase_c_completed.json)。
 
-`2026-03-31` 交互前台 benchmark 结论：
+9 月 5 日已修复的验证 OOM 路径保留 logical batch 1024，以 256 样本分批执行 Brain 前向，整批计算 loss/head/cluster 指标；内部 GPU OOM 不自动无限重试。旧 SL checkpoint 缺 batch cursor/RNG，不能称逐 batch exact resume。事故、证据、修复、94 项当时回归与恢复流水完整保留于 [9 月 7 日历史快照](../archive/status/machine-benchmarks-run-history-2026-09-07.md)，不借用当时计数说明当前代码状态。
 
-- 训练确认：
-  - `nw4_fb10_pf4 -> 1.9564 steps/s`
-  - `nw6_fb7_pf3 -> 1.8891 steps/s`
-  - `nw6_fb8_pf3 -> 1.8872 steps/s`
-- 验证确认：
-  - `vfb7_vpf5 -> 0.8093 steps/s`
-  - `vfb7_vpf6 -> 0.7562 steps/s`
+当前 SL 和正式评测分别位于独立 Git checkout `MahjongAI_sl_ordered_20260908`、`MahjongAI_1v3_bulk_20260907`，使用隐藏 supervisor 与按需计划任务，保留 Apex 完整 checkpoint/chunk 暂停，不恢复无限异常重试。运行身份只在 [SL 状态](supervised-mainline.md) 与其执行记录维护；旧 runner 源码/配置/权重保持原样。
 
-冻结结果：
+本轮同输入实测：SL 验证文件批4/Rayon4 比串行快82.85%，既有四 draw 双视图输入准备为2.537倍，所有字段/指标与真实恢复状态精确一致，训练 allocated 峰值仍1.81769GiB。1v3 chunk32/64 同256局为617.627/369.265秒，吞吐提高67.26%，全部事件相同，allocated峰值138.38/161.24MiB。仅为已测输入和阶段的证据，非全程或最大容量保证；详情见 [性能诊断](../../logs/sl_curriculum_audit_20260907/performance_diagnosis_20260907.md)。
 
-- train：`4/10/4`
-- val：`7/5`
+9 月 8 日续测采用 train/val 有序准备进程 **4/4**、每块 **4** 个 draw、文件批 **4**、Rayon **4**，消费游标仍在训练进程，常规 DataLoader workers 仍为0。匹配 U6–U36 真实训练吞吐由0.17797升至0.29499 updates/s（+65.8%）；延长至 U68 为0.29658，最低系统可用 RAM 11.71GiB。六进程延长复测0.29213，未见稳定增益且多占约3.4GiB RAM，故选四进程。保持全部输入/辅助标签、micro256×4、确定性设置和成功更新语义，完整恢复状态/指标精确一致；新 SL 任务为经核验的 Normal 优先级。原始对照、限制和恢复链见 [实测报告](../../logs/sl_curriculum_audit_20260907/ordered_preparation_report_20260908.md)。
 
-产物：
+更大 chunk128 独立诊断触发 `nvcuda64.dll` 原生 fail-fast `0xc0000409`，仅该进程退出，正式负载保持健康。已保留 Windows 事件、WER 和 dump，停止扩大及复现；尚未确定根因，不等同于已证实 CUDA OOM、RAM 泄漏或纯驱动缺陷。当前只采用已验证64档，不在活跃训练时改驱动或原生扩展。
 
-- 训练确认目录：
-  - `logs/sl_loader_ab/laptop_sl_loader_bench_interactive_20260331/confirm_train_nw6_fb7_pf3.summary.json`
-  - `logs/sl_loader_ab/laptop_sl_loader_bench_interactive_20260331/confirm_train_nw4_fb10_pf4.summary.json`
-  - `logs/sl_loader_ab/laptop_sl_loader_bench_interactive_20260331/confirm_train_nw6_fb8_pf3.summary.json`
-- 验证确认目录：
-  - `logs/sl_loader_ab/laptop_sl_loader_bench_interactive_20260331/confirm_val_nw4_fb10_pf4_vfb7_vpf5_small.summary.json`
-  - `logs/sl_loader_ab/laptop_sl_loader_bench_interactive_20260331/confirm_val_nw4_fb10_pf4_vfb7_vpf6_small.summary.json`
+## 新 benchmark 的记录要求
 
-## `1v3` 默认来源
+记录机器、源码/native hash、模型、配置、输入规模、并存任务、峰值 RAM/VRAM、吞吐、验证和恢复结果。性能变化需要数据与训练语义等价性证据，单次低显存不能排除历史事故峰值或长期泄漏。
 
-代码当前的内建 GPU 默认位于 `mortal/eval/one_vs_three.py`：
-
-- `NVIDIA GeForce RTX 5070 Ti -> seed_count=1024, shard_count=4`
-- `NVIDIA GeForce RTX 4060 Laptop GPU -> seed_count=640, shard_count=3`
-
-解析顺序同样由代码固定：
-
-1. 环境变量 `MORTAL_1V3_SEED_COUNT` / `MORTAL_1V3_SHARD_COUNT`
-2. `[1v3.machine_overrides.<COMPUTERNAME>]`
-3. `[1v3.gpu_overrides."<GPU name>"]`
-4. 代码内建 GPU 默认
-5. `[1v3]` 配置
-
-## `1v3` 吞吐证据
-
-### 台式机
-
-- `768 / 1 shard = 7.5314 games/s`
-- `768 / 2 shard = 10.1708 games/s`
-- `768 / 3 shard = 10.2875 games/s`
-- `768 / 4 shard = 10.0562 games/s`
-- `768 / 5 shard = 9.6054 games/s`
-- `1024 / 3 shard = 11.0271 games/s`
-- `1024 / 4 shard = 11.0943 games/s`
-- `1024 / 5 shard = 10.5282 games/s`
-- `1280 / 5 shard = 10.9791 games/s`
-
-结论：
-
-- `1024 / 4 shard` 是当前最好点
-- `5 shard` 已经进入回退区
-
-解释：
-
-- `2 shard` 已经显著优于单进程
-- `3 shard` 继续小幅增益
-- `4 shard` 只有在 `1024 seed` 时略微领先 `3 shard`
-- `5 shard` 开始被额外调度和尾部开销反噬
-
-### 笔记本
-
-- `512 / 1 shard = 5.2828 games/s`
-- `512 / 2 shard = 7.4151 games/s`
-- `512 / 3 shard = 7.5176 games/s`
-- `512 / 4 shard = 7.1869 games/s`
-- `640 / 2 shard = 6.9365 games/s`
-- `640 / 3 shard = 7.9247 games/s`
-- `640 / 4 shard = 7.4916 games/s`
-
-结论：
-
-- `640 / 3 shard` 是当前最好点
-- `4 shard` 已经回退
-
-解释：
-
-- `2 shard` 对笔记本同样有效
-- `3 shard + 640` 是当前最好点
-- `4 shard` 已经开始回退
-
-## 备注
-
-- 这组 benchmark 只回答吞吐，不回答模型强弱
-- `1v3` 测试时主要目标是测并发口径，而不是做模型比较
-
-## 使用规则
-
-- 默认优先接受代码内建值，不必在本地 `config.toml` 手动重写
-- 只有机器名或 GPU 变了，才写 `[1v3.machine_overrides]` / `[1v3.gpu_overrides]`
-- 临时 benchmark 优先用环境变量覆盖
+不清理运行日志/checkpoint 来做 benchmark。新结果替换当前适用结论，完整时间线放带日期的报告或运行产物。更早数据见 [旧机器快照](../archive/status/machine-benchmarks-before-doc-refactor-2026-09-05.md) 和 [旧 Oracle 资源记录](../archive/status/oracle-critic-resource-benchmarks-before-doc-refactor-2026-09-05.md)。

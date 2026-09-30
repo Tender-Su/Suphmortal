@@ -123,7 +123,7 @@ def query_gpu_metrics(pid_set: set[int]) -> dict[str, Any]:
         "gpu_mem_used_mb": None,
         "gpu_mem_total_mb": None,
         "gpu_temperature_c": None,
-        "tree_gpu_mem_mb": 0,
+        "tree_gpu_mem_mb": None,
     }
     try:
         gpu_proc = subprocess.run(
@@ -161,7 +161,7 @@ def query_gpu_metrics(pid_set: set[int]) -> dict[str, Any]:
             check=False,
             timeout=5,
         )
-        total = 0.0
+        total = None
         for line in app_proc.stdout.strip().splitlines():
             if not line.strip():
                 continue
@@ -174,6 +174,8 @@ def query_gpu_metrics(pid_set: set[int]) -> dict[str, Any]:
             except ValueError:
                 continue
             if app_pid in pid_set:
+                if total is None:
+                    total = 0.0
                 total += used_mb
         result["tree_gpu_mem_mb"] = total
     except Exception:

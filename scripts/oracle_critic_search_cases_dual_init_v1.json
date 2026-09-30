@@ -1,0 +1,83 @@
+[
+  {
+    "name": "fusion000_transfer_legacy",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "legacy_mean_scaled"
+    }
+  },
+  {
+    "name": "fusion010_transfer_legacy",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.1,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "legacy_mean_scaled"
+    }
+  },
+  {
+    "name": "fusion025_transfer_legacy",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.25,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "legacy_mean_scaled"
+    }
+  },
+  {
+    "name": "fusion050_transfer_legacy",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.5,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "legacy_mean_scaled"
+    }
+  },
+  {
+    "name": "fusion075_transfer_legacy",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.75,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "legacy_mean_scaled"
+    }
+  },
+  {
+    "name": "fusion050_transfer_hand",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.5,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "hand_aligned",
+      "oracle_hand_init_scale": 0.3333333333333333
+    }
+  },
+  {
+    "name": "fusion050_transfer_randomfirst",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.5,
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "random"
+    }
+  },
+  {
+    "name": "fusion050_random_random",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_init": 0.5,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random"
+    }
+  }
+]

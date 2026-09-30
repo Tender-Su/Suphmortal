@@ -28,37 +28,37 @@ trait ObsArray {
 impl ObsArray for Simple2DArray<34, f32> {
     #[inline]
     fn rows(&self) -> usize {
-        Simple2DArray::rows(self)
+        Self::rows(self)
     }
 
     #[inline]
     fn as_slice(&self) -> &[f32] {
-        Simple2DArray::as_slice(self)
+        Self::as_slice(self)
     }
 
     #[inline]
     fn get(&self, row: usize, col: usize) -> f32 {
-        Simple2DArray::get(self, row, col)
+        Self::get(self, row, col)
     }
 
     #[inline]
     fn fill(&mut self, row: usize, value: f32) {
-        Simple2DArray::fill(self, row, value);
+        Self::fill(self, row, value);
     }
 
     #[inline]
     fn fill_rows(&mut self, row: usize, n_rows: usize, value: f32) {
-        Simple2DArray::fill_rows(self, row, n_rows, value);
+        Self::fill_rows(self, row, n_rows, value);
     }
 
     #[inline]
     fn assign(&mut self, row: usize, col: usize, value: f32) {
-        Simple2DArray::assign(self, row, col, value);
+        Self::assign(self, row, col, value);
     }
 
     #[inline]
     fn assign_rows(&mut self, row: usize, col: usize, n_rows: usize, value: f32) {
-        Simple2DArray::assign_rows(self, row, col, n_rows, value);
+        Self::assign_rows(self, row, col, n_rows, value);
     }
 }
 
@@ -74,7 +74,7 @@ impl<'a> ObsSlice2DMut<'a> {
     }
 
     #[inline]
-    fn offset(&self, row: usize, col: usize) -> usize {
+    const fn offset(&self, row: usize, col: usize) -> usize {
         row * 34 + col
     }
 }

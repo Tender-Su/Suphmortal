@@ -12,9 +12,9 @@ Get-CimInstance Win32_Process | Where-Object {
 
 Write-Host 'DECOMPRESS_BEGIN'
 
-& 'C:\Users\numbe\miniconda3\envs\mortal\python.exe' `
-    'C:\Users\numbe\Desktop\MahjongAI\scripts\decompress_dataset_json.py' `
-    --src-root 'C:\Users\numbe\mahjong_data_root\dataset_rebuilt' `
-    --dst-root 'C:\Users\numbe\mahjong_data_root\dataset_json_rebuilt' `
+& (Join-Path $env:USERPROFILE 'miniconda3\envs\mortal\python.exe') `
+    (Join-Path $env:USERPROFILE 'Desktop\MahjongAI\scripts\decompress_dataset_json.py') `
+    --src-root (Join-Path $env:USERPROFILE 'mahjong_data_root\dataset_rebuilt') `
+    --dst-root (Join-Path $env:USERPROFILE 'mahjong_data_root\dataset_json_rebuilt') `
     --workers 18 `
     --report-every 1000

@@ -303,7 +303,7 @@ impl BoardState {
         // no need to broadcast
     }
 
-    fn update_nagashi_mangan_and_four_wind(&mut self, ev: &Event) {
+    const fn update_nagashi_mangan_and_four_wind(&mut self, ev: &Event) {
         match *ev {
             Event::Dahai { actor, pai, .. } if !pai.is_yaokyuu() => {
                 self.can_nagashi_mangan[actor as usize] = false;
@@ -430,10 +430,11 @@ impl BoardState {
                     honba_left = 0;
 
                     vec_add_assign(&mut self.kyoku_deltas, &deltas);
-                    let ura_markers = self.player_states[actor]
-                        .self_riichi_accepted()
-                        .then(|| ura_indicators.clone())
-                        .unwrap_or_default();
+                    let ura_markers = if self.player_states[actor].self_riichi_accepted() {
+                        ura_indicators.clone()
+                    } else {
+                        Vec::new()
+                    };
 
                     let hora = Event::Hora {
                         actor: actor as u8,
@@ -463,10 +464,11 @@ impl BoardState {
             point.tsumo_total(single_actor == self.oya) + kyotaku_point + honba_left * 300;
 
         vec_add_assign(&mut self.kyoku_deltas, &deltas);
-        let ura_markers = self.player_states[single_actor as usize]
-            .self_riichi_accepted()
-            .then_some(ura_indicators)
-            .unwrap_or_default();
+        let ura_markers = if self.player_states[single_actor as usize].self_riichi_accepted() {
+            ura_indicators
+        } else {
+            Vec::new()
+        };
 
         let hora = Event::Hora {
             actor: single_actor,

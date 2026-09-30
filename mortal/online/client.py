@@ -17,6 +17,34 @@ from mortal.eval.search_runtime import build_search_runtime_bundle_from_state_fi
 from mortal.core.repro import apply_reproducibility
 
 
+def remote_socket(remote, *, timeout_sec: float, retry_sec: float, max_wait_sec: float):
+    deadline = None if max_wait_sec <= 0 else time.monotonic() + max_wait_sec
+    attempts = 0
+    while True:
+        attempts += 1
+        conn = socket.socket()
+        try:
+            if timeout_sec > 0:
+                conn.settimeout(timeout_sec)
+            conn.connect(remote)
+            conn.settimeout(None)
+            if attempts > 1:
+                logging.info('connected to online server after %s attempts', attempts)
+            return conn
+        except OSError:
+            conn.close()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise
+            if attempts == 1 or attempts % 10 == 0:
+                logging.warning(
+                    'online server connect failed; retrying (attempt=%s remote=%s)',
+                    attempts,
+                    remote,
+                    exc_info=True,
+                )
+            time.sleep(max(retry_sec, 0.01))
+
+
 def resolve_search_runtime_source_file():
     control_state = str(config.get('control', {}).get('state_file', '') or '').strip()
     if control_state and path.exists(control_state):
@@ -30,6 +58,10 @@ def main():
     apply_oracle_experiment_to_config(config)
     repro_runtime = apply_reproducibility(config, process_name='client')
     remote = (config['online']['remote']['host'], config['online']['remote']['port'])
+    remote_cfg = config['online'].get('remote', {})
+    connect_timeout_sec = float(remote_cfg.get('connect_timeout_sec', 10.0) or 0.0)
+    connect_retry_sec = float(remote_cfg.get('connect_retry_sec', 3.0) or 0.0)
+    connect_max_wait_sec = float(remote_cfg.get('connect_max_wait_sec', 300.0) or 0.0)
     device = torch.device(config['control']['device'])
     version = config['control']['version']
     num_blocks = config['resnet']['num_blocks']
@@ -79,8 +111,12 @@ def main():
 
     while True:
         while True:
-            with socket.socket() as conn:
-                conn.connect(remote)
+            with remote_socket(
+                remote,
+                timeout_sec=connect_timeout_sec,
+                retry_sec=connect_retry_sec,
+                max_wait_sec=connect_max_wait_sec,
+            ) as conn:
                 msg = {
                     'type': 'get_param',
                     'param_version': param_version,
@@ -148,8 +184,12 @@ def main():
             with open(filename, 'rb') as f:
                 logs[path.basename(filename)] = f.read()
 
-        with socket.socket() as conn:
-            conn.connect(remote)
+        with remote_socket(
+            remote,
+            timeout_sec=connect_timeout_sec,
+            retry_sec=connect_retry_sec,
+            max_wait_sec=connect_max_wait_sec,
+        ) as conn:
             send_msg(conn, {
                 'type': 'submit_replay',
                 'logs': logs,

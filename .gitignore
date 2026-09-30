@@ -22,3 +22,33 @@
 /.claude/*.lock
 /.codex/
 /console.log
+
+# Local environments, diagnostics and build outputs (keep source fixtures tracked).
+/.venv/
+/venv/
+/.pycache_tmp/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/build/
+/dist/
+*.egg-info/
+
+# Model/data stores remain local. Small reviewed evidence belongs in docs/evidence/.
+/data/
+/datasets/
+/mortal/checkpoints/*
+!/mortal/checkpoints/.gitkeep
+
+# Private local settings and exports must never accompany source synchronization.
+.env
+.env.*
+!.env.example
+!.env.sample
+/.secrets/
+**/credentials.local.*
+**/secrets.local.*
+/chat-exports/
+
+# Separate upstream checkout; reproducible local changes live in integrations/mahjongcopilot/.
+/MahjongCopilot/

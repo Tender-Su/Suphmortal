@@ -166,6 +166,35 @@ class CosineTailSchedulerTests(unittest.TestCase):
         self.assertTrue(math.isclose(5e-4, optimizer.param_groups[0]['lr'], abs_tol=1e-12))
         self.assertEqual(5e-4, scheduler.state_dict()['tail_lr'])
 
+    def test_tail_lr_preserves_param_group_lr_scales(self):
+        parameters = [
+            torch.nn.Parameter(torch.tensor(1.0)),
+            torch.nn.Parameter(torch.tensor(2.0)),
+        ]
+        optimizer = torch.optim.SGD(
+            [
+                {'params': [parameters[0]], 'lr': 1.0},
+                {'params': [parameters[1]], 'lr': 0.25},
+            ]
+        )
+        scheduler = LinearWarmUpCosineAnnealingLR(
+            optimizer,
+            peak=1e-2,
+            final=1e-3,
+            warm_up_steps=0,
+            max_steps=2,
+        )
+        for _ in range(2):
+            for parameter in parameters:
+                parameter.grad = torch.zeros_like(parameter)
+            optimizer.step()
+            scheduler.step()
+
+        scheduler.set_tail_lr(5e-4)
+
+        self.assertEqual([5e-4, 1.25e-4], scheduler.get_last_lr())
+        self.assertEqual([5e-4, 1.25e-4], [group['lr'] for group in optimizer.param_groups])
+
     def test_exact_resume_keeps_pre_core_and_tail_lr_trajectory(self):
         parameter, optimizer, scheduler = self.make_scheduler()
         for _ in range(2):

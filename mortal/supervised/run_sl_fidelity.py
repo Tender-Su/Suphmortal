@@ -26,6 +26,7 @@ import mortal.supervised.run_sl_ab as ab
 import mortal.supervised.run_sl_formal as formal
 import mortal.supervised.sl_current_defaults as sl_defaults
 from mortal._repo import REPO_ROOT
+from mortal.core.artifacts import atomic_write_text as write_text_atomically
 from mortal.data.dataloader import SupervisedFileDatasetsIter
 from mortal.supervised.sl_selection import (
     ACTION_SCORE_WEIGHTS,
@@ -245,17 +246,7 @@ class CandidateSpec:
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + '.tmp')
-    tmp_path.write_text(text, encoding='utf-8', newline='\n')
-    for attempt in range(1, 11):
-        try:
-            tmp_path.replace(path)
-            return
-        except PermissionError as exc:
-            if os.name != 'nt' or getattr(exc, 'winerror', None) not in {5, 32} or attempt >= 10:
-                raise
-            time.sleep(min(1.0, 0.1 * attempt))
+    write_text_atomically(path, text)
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:

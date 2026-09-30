@@ -1,5 +1,7 @@
 # 笔记本 监督学习阶段 Loader Benchmark（2026-03-30）
 
+> 历史归档 · 归档整理：2026-09-05。正文保留当时的事实、判断和命令，不作为当前运行依据。当前入口见 [文档地图](../../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 更新说明：
 
 - 这份文档已被 `docs/status/machine-benchmarks.md` 中的笔记本 loader 冻结默认覆盖
@@ -49,7 +51,7 @@
   - `logs/laptop_sl_loader_bench/summary.json`
   - `logs/laptop_sl_loader_bench/confirm_summary.json`
 - 笔记本原始运行目录：
-  - `C:\Users\numbe\Desktop\MahjongAI\logs\laptop_sl_loader_bench\`
+  - `<USERPROFILE>\Desktop\MahjongAI\logs\laptop_sl_loader_bench\`
 
 ## 额外修复
 

@@ -113,6 +113,16 @@ if (`$existingPythonPath) {
 else {
     `$env:PYTHONPATH = '$repoEscaped'
 }
+foreach (`$envName in @(
+    'MORTAL_SL_AB_PHASE_A_STORAGE_ROOT',
+    'MORTAL_SL_AB_PHASE_B_STORAGE_ROOT',
+    'MORTAL_SL_AB_PHASE_C_STORAGE_ROOT'
+)) {
+    `$envValue = [Environment]::GetEnvironmentVariable(`$envName, 'User')
+    if (`$envValue) {
+        Set-Item -Path ("Env:" + `$envName) -Value `$envValue
+    }
+}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;

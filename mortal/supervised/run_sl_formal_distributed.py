@@ -2225,27 +2225,15 @@ def print_status(args: argparse.Namespace) -> int:
 def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
     run_dir = fidelity.FIDELITY_ROOT / args.run_name
     dispatch_control = dispatch_control_path_for_run(run_dir)
-    if dispatch_control.exists():
-        control_state = common_dispatch.load_dispatch_control(dispatch_control)
-    else:
-        control_state = common_dispatch.initialize_dispatch_control_state(
-            local_label=common_dispatch.DEFAULT_LOCAL_LABEL,
-            remote_label=common_dispatch.DEFAULT_REMOTE_LABEL,
-            remote_launch_mode=common_dispatch.DEFAULT_REMOTE_LAUNCH_MODE,
-        )
-    common_dispatch.ensure_control_state_workers(
-        control_state=control_state,
+    entry = common_dispatch.update_worker_pause_control(
+        dispatch_control,
         local_label=common_dispatch.DEFAULT_LOCAL_LABEL,
         remote_label=common_dispatch.DEFAULT_REMOTE_LABEL,
         remote_launch_mode=common_dispatch.DEFAULT_REMOTE_LAUNCH_MODE,
-    )
-    entry = common_dispatch.set_worker_pause(
-        control_state,
         worker_label=args.worker_label,
         paused=paused,
         stop_active=bool(getattr(args, 'stop_active', False)),
     )
-    common_dispatch.write_dispatch_control(dispatch_control, control_state)
     print(json.dumps({'worker_label': args.worker_label, 'paused': entry['paused']}, ensure_ascii=False, indent=2))
     return 0
 

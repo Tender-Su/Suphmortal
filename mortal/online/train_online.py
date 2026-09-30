@@ -9,6 +9,10 @@ from mortal.eval.oracle_experiments import (
     normalize_oracle_input_mode,
 )
 from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
+from mortal.online.policy_objective import (
+    ACTOR_OBJECTIVE_VERSION, actor_surrogate, behavior_version_is_usable,
+    normalized_behavior_version, policy_drift, validate_actor_objective,
+)
 
 ONLINE_MAX_STEPS_EXIT_CODE = 86
 
@@ -193,6 +197,14 @@ def online_reached_max_steps(config, steps):
     return online_stop_at_max_steps(config) and max_steps > 0 and int(steps) >= max_steps
 
 
+def online_gae_inference_batch_size(config):
+    """Physical forward block size; complete trajectories and shuffle chunks stay fixed."""
+    value = int(config.get('online', {}).get('gae_inference_batch_size', 2048))
+    if value <= 0:
+        raise ValueError('online.gae_inference_batch_size must be positive')
+    return value
+
+
 def test_play_cfg(config):
     cfg = config.get('test_play', {})
     return cfg if isinstance(cfg, dict) else {}
@@ -213,6 +225,19 @@ def initial_test_play_enabled(config):
 def initial_test_play_games(config):
     cfg = test_play_cfg(config)
     return int(cfg.get('initial_games', cfg.get('games', 0)) or 0)
+
+
+def periodic_test_play_due(*, enabled, steps, test_every):
+    return bool(enabled) and int(test_every) > 0 and int(steps) % int(test_every) == 0
+
+
+def old_policy_update_due(steps, old_update_every):
+    return int(old_update_every) > 0 and int(steps) > 0 and int(steps) % int(old_update_every) == 0
+
+
+def refresh_old_policy_snapshot(old_mortal, old_policy_net, mortal, policy_net):
+    old_mortal.load_state_dict(mortal.state_dict())
+    old_policy_net.load_state_dict(policy_net.state_dict())
 
 
 def recorded_step0_baseline(config):
@@ -262,6 +287,24 @@ def policy_importance_c_clip(config):
     return float(cfg.get('vtrace_c_clip', 0.0) or 0.0)
 
 
+def policy_vtrace_target_rho_clip(config):
+    cfg = policy_training_cfg(config)
+    if 'vtrace_target_rho_clip' in cfg:
+        return float(cfg.get('vtrace_target_rho_clip', 0.0) or 0.0)
+    if 'vtrace_rho_clip' in cfg:
+        return float(cfg.get('vtrace_rho_clip', 0.0) or 0.0)
+    return float(cfg.get('importance_rho_clip', 0.0) or 0.0)
+
+
+def policy_vtrace_target_c_clip(config):
+    cfg = policy_training_cfg(config)
+    if 'vtrace_target_c_clip' in cfg:
+        return float(cfg.get('vtrace_target_c_clip', 0.0) or 0.0)
+    if 'vtrace_c_clip' in cfg:
+        return float(cfg.get('vtrace_c_clip', 0.0) or 0.0)
+    return float(cfg.get('importance_c_clip', 0.0) or 0.0)
+
+
 def policy_entropy_floor(config):
     cfg = policy_training_cfg(config)
     if 'entropy_floor' in cfg:
@@ -274,6 +317,32 @@ def policy_entropy_floor_start_step(config, *, default=0):
     if 'entropy_floor_start_step' in cfg:
         return max(int(cfg.get('entropy_floor_start_step', default) or default), 0)
     return max(int(default or 0), 0)
+
+
+def policy_actor_lr_scale(config):
+    cfg = policy_training_cfg(config)
+    return max(float(cfg.get('actor_lr_scale', 1.0) or 0.0), 0.0)
+
+
+def policy_head_lr_scale(config):
+    cfg = policy_training_cfg(config)
+    return max(float(cfg.get('policy_head_lr_scale', 1.0) or 0.0), 0.0)
+
+
+def policy_update_interval(config):
+    cfg = policy_training_cfg(config)
+    return max(int(cfg.get('update_interval', 1) or 1), 1)
+
+
+def policy_update_phase(config):
+    cfg = policy_training_cfg(config)
+    return max(int(cfg.get('update_phase', 0) or 0), 0)
+
+
+def policy_update_active(config, steps):
+    interval = policy_update_interval(config)
+    phase = policy_update_phase(config) % interval
+    return int(steps) % interval == phase
 
 
 def value_training_cfg(config):
@@ -289,6 +358,74 @@ def value_critic_warmup_steps(config):
 def value_critic_warmup_active(config, steps):
     cfg = value_training_cfg(config)
     return bool(cfg.get('enabled', False)) and int(steps) < value_critic_warmup_steps(config)
+
+
+def value_independent_actor_lr_clock(config):
+    cfg = value_training_cfg(config)
+    if not bool(cfg.get('enabled', False)):
+        return False
+    configured = cfg.get('independent_actor_lr_clock')
+    if configured is not None:
+        return bool(configured)
+    return value_critic_warmup_steps(config) > 0
+
+
+def actor_lr_clock_cfg(config):
+    scheduler_cfg = dict(config.get('optim', {}).get('scheduler', {}))
+    critic_warmup_steps = value_critic_warmup_steps(config)
+    total_steps = max(int(scheduler_cfg.get('max_steps', 0) or 0), 1)
+    actor_max_steps = max(total_steps - critic_warmup_steps, 1)
+    scheduler_cfg['max_steps'] = actor_max_steps
+    scheduler_cfg['warm_up_steps'] = min(
+        max(int(scheduler_cfg.get('warm_up_steps', 0) or 0), 0),
+        actor_max_steps,
+    )
+    return scheduler_cfg
+
+
+def lr_at_step(scheduler_cfg, steps):
+    init = float(scheduler_cfg.get('init', 1e-8))
+    peak = float(scheduler_cfg.get('peak', 0.0))
+    final = float(scheduler_cfg.get('final', 0.0))
+    warm_up_steps = max(int(scheduler_cfg.get('warm_up_steps', 0) or 0), 0)
+    max_steps = max(int(scheduler_cfg.get('max_steps', 0) or 0), warm_up_steps, 1)
+    steps = max(int(steps), 0)
+    if not peak >= final >= init >= 0:
+        raise ValueError(
+            f'invalid actor scheduler values: peak={peak}, final={final}, init={init}'
+        )
+    if warm_up_steps > 0 and steps < warm_up_steps:
+        return init + (peak - init) / warm_up_steps * steps
+    if steps < max_steps:
+        cosine_steps = steps - warm_up_steps
+        cosine_max_steps = max(max_steps - warm_up_steps, 1)
+        return final + 0.5 * (peak - final) * (
+            1 + _math.cos(cosine_steps / cosine_max_steps * _math.pi)
+        )
+    return final
+
+
+def apply_independent_actor_lr_clock(optimizer, scheduler, config, *, steps):
+    if not value_independent_actor_lr_clock(config):
+        return None
+    actor_steps = max(int(steps) - value_critic_warmup_steps(config), 0)
+    actor_lr = lr_at_step(actor_lr_clock_cfg(config), actor_steps)
+    changed = False
+    for group in optimizer.param_groups:
+        if group.get('schedule_role') != 'actor':
+            continue
+        group['lr'] = actor_lr * float(group.get('lr_scale', 1.0))
+        changed = True
+    if not changed:
+        raise RuntimeError(
+            'independent actor LR clock is enabled but optimizer has no actor parameter groups'
+        )
+    if hasattr(scheduler, '_last_lr'):
+        scheduler._last_lr = [
+            float(group.get('lr', 0.0) or 0.0)
+            for group in optimizer.param_groups
+        ]
+    return actor_lr
 
 
 def normalize_value_target_mode(value, *, oracle_critic):
@@ -374,6 +511,48 @@ def infer_oracle_critic_arch_from_state_dict(state_dict, *, checkpoint_name):
     )
 
 
+def centered_reward_signature(config):
+    pts = config.get('env', {}).get('pts')
+    if pts is None:
+        return None
+    values = _np.asarray(pts, dtype=_np.float64)
+    if values.shape != (4,) or not _np.isfinite(values).all():
+        raise ValueError('env.pts must contain four finite rank rewards')
+    return tuple((values - values.mean()).tolist())
+
+
+def online_value_architecture(config):
+    cfg = value_training_cfg(config)
+    return {
+        'oracle_fusion_mode': str(cfg.get('oracle_fusion_mode', 'linear')),
+        'oracle_fusion_hidden': int(cfg.get('oracle_fusion_hidden', 512)),
+        'value_head_hidden': int(cfg.get('value_head_hidden', 256)),
+        'value_loss_mode': str(cfg.get('value_loss_mode', 'mse')),
+    }
+
+
+def build_online_value_models(config, *, device):
+    from mortal.core.model import Brain, OracleDualTowerBrain, ValueHead
+    cfg = value_training_cfg(config)
+    arch = online_value_architecture(config)
+    if arch['value_loss_mode'] != 'mse':
+        raise ValueError('online value training currently requires the scalar MSE head')
+    oracle = None
+    if cfg.get('oracle_critic', True):
+        kwargs = dict(version=config['control']['version'], **config['resnet'], Norm='GN')
+        if normalize_oracle_critic_arch(cfg.get('oracle_critic_arch')) == 'dual_tower':
+            oracle = OracleDualTowerBrain(
+                **kwargs, oracle_fusion_mode=arch['oracle_fusion_mode'],
+                oracle_fusion_hidden=arch['oracle_fusion_hidden'],
+            )
+        else:
+            oracle = Brain(**kwargs, is_oracle=True)
+        oracle = oracle.to(device)
+    head = ValueHead(num_players=value_num_players_from_mode(value_target_mode(config)),
+                     hidden_size=arch['value_head_hidden'], zero_sum=bool(cfg.get('exact_zero_sum', False)))
+    return oracle, head.to(device)
+
+
 def validate_oracle_critic_init_checkpoint(
     state,
     config,
@@ -442,6 +621,14 @@ def validate_oracle_critic_init_checkpoint(
             )
 
         value_cfg = value_training_cfg(config)
+        expected_exact_zero_sum = bool(value_cfg.get('exact_zero_sum', False))
+        actual_exact_zero_sum = bool(pretrain_cfg.get('exact_zero_sum', False))
+        if actual_exact_zero_sum != expected_exact_zero_sum:
+            raise ValueError(
+                f'{checkpoint_name} zero-sum mismatch: checkpoint exact_zero_sum='
+                f'{actual_exact_zero_sum}, current value.exact_zero_sum='
+                f'{expected_exact_zero_sum}'
+            )
         expected_arch = normalize_oracle_critic_arch(
             value_cfg.get('oracle_critic_arch', 'single_tower')
         )
@@ -457,6 +644,24 @@ def validate_oracle_critic_init_checkpoint(
             raise ValueError(
                 f'{checkpoint_name} arch mismatch: checkpoint critic_arch='
                 f'{actual_arch!r}, current value.oracle_critic_arch={expected_arch!r}'
+            )
+        expected_layout = online_value_architecture(config)
+        for field, expected in expected_layout.items():
+            defaults = {'oracle_fusion_mode': 'linear', 'oracle_fusion_hidden': 512,
+                        'value_head_hidden': 256, 'value_loss_mode': 'mse'}
+            if pretrain_cfg.get(field, defaults[field]) != expected:
+                raise ValueError(f'{checkpoint_name} {field} mismatch: '
+                                 f'{pretrain_cfg.get(field, defaults[field])!r} != {expected!r}')
+        if (pretrain_cfg.get('state_fold_backend') == 'native_hash'
+            and int(pretrain_cfg.get('state_fold_count', 1)) > 1 and actual_gamma != 1.0
+            and not state.get('training_contract', {}).get('target_clock_version')):
+            raise ValueError(f'{checkpoint_name} used legacy folded target clocks; requalify under corrected targets')
+        expected_points = centered_reward_signature(config)
+        actual_points = centered_reward_signature(state.get('config') or {})
+        if expected_points is not None and actual_points != expected_points:
+            raise ValueError(
+                f'{checkpoint_name} rank reward mismatch: checkpoint centered env.pts='
+                f'{actual_points!r}, current centered env.pts={expected_points!r}'
             )
         return {
             'source': 'oracle_critic_pretrain',
@@ -498,7 +703,9 @@ def prepare_policy_advantage_and_value_target(advantage, v_target, *, device, ga
 
     advantage = advantage.to(dtype=_torch.float32, device=device)
     if gae_enabled:
-        adv_std = advantage.std().clamp(min=1e-8)
+        # A replay filter can leave one sample; unbiased std is undefined there.
+        adv_std = advantage.std() if advantage.numel() > 1 else advantage.new_zeros(())
+        adv_std = adv_std.clamp(min=1e-8)
         adv_mean = advantage.mean()
         normalized_advantage = (advantage - adv_mean) / adv_std
     else:
@@ -509,6 +716,15 @@ def prepare_policy_advantage_and_value_target(advantage, v_target, *, device, ga
         else None
     )
     return advantage, normalized_advantage, value_target
+
+
+def compute_policy_objective_loss(clip_loss, entropy, entropy_weight):
+    if clip_loss.shape != entropy.shape:
+        raise ValueError(
+            'clip_loss and entropy must have identical shapes; '
+            f'got {tuple(clip_loss.shape)} and {tuple(entropy.shape)}'
+        )
+    return -(clip_loss + entropy * float(entropy_weight)).mean()
 
 
 ONLINE_CONTEXT_META_SPECS = {
@@ -794,10 +1010,15 @@ def init_online_stats(*, device):
 
     return {
         'important_ratio': scalar(),
+        'approx_kl': scalar(),
+        'clip_fraction': scalar(),
         'ratio_var': scalar(),
-        'ratio_max': scalar(),
+        'ratio_batch_max_sum': scalar(),
+        'ratio_window_max': scalar(),
+        'clipped_ratio_window_max': scalar(),
         'entropy': scalar(),
         'policy_logit_gate_fraction': scalar(),
+        'policy_update_active': scalar(),
         'loss': scalar(),
         'aux_loss': scalar(),
         'opp_loss': scalar(),
@@ -810,7 +1031,9 @@ def init_online_stats(*, device):
         'importance_reject_fraction': scalar(),
         'policy_scope_reject_fraction': scalar(),
         'replay_is_coverage': scalar(),
+        'replay_is_coverage_min': _torch.ones((), dtype=_torch.float32, device=device),
         'replay_is_missing_fraction': scalar(),
+        'replay_is_missing_fraction_max': scalar(),
         'replay_is_version_gap': scalar(),
         'replay_is_version_gap_max': scalar(),
         'aux_monitor': init_online_aux_monitor_stats(device=device),
@@ -931,6 +1154,18 @@ class PublishedPolicyHistory:
     def versions(self):
         return tuple(self._items.keys())
 
+
+def tracked_replay_versions_mask(replay_versions, policy_history):
+    import torch as _torch
+
+    versions = replay_versions.to(dtype=_torch.int64, device='cpu')
+    tracked = _torch.zeros_like(versions, dtype=_torch.bool)
+    for version in versions.unique().tolist():
+        if version >= 0 and policy_history.get(version) is not None:
+            tracked |= versions.eq(version)
+    return tracked
+
+
 def compute_gae_advantages(kyoku_adv, at_kyoku, v_pred, gamma, lam):
     """Compute step-level GAE advantages from a complete game trajectory."""
     step_rewards = expand_sparse_kyoku_reward_to_steps(kyoku_adv, at_kyoku)
@@ -1028,6 +1263,10 @@ def online_resume_model_signature(config):
     # expected by train_online checkpoints, so it must not block exact resume.
     return {
         'version': control_cfg.get('version'),
+        'centered_rank_rewards': centered_reward_signature(config),
+        'actor_objective_contract': policy_cfg.get('actor_objective_contract', 'legacy'),
+        'actor_objective': policy_cfg.get('actor_objective', 'legacy_hybrid'),
+        'value_architecture': online_value_architecture(config),
         'resnet': dict(resnet_cfg),
         'oracle_experiment_arm': (
             config.get('oracle_experiments', {}).get('resolved_arm', 'current_config')
@@ -1047,6 +1286,7 @@ def online_resume_model_signature(config):
             if isinstance(value_cfg, dict) and value_cfg.get('enabled', False)
             else 'single_tower'
         ),
+        'independent_actor_lr_clock': value_independent_actor_lr_clock(config),
         'value_target_mode': value_target_mode(config),
         'value_reward_source': value_reward_source(config),
         'gae_enabled': bool(policy_cfg.get('gae_enabled', False))
@@ -1125,6 +1365,104 @@ def checkpoint_supports_online_resume(state, *, current_config, optimizer):
         return False
 
     return optimizer_state_matches_current_layout(state['optimizer'], optimizer)
+
+
+def _split_decay_params(model):
+    from torch import nn as _nn
+
+    params_dict = {}
+    to_decay = set()
+    for mod_name, mod in model.named_modules():
+        for name, param in mod.named_parameters(prefix=mod_name, recurse=False):
+            params_dict[name] = param
+            if isinstance(mod, (_nn.Linear, _nn.Conv1d)) and name.endswith('weight'):
+                to_decay.add(name)
+    decay = [params_dict[name] for name in sorted(to_decay)]
+    no_decay = [params_dict[name] for name in sorted(params_dict.keys() - to_decay)]
+    return decay, no_decay
+
+
+def _append_optimizer_groups(
+    param_groups,
+    name,
+    decay_params,
+    no_decay_params,
+    *,
+    weight_decay,
+    lr_scale=1.0,
+    schedule_role=None,
+):
+    shared = {
+        'lr': float(lr_scale),
+        'lr_scale': float(lr_scale),
+    }
+    if schedule_role is not None:
+        shared['schedule_role'] = str(schedule_role)
+    if decay_params:
+        param_groups.append({
+            'name': f'{name}_decay',
+            'params': decay_params,
+            'weight_decay': weight_decay,
+            **shared,
+        })
+    if no_decay_params:
+        param_groups.append({
+            'name': f'{name}_no_decay',
+            'params': no_decay_params,
+            **shared,
+        })
+
+
+def reconcile_loaded_scheduler_state(scheduler, optimizer, scheduler_cfg, *, steps):
+    if not isinstance(scheduler_cfg, dict):
+        return {}
+
+    loaded_lrs = [float(group.get('lr', 0.0) or 0.0) for group in optimizer.param_groups]
+    original_values = {}
+    changed = {}
+    int_keys = {'warm_up_steps', 'max_steps', 'offset', 'epoch_size'}
+    for key in ('init', 'peak', 'final', 'warm_up_steps', 'max_steps', 'offset', 'epoch_size'):
+        if key not in scheduler_cfg or not hasattr(scheduler, key):
+            continue
+        old_value = getattr(scheduler, key)
+        raw_value = scheduler_cfg[key]
+        new_value = int(raw_value) if key in int_keys else float(raw_value)
+        if old_value != new_value:
+            original_values[key] = old_value
+            setattr(scheduler, key, new_value)
+            changed[key] = (old_value, new_value)
+
+    if not changed:
+        return changed
+
+    last_epoch = int(steps)
+    scheduler.last_epoch = last_epoch
+    if hasattr(scheduler, '_step_inner'):
+        scale = float(scheduler._step_inner(last_epoch))
+        base_lrs = list(getattr(scheduler, 'base_lrs', []))
+        if len(base_lrs) != len(optimizer.param_groups):
+            base_lrs = [group.get('initial_lr', 1.0) for group in optimizer.param_groups]
+            scheduler.base_lrs = base_lrs
+        lrs = [float(base_lr) * scale for base_lr in base_lrs]
+        if any(new_lr > loaded_lr * (1.0 + 1e-12) for new_lr, loaded_lr in zip(lrs, loaded_lrs)):
+            for key, old_value in original_values.items():
+                setattr(scheduler, key, old_value)
+            scheduler._last_lr = loaded_lrs
+            changed['lr_increase_guard'] = {
+                'loaded_lrs': loaded_lrs,
+                'proposed_lrs': lrs,
+                'ignored_scheduler_changes': {
+                    key: value
+                    for key, value in changed.items()
+                    if key != 'lr_increase_guard'
+                },
+            }
+            return changed
+        for group, lr in zip(optimizer.param_groups, lrs):
+            group['lr'] = lr
+        scheduler._last_lr = lrs
+
+    return changed
 
 
 def resolve_online_init_state_file(config):
@@ -1343,12 +1681,16 @@ def train():
     resolved_value_target_mode = value_target_mode(config) if value_enabled else 'current_player'
     resolved_value_reward_source = value_reward_source(config) if value_enabled else 'grp'
     value_num_players = value_num_players_from_mode(resolved_value_target_mode) if value_enabled else 1
+    exact_zero_sum = bool(value_cfg.get('exact_zero_sum', False)) if value_enabled else False
+    if exact_zero_sum and resolved_value_target_mode != 'all_players':
+        raise ValueError('value.exact_zero_sum requires value.target_mode=all_players')
     zero_sum_weight = (
         value_cfg.get('zero_sum_weight', 0.01)
         if value_enabled and resolved_value_target_mode == 'all_players'
         else 0.0
     )
     critic_warmup_steps = value_critic_warmup_steps(config) if value_enabled else 0
+    independent_actor_lr_clock = value_independent_actor_lr_clock(config)
     actor_oracle_enabled = actor_oracle_guiding_enabled(config)
     actor_oracle_source = actor_oracle_guiding_source(config)
     actor_oracle_lr_scale = actor_oracle_guiding_lr_scale(config)
@@ -1436,9 +1778,15 @@ def train():
     entropy_adjust_rate = float(policy_cfg.get('entropy_adjust_rate', 1e-4) or 0.0)
     clip_ratio = policy_cfg['clip_ratio']
     dual_clip = policy_cfg['dual_clip']
+    actor_lr_scale = policy_actor_lr_scale(config)
+    policy_lr_scale = policy_head_lr_scale(config)
+    policy_interval = policy_update_interval(config)
+    policy_phase = policy_update_phase(config) % policy_interval
     logit_gate_threshold = policy_logit_gate_threshold(config)
     importance_rho_clip = policy_importance_rho_clip(config)
     importance_c_clip = policy_importance_c_clip(config)
+    vtrace_target_rho_clip = policy_vtrace_target_rho_clip(config)
+    vtrace_target_c_clip = policy_vtrace_target_c_clip(config)
     policy_action_scope = policy_online_action_scope(config)
     # --- Step-Level GAE ---
     gae_enabled = config['policy'].get('gae_enabled', False) and value_enabled
@@ -1472,7 +1820,7 @@ def train():
         online
         and gae_enabled
         and value_enabled
-        and (importance_rho_clip > 0 or importance_c_clip > 0)
+        and (vtrace_target_rho_clip > 0 or vtrace_target_c_clip > 0)
     )
     vtrace_recursion_enabled = bool(
         vtrace_requested
@@ -1481,24 +1829,31 @@ def train():
             or (replay_is_vtrace_mode == 'auto' and online_replay_is)
         )
     )
+    actor_objective = validate_actor_objective(
+        config, vtrace_enabled=vtrace_recursion_enabled,
+        gae_enabled=gae_enabled, replay_is=online_replay_is,
+    )
+    # Missing v2 metadata must not be interpreted as an exact resume of the old actor loss.
+    policy_cfg['actor_objective'] = actor_objective
+    policy_cfg['actor_objective_contract'] = ACTOR_OBJECTIVE_VERSION
     if vtrace_recursion_enabled:
         if replay_is_vtrace_mode == 'always':
             logging.info(
                 'true V-trace recursion enabled for online trajectory preprocessing: '
-                'mode=always rho_clip=%.4f c_clip=%.4f gamma=%.4f; '
+                'mode=always target_rho_clip=%.4f target_c_clip=%.4f gamma=%.4f; '
                 'gae_lambda is not used in this path',
-                importance_rho_clip,
-                importance_c_clip,
+                vtrace_target_rho_clip,
+                vtrace_target_c_clip,
                 gae_gamma,
             )
         else:
             logging.info(
                 'true V-trace recursion armed for stale replay trajectories only: '
-                'mode=auto min_version_gap=%s rho_clip=%.4f c_clip=%.4f gamma=%.4f; '
+                'mode=auto min_version_gap=%s target_rho_clip=%.4f target_c_clip=%.4f gamma=%.4f; '
                 'fresh replay keeps plain GAE and gae_lambda, stale replay uses V-trace',
                 replay_is_vtrace_min_version_gap,
-                importance_rho_clip,
-                importance_c_clip,
+                vtrace_target_rho_clip,
+                vtrace_target_c_clip,
                 gae_gamma,
             )
     elif vtrace_requested and replay_is_vtrace_mode == 'auto' and not online_replay_is:
@@ -1511,11 +1866,11 @@ def train():
             'true V-trace recursion disabled explicitly by '
             'online.importance_sampling.vtrace_mode=disabled'
         )
-    elif importance_c_clip > 0:
+    elif vtrace_target_c_clip > 0:
         logging.warning(
-            'policy.importance_c_clip/vtrace_c_clip=%.4f is set, but V-trace recursion '
+            'policy.vtrace_target_c_clip/vtrace_c_clip=%.4f is set, but V-trace recursion '
             'only runs on the online value+GAE path; current run will not use c_clip',
-            importance_c_clip,
+            vtrace_target_c_clip,
         )
     if logit_gate_threshold > 0:
         logging.info(
@@ -1529,12 +1884,22 @@ def train():
             entropy_floor_start_step,
             entropy_adjust_rate,
         )
+    if policy_interval > 1:
+        logging.info(
+            'policy update throttle enabled: interval=%s phase=%s',
+            policy_interval,
+            policy_phase,
+        )
     if critic_warmup_steps > 0:
         if not value_enabled:
             raise ValueError('value.critic_warmup_steps requires value.enabled=true')
         logging.info(
             'Oracle critic actor-freeze warmup enabled: steps=%s (policy/aux heads frozen, value loss only)',
             critic_warmup_steps,
+        )
+    if independent_actor_lr_clock:
+        logging.info(
+            'independent actor LR clock enabled: critic warmup does not consume actor schedule'
         )
 
     mortal = Brain(version=version, is_oracle=actor_oracle_enabled, **config['resnet'], Norm="GN").to(device)
@@ -1556,12 +1921,7 @@ def train():
 
     # --- Oracle Critic + Value Head ---
     if value_enabled:
-        from mortal.core.model import ValueHead
-        if oracle_critic and oracle_critic_arch == 'dual_tower':
-            oracle_brain = OracleDualTowerBrain(version=version, **config['resnet'], Norm="GN").to(device)
-        else:
-            oracle_brain = Brain(version=version, is_oracle=True, **config['resnet'], Norm="GN").to(device) if oracle_critic else None
-        value_net = ValueHead(num_players=value_num_players).to(device)
+        oracle_brain, value_net = build_online_value_models(config, device=device)
     else:
         oracle_brain = None
         value_net = None
@@ -1654,9 +2014,35 @@ def train():
     if exp_reward_net is not None:
         logging.info(f'exp_reward_net params: {parameter_count(exp_reward_net):,}')
 
-    decay_params = []
-    no_decay_params = []
-    models_for_optim = [mortal, policy_net]
+    use_policy_lr_scales = actor_lr_scale != 1.0 or policy_lr_scale != 1.0
+    use_named_optimizer_groups = use_policy_lr_scales or independent_actor_lr_clock
+    param_groups = []
+    if use_named_optimizer_groups:
+        logging.info(
+            'named optimizer groups enabled: actor_lr_scale=%.4g policy_head_lr_scale=%.4g independent_actor_lr_clock=%s',
+            actor_lr_scale,
+            policy_lr_scale,
+            independent_actor_lr_clock,
+        )
+        for group_name, model, lr_scale in (
+            ('actor', mortal, actor_lr_scale),
+            ('policy_head', policy_net, policy_lr_scale),
+        ):
+            decay_params, no_decay_params = _split_decay_params(model)
+            _append_optimizer_groups(
+                param_groups,
+                group_name,
+                decay_params,
+                no_decay_params,
+                weight_decay=weight_decay,
+                lr_scale=lr_scale,
+                schedule_role='actor',
+            )
+        models_for_optim = []
+    else:
+        decay_params = []
+        no_decay_params = []
+        models_for_optim = [mortal, policy_net]
     if aux_net is not None:
         models_for_optim.append(aux_net)
     if opponent_aux_net is not None:
@@ -1675,22 +2061,45 @@ def train():
         models_for_optim.append(hand_value_regret_net)
     if exp_reward_net is not None:
         models_for_optim.append(exp_reward_net)
-    for model in models_for_optim:
-        params_dict = {}
-        to_decay = set()
-        for mod_name, mod in model.named_modules():
-            for name, param in mod.named_parameters(prefix=mod_name, recurse=False):
-                params_dict[name] = param
-                if isinstance(mod, (nn.Linear, nn.Conv1d)) and name.endswith('weight'):
-                    to_decay.add(name)
-        decay_params.extend(params_dict[name] for name in sorted(to_decay))
-        no_decay_params.extend(params_dict[name] for name in sorted(params_dict.keys() - to_decay))
-    param_groups = [
-        {'params': decay_params, 'weight_decay': weight_decay},
-        {'params': no_decay_params},
-    ]
+    if use_named_optimizer_groups:
+        critic_models = tuple(
+            model
+            for model in (oracle_brain, value_net, exp_reward_net)
+            if model is not None
+        )
+        actor_other_idx = 0
+        critic_idx = 0
+        for model in models_for_optim:
+            is_critic_model = any(model is candidate for candidate in critic_models)
+            if is_critic_model:
+                group_name = f'critic_{critic_idx}'
+                critic_idx += 1
+                schedule_role = 'critic'
+            else:
+                group_name = f'actor_aux_{actor_other_idx}'
+                actor_other_idx += 1
+                schedule_role = 'actor'
+            decay_params, no_decay_params = _split_decay_params(model)
+            _append_optimizer_groups(
+                param_groups,
+                group_name,
+                decay_params,
+                no_decay_params,
+                weight_decay=weight_decay,
+                schedule_role=schedule_role,
+            )
+    else:
+        for model in models_for_optim:
+            model_decay_params, model_no_decay_params = _split_decay_params(model)
+            decay_params.extend(model_decay_params)
+            no_decay_params.extend(model_no_decay_params)
+        param_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params},
+        ]
     optimizer = optim.AdamW(param_groups, lr=1, weight_decay=0, betas=betas, eps=eps)
     scheduler = LinearWarmUpCosineAnnealingLR(optimizer, **config['optim']['scheduler'])
+    apply_independent_actor_lr_clock(optimizer, scheduler, config, steps=0)
     scaler = GradScaler(device.type, enabled=enable_amp)
     test_player = TestPlayer()
     best_perf = {
@@ -1788,6 +2197,12 @@ def train():
         if checkpoint_supports_online_resume(state, current_config=config, optimizer=optimizer):
             optimizer.load_state_dict(state['optimizer'])
             scheduler.load_state_dict(state['scheduler'])
+            scheduler_changes = reconcile_loaded_scheduler_state(
+                scheduler,
+                optimizer,
+                config['optim'].get('scheduler', {}),
+                steps=int(state.get('steps', 0) or 0),
+            )
             if state.get('shared_stats') is not None:
                 logging.info(
                     'ignoring legacy online reward standardization stats from checkpoint; '
@@ -1808,12 +2223,28 @@ def train():
                 log_entropy_alpha = state['log_entropy_alpha']
             else:
                 log_entropy_alpha = math.log(max(dynamic_entropy_weight, 1e-8))
+            if scheduler_changes:
+                logging.info(
+                    'reconciled scheduler state with current config: %s',
+                    scheduler_changes,
+                )
             logging.info('resumed optimizer/scheduler state from checkpoint')
         else:
+            if state_file_model_signature_matches and 'steps' in state:
+                steps = int(state.get('steps', 0) or 0)
+                optimizer_steps = int(
+                    state.get(
+                        'optimizer_steps',
+                        (int(steps) + max(int(opt_step_every), 1) - 1) // max(int(opt_step_every), 1),
+                    )
+                )
             logging.info(
                 'initialized training from checkpoint weights only; '
-                'optimizer/scheduler/scaler/best_perf were reset '
+                'optimizer/scheduler/scaler/best_perf were reset; '
+                'steps=%s optimizer_steps=%s '
                 '(brain bridge loaded=%s skipped=%s)',
+                steps,
+                optimizer_steps,
                 len(bridge_info['loaded_keys']),
                 len(bridge_info['skipped_keys']),
             )
@@ -1896,6 +2327,7 @@ def train():
                 init_metadata,
             )
 
+    apply_independent_actor_lr_clock(optimizer, scheduler, config, steps=steps)
     effective_aux_training_cfg = resolve_effective_online_aux_training_cfg(
         config,
         checkpoint_config=loaded_config_for_aux_alignment,
@@ -2330,11 +2762,21 @@ def train():
             )
             total_steps = 0
             total_games = 0
-            infer_chunk = 2048
+            infer_chunk = online_gae_inference_batch_size(config)
 
             for chunk_start in range(0, len(fl), chunk_size):
                 chunk_files = fl[chunk_start:chunk_start + chunk_size]
                 chunk_trajs = list(traj_loader.iter_game_trajectories(chunk_files))
+                if online_replay_is and replay_is_drop_untracked:
+                    before_count = len(chunk_trajs)
+                    chunk_trajs = [traj for traj in chunk_trajs if behavior_version_is_usable(
+                        traj.get('replay_param_version'), published_policy_history,
+                        published_version=published_param_version,
+                        max_gap=int(policy_cfg.get('max_behavior_version_gap', 1)),
+                    )]
+                    if len(chunk_trajs) != before_count:
+                        logging.warning('dropped %s unknown or stale replay trajectories before targets',
+                                        before_count - len(chunk_trajs))
                 if not chunk_trajs:
                     continue
 
@@ -2487,8 +2929,8 @@ def train():
                             v_pred[:, 0],
                             traj_log_rhos,
                             gae_gamma,
-                            rho_clip=importance_rho_clip,
-                            c_clip=importance_c_clip,
+                            rho_clip=vtrace_target_rho_clip,
+                            c_clip=vtrace_target_c_clip,
                         )
                     else:
                         gae_adv = compute_gae_advantages(
@@ -2512,8 +2954,8 @@ def train():
                                 v_pred[:, player_idx],
                                 traj_log_rhos,
                                 gae_gamma,
-                                rho_clip=importance_rho_clip,
-                                c_clip=importance_c_clip,
+                                rho_clip=vtrace_target_rho_clip,
+                                c_clip=vtrace_target_c_clip,
                             )
                         else:
                             player_adv = compute_gae_advantages(
@@ -2536,7 +2978,9 @@ def train():
                     if traj.get('context_meta') is not None:
                         buf['context_meta'].append(traj['context_meta'])
                     if online_replay_is:
-                        buf['replay_param_version'].extend([traj.get('replay_param_version', -1)] * n)
+                        buf['replay_param_version'].extend([
+                            normalized_behavior_version(traj.get('replay_param_version'))
+                        ] * n)
                     for key in ('opp_shanten', 'opp_tenpai',
                                 'danger_valid', 'danger_any', 'danger_value', 'danger_player_mask',
                                 'tile_eff_valid', 'tile_eff_shanten_delta',
@@ -2586,7 +3030,9 @@ def train():
                 sub_loader = DataLoader(chunk_ds, batch_size=batch_size, drop_last=False,
                                         shuffle=False, num_workers=0, pin_memory=True)
                 yield from sub_loader
-                del chunk_ds
+                # DataLoader owns its dataset. Release both before encoding the
+                # next chunk, otherwise two full chunks coexist during setup.
+                del sub_loader, chunk_ds
                 gc.collect()
 
             logging.info(f'GAE total: {total_steps:,} steps from {total_games:,} games')
@@ -2677,6 +3123,9 @@ def train():
                 return old_log_prob, coverage, missing_fraction, gap_mean, gap_max, tracked_mask_cpu
 
             replay_param_version_cpu = replay_param_version.to(dtype=torch.int64, device='cpu')
+            tracked_mask_cpu = tracked_replay_versions_mask(
+                replay_param_version_cpu, published_policy_history,
+            )
             valid_mask_cpu = replay_param_version_cpu.ge(0)
             valid_count = int(valid_mask_cpu.sum().item())
             if valid_count <= 0:
@@ -2749,7 +3198,7 @@ def train():
                 float((valid_mask_cpu & ~used_behavior_mask_cpu).float().mean().item()),
                 device=device,
             )
-            tracked_mask_cpu = (~valid_mask_cpu) | used_behavior_mask_cpu
+            tracked_mask_cpu = used_behavior_mask_cpu
             return old_log_prob, coverage, missing_fraction, gap_mean, gap_max, tracked_mask_cpu
 
         def train_batch(obs, actions, masks, advantage, player_rank,
@@ -2899,6 +3348,7 @@ def train():
             replay_is_gap_max = torch.tensor(0.0, device=device)
             replay_is_tracked_mask_cpu = None
             critic_warmup = value_critic_warmup_active(config, steps)
+            policy_step_active = (not critic_warmup) and policy_update_active(config, steps)
 
             with torch.no_grad():
                 with torch.autocast(device.type, enabled=enable_amp):
@@ -2932,10 +3382,14 @@ def train():
                 dist = Categorical(logits=logits)
                 new_log_prob = dist.log_prob(actions)
                 ratio = (new_log_prob - old_log_prob).exp()
+                clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
                 importance_reject_fraction = torch.tensor(0.0, device=device)
                 if replay_is_drop_untracked and replay_is_tracked_mask_cpu is not None:
                     keep_mask = replay_is_tracked_mask_cpu.to(device=device)
-                    if bool(keep_mask.any()) and not bool(keep_mask.all()):
+                    if not bool(keep_mask.any()):
+                        logging.warning('dropping replay batch with no tracked behavior policy')
+                        return
+                    if not bool(keep_mask.all()):
                         obs = obs[keep_mask]
                         actions = actions[keep_mask]
                         masks = masks[keep_mask]
@@ -2946,6 +3400,7 @@ def train():
                         old_log_prob = old_log_prob[keep_mask]
                         new_log_prob = new_log_prob[keep_mask]
                         ratio = ratio[keep_mask]
+                        clipped_ratio = clipped_ratio[keep_mask]
                         phi = phi[keep_mask]
                         logits = logits[keep_mask]
                         if actor_invisible_obs is not None:
@@ -2997,6 +3452,7 @@ def train():
                         old_log_prob = old_log_prob[keep_mask]
                         new_log_prob = new_log_prob[keep_mask]
                         ratio = ratio[keep_mask]
+                        clipped_ratio = clipped_ratio[keep_mask]
                         phi = phi[keep_mask]
                         logits = logits[keep_mask]
                         if actor_invisible_obs is not None:
@@ -3042,19 +3498,21 @@ def train():
                 current_bs = actions.shape[0]
                 assert masks[range(current_bs), actions].all()
 
-                if importance_rho_clip > 0:
-                    rho = ratio.clamp(max=importance_rho_clip)
-                else:
-                    rho = ratio
-
-                loss1 = rho * advantage
-                loss2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * advantage
-                min_loss = torch.min(loss1, loss2)
-
-                clip_loss = torch.where(
-                advantage < 0,
-                torch.max(min_loss , dual_clip * advantage),
-                min_loss
+                drift = policy_drift(ratio, clip_ratio)
+                if (
+                    drift['approx_kl'].item() > float(policy_cfg.get('target_kl', 0.02))
+                    or drift['clip_fraction'].item() > float(policy_cfg.get('max_clip_fraction', 0.5))
+                ):
+                    logging.warning('skipping drifted batch before optimizer update: KL=%.6g clip_fraction=%.4f',
+                                    drift['approx_kl'].item(), drift['clip_fraction'].item())
+                    writer.add_scalar('policy_drift/rejected_kl', drift['approx_kl'], steps)
+                    writer.add_scalar('policy_drift/rejected_clip_fraction', drift['clip_fraction'], steps)
+                    return
+                clip_loss = actor_surrogate(
+                    new_log_prob, ratio,
+                    raw_advantage if actor_objective == 'vtrace' else advantage,
+                    objective=actor_objective, clip_ratio=clip_ratio,
+                    dual_clip=dual_clip, importance_rho_clip=importance_rho_clip,
                 )
                 policy_logit_gate_fraction = torch.tensor(0.0, device=device)
                 if logit_gate_threshold > 0:
@@ -3069,13 +3527,16 @@ def train():
                     while gate_tensor.ndim < clip_loss.ndim:
                         gate_tensor = gate_tensor.unsqueeze(-1)
                     clip_loss = clip_loss * gate_tensor
-                entropy = dist.entropy().view(-1, 1)
-                entropy_loss = entropy * dynamic_entropy_weight
+                entropy = dist.entropy()
 
-                if critic_warmup:
+                if not policy_step_active:
                     loss = torch.zeros((), dtype=phi.dtype, device=device)
                 else:
-                    loss = -(clip_loss + entropy_loss).mean()
+                    loss = compute_policy_objective_loss(
+                        clip_loss,
+                        entropy,
+                        dynamic_entropy_weight,
+                    )
 
                 if online_context_meta_enabled and context_meta is None:
                     raise RuntimeError('online auxiliary heads enabled but context_meta is missing')
@@ -3084,7 +3545,7 @@ def train():
                 # context weighting: turn bucket, south/all-last emphasis, gap focus,
                 # and max-weight clipping.
                 aux_loss_val = torch.tensor(0.0, device=device)
-                if aux_net is not None and not critic_warmup:
+                if aux_net is not None and policy_step_active:
                     rank_logits = aux_net(phi)[0]
                     rank_aux_weights = compute_rank_aux_sample_weights(
                         context_meta,
@@ -3121,7 +3582,7 @@ def train():
 
                 # Opponent State auxiliary loss
                 opp_loss_val = torch.tensor(0.0, device=device)
-                if opponent_aux_net is not None and opp_shanten is not None and not critic_warmup:
+                if opponent_aux_net is not None and opp_shanten is not None and policy_step_active:
                     opp_shanten_dev = opp_shanten.to(dtype=torch.int64, device=device)
                     opp_tenpai_dev = opp_tenpai.to(dtype=torch.int64, device=device)
                     shanten_logits, tenpai_logits = opponent_aux_net(phi)
@@ -3186,7 +3647,7 @@ def train():
 
                 # Danger auxiliary loss
                 danger_loss_val = torch.tensor(0.0, device=device)
-                if danger_aux_net is not None and danger_valid is not None and not critic_warmup:
+                if danger_aux_net is not None and danger_valid is not None and policy_step_active:
                     danger_valid_dev = danger_valid.to(dtype=torch.bool, device=device)
                     danger_any_target = danger_any.to(dtype=torch.bool, device=device)
                     danger_any_dev = danger_any_target.to(dtype=torch.float32)
@@ -3325,7 +3786,7 @@ def train():
 
                 # Local Regret Heads
                 tile_eff_loss_val = torch.tensor(0.0, device=device)
-                if tile_eff_net is not None and tile_eff_valid is not None and not critic_warmup:
+                if tile_eff_net is not None and tile_eff_valid is not None and policy_step_active:
                     tile_eff_pred = tile_eff_net(phi.detach())
                     te_valid = tile_eff_valid.to(device=device)
                     if te_valid.any():
@@ -3335,7 +3796,7 @@ def train():
                         loss = loss + tile_eff_weight * tile_eff_loss_val
 
                 furo_regret_loss_val = torch.tensor(0.0, device=device)
-                if furo_regret_net is not None and furo_valid is not None and not critic_warmup:
+                if furo_regret_net is not None and furo_valid is not None and policy_step_active:
                     furo_pred = furo_regret_net(phi.detach())
                     fr_valid = furo_valid.to(device=device)
                     if fr_valid.any():
@@ -3356,7 +3817,7 @@ def train():
                         loss = loss + furo_regret_weight * furo_regret_loss_val
 
                 hand_value_regret_loss_val = torch.tensor(0.0, device=device)
-                if hand_value_regret_net is not None and hand_value_valid is not None and not critic_warmup:
+                if hand_value_regret_net is not None and hand_value_valid is not None and policy_step_active:
                     hv_pred = hand_value_regret_net(phi.detach())
                     hv_valid = hand_value_valid.to(device=device)
                     if hv_valid.any():
@@ -3370,7 +3831,7 @@ def train():
 
                 # Expected Reward Network (reuses cached oracle features)
                 exp_reward_loss_val = torch.tensor(0.0, device=device)
-                if exp_reward_net is not None and steps >= exp_reward_warmup and not critic_warmup:
+                if exp_reward_net is not None and steps >= exp_reward_warmup and policy_step_active:
                     if oracle_phi_cached is not None:
                         oracle_phi_for_reward = oracle_phi_cached.detach()
                     else:
@@ -3396,10 +3857,23 @@ def train():
 
             with torch.inference_mode():
                 stats['important_ratio'] += ratio.mean()
-                stats['ratio_var'] += ratio.var()
-                stats['ratio_max'] += ratio.max()
+                stats['approx_kl'] += drift['approx_kl']
+                stats['clip_fraction'] += drift['clip_fraction']
+                stats['ratio_var'] += ratio.var(unbiased=False)
+                ratio_max = ratio.max()
+                stats['ratio_batch_max_sum'] += ratio_max
+                stats['ratio_window_max'] = torch.maximum(stats['ratio_window_max'], ratio_max)
+                stats['clipped_ratio_window_max'] = torch.maximum(
+                    stats['clipped_ratio_window_max'],
+                    clipped_ratio.max(),
+                )
                 stats['entropy'] += entropy.mean()
                 stats['policy_logit_gate_fraction'] += policy_logit_gate_fraction
+                stats['policy_update_active'] += torch.tensor(
+                    float(policy_step_active),
+                    dtype=stats['policy_update_active'].dtype,
+                    device=device,
+                )
                 stats['loss'] += loss
                 stats['aux_loss'] += aux_loss_val
                 stats['opp_loss'] += opp_loss_val
@@ -3412,9 +3886,20 @@ def train():
                 stats['importance_reject_fraction'] += importance_reject_fraction
                 stats['policy_scope_reject_fraction'] += policy_scope_reject_fraction
                 stats['replay_is_coverage'] += replay_is_coverage
+                stats['replay_is_coverage_min'] = torch.minimum(
+                    stats['replay_is_coverage_min'],
+                    replay_is_coverage,
+                )
                 stats['replay_is_missing_fraction'] += replay_is_missing_fraction
+                stats['replay_is_missing_fraction_max'] = torch.maximum(
+                    stats['replay_is_missing_fraction_max'],
+                    replay_is_missing_fraction,
+                )
                 stats['replay_is_version_gap'] += replay_is_gap_mean
-                stats['replay_is_version_gap_max'] += replay_is_gap_max
+                stats['replay_is_version_gap_max'] = torch.maximum(
+                    stats['replay_is_version_gap_max'],
+                    replay_is_gap_max,
+                )
 
             steps += 1
             idx += 1
@@ -3428,11 +3913,26 @@ def train():
                 optimizer.zero_grad(set_to_none=True)
                 optimizer_steps += 1
             scheduler.step()
+            apply_independent_actor_lr_clock(
+                optimizer,
+                scheduler,
+                config,
+                steps=steps,
+            )
             if actor_oracle_guiding_continuation_active(config, steps):
                 scaled_lrs = scheduler.get_last_lr()
+                has_schedule_roles = any(
+                    group.get('schedule_role') is not None
+                    for group in optimizer.param_groups
+                )
                 for param_group, base_lr in zip(optimizer.param_groups, scaled_lrs):
+                    if has_schedule_roles and param_group.get('schedule_role') != 'actor':
+                        continue
                     param_group['lr'] = base_lr * actor_oracle_lr_scale
             pb.update(1)
+
+            if old_policy_update_due(steps, old_update_every):
+                refresh_old_policy_snapshot(Old_mortal, Old_policy_net, mortal, policy_net)
 
             if online and steps % submit_every == 0:
                 published_version = publish_current_policy(is_idle=False)
@@ -3443,13 +3943,23 @@ def train():
                 aux_metrics = finalize_online_aux_monitor_stats(stats['aux_monitor'])
 
                 writer.add_scalar('important_ratio/ratio', stats['important_ratio'] / save_every, steps)
+                writer.add_scalar('policy_drift/approx_kl', stats['approx_kl'] / save_every, steps)
+                writer.add_scalar('policy_drift/clip_fraction', stats['clip_fraction'] / save_every, steps)
                 writer.add_scalar('important_ratio/variance', stats['ratio_var'] / save_every, steps)
-                writer.add_scalar('important_ratio/max', stats['ratio_max'] / save_every, steps)
+                writer.add_scalar('important_ratio/max', stats['ratio_batch_max_sum'] / save_every, steps)
+                writer.add_scalar('important_ratio/batch_max_mean', stats['ratio_batch_max_sum'] / save_every, steps)
+                writer.add_scalar('important_ratio/window_max', stats['ratio_window_max'], steps)
+                writer.add_scalar('important_ratio/clipped_window_max', stats['clipped_ratio_window_max'], steps)
                 writer.add_scalar('entropy/entropy', stats['entropy'] / save_every, steps)
                 writer.add_scalar('entropy/dynamic_weight', dynamic_entropy_weight, steps)
                 writer.add_scalar(
                     'policy/logit_gate_fraction',
                     stats['policy_logit_gate_fraction'] / save_every,
+                    steps,
+                )
+                writer.add_scalar(
+                    'policy/update_active',
+                    stats['policy_update_active'] / save_every,
                     steps,
                 )
                 writer.add_scalar('loss', stats['loss'] / save_every, steps)
@@ -3480,8 +3990,18 @@ def train():
                         steps,
                     )
                     writer.add_scalar(
+                        'replay_is/coverage_min',
+                        stats['replay_is_coverage_min'],
+                        steps,
+                    )
+                    writer.add_scalar(
                         'replay_is/missing_fraction',
                         stats['replay_is_missing_fraction'] / save_every,
+                        steps,
+                    )
+                    writer.add_scalar(
+                        'replay_is/missing_fraction_max',
+                        stats['replay_is_missing_fraction_max'],
                         steps,
                     )
                     writer.add_scalar(
@@ -3491,7 +4011,7 @@ def train():
                     )
                     writer.add_scalar(
                         'replay_is/version_gap_max',
-                        stats['replay_is_version_gap_max'] / save_every,
+                        stats['replay_is_version_gap_max'],
                         steps,
                     )
                     writer.add_scalar(
@@ -3533,11 +4053,11 @@ def train():
                     published_version = publish_current_policy(is_idle=False)
                     logging.info('param has been submitted: version=%s', published_version)
 
-                if steps % old_update_every == 0:
-                    Old_mortal = deepcopy(mortal)
-                    Old_policy_net = deepcopy(policy_net)
-    
-                if steps % test_every == 0:
+                if periodic_test_play_due(
+                    enabled=test_play_eval_enabled,
+                    steps=steps,
+                    test_every=test_every,
+                ):
                     run_test_play_evaluation(
                         stats_dict=stats_dict,
                         save_best_checkpoint=True,

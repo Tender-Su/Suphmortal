@@ -1,0 +1,62 @@
+[
+  {
+    "name": "dual_residual_value_hlgauss_sigma075_h256",
+    "critic_arch": "dual_tower",
+    "value_loss_mode": "hl_gauss",
+    "value_head_hidden": 256,
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random",
+      "value_num_bins": 100,
+      "value_target_min": -6.0,
+      "value_target_max": 6.0,
+      "value_sigma_to_bin_ratio": 0.75,
+      "value_padding_sigma": 3.0
+    }
+  },
+  {
+    "name": "dual_residual_value_hlgauss_sigma100_h256",
+    "critic_arch": "dual_tower",
+    "value_loss_mode": "hl_gauss",
+    "value_head_hidden": 256,
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random",
+      "value_num_bins": 100,
+      "value_target_min": -6.0,
+      "value_target_max": 6.0,
+      "value_sigma_to_bin_ratio": 1.0,
+      "value_padding_sigma": 3.0
+    }
+  },
+  {
+    "name": "dual_residual_value_hlgauss_sigma075_bins101_h256",
+    "critic_arch": "dual_tower",
+    "value_loss_mode": "hl_gauss",
+    "value_head_hidden": 256,
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random",
+      "value_num_bins": 101,
+      "value_target_min": -6.0,
+      "value_target_max": 6.0,
+      "value_sigma_to_bin_ratio": 0.75,
+      "value_padding_sigma": 3.0
+    }
+  }
+]

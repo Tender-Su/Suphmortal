@@ -5,13 +5,16 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from mortal._repo import REPO_ROOT
+from mortal.core.artifacts import atomic_write_json, load_json
 
 
 DEFAULT_REMOTE_HOST = 'mahjong-laptop'
+CONTROL_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,227 @@ def summarize_task_status(tasks: dict[str, dict[str, Any]]) -> dict[str, int]:
         counts.setdefault(status, 0)
         counts[status] += 1
     return counts
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def initialize_dispatch_control_state(
+    *,
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> dict[str, Any]:
+    workers = {}
+    if local_label:
+        workers[local_label] = {
+            'kind': 'local',
+            'paused': False,
+            'interrupt_requested': False,
+        }
+    if remote_label:
+        workers[remote_label] = {
+            'kind': 'remote',
+            'paused': False,
+            'interrupt_requested': False,
+            'launch_mode': remote_launch_mode,
+        }
+    now = _timestamp()
+    return {
+        'schema_version': CONTROL_SCHEMA_VERSION,
+        'created_at': now,
+        'updated_at': now,
+        'workers': workers,
+    }
+
+
+def load_dispatch_control(path: Path) -> dict[str, Any]:
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'dispatch control at {path} must be a JSON object')
+    return payload
+
+
+def write_dispatch_control(path: Path, payload: dict[str, Any]) -> None:
+    payload['updated_at'] = _timestamp()
+    atomic_write_json(path, payload)
+
+
+def ensure_control_state_workers(
+    *,
+    control_state: dict[str, Any],
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> bool:
+    workers = control_state.setdefault('workers', {})
+    changed = False
+    if local_label:
+        local = workers.get(local_label)
+        if not isinstance(local, dict):
+            workers[local_label] = {
+                'kind': 'local',
+                'paused': False,
+                'interrupt_requested': False,
+            }
+            changed = True
+        else:
+            local.setdefault('kind', 'local')
+            local.setdefault('paused', False)
+            local.setdefault('interrupt_requested', False)
+    if remote_label:
+        remote = workers.get(remote_label)
+        if not isinstance(remote, dict):
+            workers[remote_label] = {
+                'kind': 'remote',
+                'paused': False,
+                'interrupt_requested': False,
+                'launch_mode': remote_launch_mode,
+            }
+            changed = True
+        else:
+            remote.setdefault('kind', 'remote')
+            remote.setdefault('paused', False)
+            remote.setdefault('interrupt_requested', False)
+            remote.setdefault('launch_mode', remote_launch_mode)
+    return changed
+
+
+def worker_control_entry(
+    control_state: dict[str, Any],
+    worker_label: str,
+) -> dict[str, Any]:
+    workers = control_state.setdefault('workers', {})
+    entry = workers.get(worker_label)
+    if not isinstance(entry, dict):
+        entry = {
+            'paused': False,
+            'interrupt_requested': False,
+        }
+        workers[worker_label] = entry
+    entry.setdefault('paused', False)
+    entry.setdefault('interrupt_requested', False)
+    return entry
+
+
+def set_worker_pause(
+    control_state: dict[str, Any],
+    *,
+    worker_label: str,
+    paused: bool,
+    stop_active: bool = False,
+) -> dict[str, Any]:
+    entry = worker_control_entry(control_state, worker_label)
+    entry['paused'] = bool(paused)
+    if paused and stop_active:
+        entry['interrupt_requested'] = True
+    elif not paused:
+        entry['interrupt_requested'] = False
+    return entry
+
+
+def update_worker_pause_control(
+    dispatch_control_path: Path,
+    *,
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+    worker_label: str,
+    paused: bool,
+    stop_active: bool = False,
+) -> dict[str, Any]:
+    if dispatch_control_path.exists():
+        control_state = load_dispatch_control(dispatch_control_path)
+    else:
+        control_state = initialize_dispatch_control_state(
+            local_label=local_label,
+            remote_label=remote_label,
+            remote_launch_mode=remote_launch_mode,
+        )
+    ensure_control_state_workers(
+        control_state=control_state,
+        local_label=local_label,
+        remote_label=remote_label,
+        remote_launch_mode=remote_launch_mode,
+    )
+    entry = set_worker_pause(
+        control_state,
+        worker_label=worker_label,
+        paused=paused,
+        stop_active=stop_active,
+    )
+    write_dispatch_control(dispatch_control_path, control_state)
+    return entry
+
+
+def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
+    for stage_key in ('seed1', 'seed2'):
+        stage_state = dispatch_state.get(stage_key)
+        if not isinstance(stage_state, dict):
+            continue
+        for task in stage_state.get('tasks', {}).values():
+            if str(task.get('status')) != 'running':
+                continue
+            task['status'] = 'pending'
+            for key in (
+                'started_at',
+                'worker_label',
+                'local_result_path',
+                'remote_result_path',
+                'log_path',
+            ):
+                task.pop(key, None)
+
+
+def find_next_pending_task(
+    stage_state: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    pending = sorted(
+        (
+            (task_id, task)
+            for task_id, task in stage_state.get('tasks', {}).items()
+            if str(task.get('status', 'pending')) == 'pending'
+        ),
+        key=lambda item: item[0],
+    )
+    return pending[0] if pending else None
+
+
+def stage_all_tasks_completed(stage_state: dict[str, Any]) -> bool:
+    tasks = list(stage_state.get('tasks', {}).values())
+    return bool(tasks) and all(
+        str(task.get('status')) == 'completed'
+        for task in tasks
+    )
+
+
+def stage_any_task_failed(stage_state: dict[str, Any]) -> bool:
+    return any(
+        str(task.get('status')) == 'failed'
+        for task in stage_state.get('tasks', {}).values()
+    )
+
+
+def reset_task_after_operator_interrupt(
+    task_state: dict[str, Any],
+    *,
+    note: str,
+) -> None:
+    task_state['status'] = 'pending'
+    task_state['attempts'] = max(0, int(task_state.get('attempts', 0)) - 1)
+    task_state['error'] = note
+    task_state['interrupted_at'] = _timestamp()
+    for key in (
+        'finished_at',
+        'started_at',
+        'worker_label',
+        'local_result_path',
+        'remote_result_path',
+        'log_path',
+        'pid',
+    ):
+        task_state.pop(key, None)
 
 
 def build_workers(

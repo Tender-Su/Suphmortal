@@ -1,5 +1,7 @@
 # 2026-04-09：Look-Ahead / Oracle / Bridge 复盘备忘
 
+> 历史复盘 · 整理：2026-09-05。正文保留当时的个人判断和协作语境，不作为当前运行依据。当前入口见 [文档地图](../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 这是一份背景层备忘，记录一轮围绕 `Suphx` 论文、当前 RL `Oracle` 主线和 bridge 设计的集中讨论。它不覆盖 `docs/agent/` 和 `docs/status/` 的当前默认口径，但会影响后续实验优先级。
 
 ## 0. 同日决策更新
@@ -430,13 +432,13 @@ phi = phi_vis + alpha * F(phi_vis, phi_orc)
 
 ### 7.1 本地 Suphx LaTeX 源码
 
-- `C:\Users\numbe\Desktop\suphx\flow.tex`
+- `<USERPROFILE>\Desktop\suphx\flow.tex`
   - look-ahead feature 的定义与强简化
-- `C:\Users\numbe\Desktop\suphx\rl.tex`
+- `<USERPROFILE>\Desktop\suphx\rl.tex`
   - oracle guiding、perfect-feature dropout、continuation tricks
-- `C:\Users\numbe\Desktop\suphx\remark.tex`
+- `<USERPROFILE>\Desktop\suphx\remark.tex`
   - distillation 与 oracle critic 的讨论
-- `C:\Users\numbe\Desktop\suphx\Offline.tex`
+- `<USERPROFILE>\Desktop\suphx\Offline.tex`
   - `RL-2` 相对 `RL-1` 的公开实验结论
 
 ### 7.2 当前仓库实现

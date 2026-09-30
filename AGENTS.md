@@ -1,112 +1,48 @@
 # Repository Guidelines
 
-这份文件只放所有 agent 必须先知道的规则。当前训练结论、机器参数和长流程不要在这里复写，按入口文档读取。
+这里维护所有 agent 共用的长期规则。阶段、机器参数和实验结论只在对应状态页维护。
 
-## 先读哪里
+## 阅读入口
 
-- 接手入口：`docs/agent/README.md`
-- 当前状态：`docs/agent/handoff.md`
-- 监督学习主线：`docs/status/supervised-mainline.md`
-- 在线 RL 主线：`docs/status/online-rl-mainline.md`
-- 机器与 loader / `1v3` 默认：`docs/status/machine-benchmarks.md`
-- 命令与脚本：`docs/agent/workflows.md`
-- 双机与远程：`docs/agent/remote-ops.md`
-- 代码位置：`docs/agent/code-map.md`
-- 文档整理：`docs/agent/doc-maintenance.md`
+- 按需查阅：[任务入口](docs/agent/README.md)、[接手摘要](docs/agent/handoff.md)。
+- 阶段：[GRP](docs/status/grp-mainline.md)、[SL](docs/status/supervised-mainline.md)、[Oracle critic](docs/status/oracle-critic-mainline.md)、[在线 RL](docs/status/online-rl-mainline.md)。
+- 操作：[运行流程](docs/agent/workflows.md)、[双机与远程](docs/agent/remote-ops.md)、[机器与资源](docs/status/machine-benchmarks.md)。
+- 开发：[代码地图](docs/agent/code-map.md)、[重构与验证](docs/agent/code-health.md)、[文档维护](docs/agent/doc-maintenance.md)。
 
-冲突时按 `docs/status/` > `docs/agent/` > `docs/research/` 判断；`docs/archive/` 和 `docs/reflections/` 默认不作为当前运行依据。
-窄代码修改或定点排障可以先用 `rg` / 本地文件定位，再只打开相关文档；不要从研究长文或归档里拼当前默认。
-
-## 项目边界
-
-- `libriichi/`：Rust 牌局引擎、状态机、特征提取、PyO3 模块。
-- `mortal/`：Python 训练、评测、实验编排；子目录职责看 `docs/agent/code-map.md`。
-- `exe-wrapper/`：小型 Rust helper binary crate。
-- `scripts/`：Windows 入口脚本。
-- `docs/`：当前状态、证据、接手说明和历史归档。
-- `checkpoints/`、`logs/`、`target/`：本地产物，默认不提交。
+文档按任务需要读取和维护。当前事实优先依据可复核的源码、有效配置和原始产物；文档间按 `docs/status/` > `docs/agent/` > `docs/research/` 判断。`docs/archive/` 和 `docs/reflections/` 用于追溯历史，不指导当前运行。
 
 ## 工作原则
 
-- 总目标是最强模型，训练效率和便利性排在最终强度之后。
-- 默认用中文说明；保留项目内已稳定使用的术语，例如 `GRP`、`Oracle critic`、`value / GAE`、`1v3`。
-- 代码改动要小而清晰，优先删除旧路径或旧逻辑，避免只堆新增；逻辑转折处才加短注释。
-- 不要改动用户已有的无关变更；当前工作树可能本来就是 dirty。
-- 查找文件和文本优先用 `rg` / `rg --files`。
-- 长输出外部命令按 `RTK.md` 使用 `rtk`，PowerShell 内建、短探针和管道直接运行。
-- 本地 Codex shell 正常用工具层 `workdir` 控制目录；只有目录异常、嵌套 shell、远程 shell 或命令本身需要时才显式 `Set-Location`。
-- 面向用户解释时优先保留项目内已有术语；引入论文或外部概念时先用中文说明它和本项目的关系，再给原名。
+- 最终模型强度优先于吞吐和便利性；默认中文，保留 `GRP`、`Oracle critic`、`value / GAE`、`1v3`、`all_players`、`score_rank` 等术语。
+- 在用户目标和授权范围内自主完成工作，具体方法自行决定。
+- 以正确、可维护的代码为目标，按改动选择有效的[验证方式](docs/agent/code-health.md#按改动验证)；保留用户已有改动，避免无关变更。
+- 查找优先 `rg` / `rg --files`；长输出外部命令按 [RTK.md](RTK.md) 执行。PowerShell 内建、短探针和管道直接运行。
+- `logs/`、`checkpoints/`、`target/` 是产物，不随源码整理搬动或清理；不提交真实数据路径和凭据。
+- 活跃 worker 在 spawn、恢复、切换阶段时可能重读源码。遵守 [活跃训练边界](docs/agent/code-health.md#活跃训练边界)，不原地覆盖其源码、原生扩展或 checkpoint。
 
-## 环境与常用命令
+## 环境与代码契约
 
-非交互 Python 优先使用：
+- 非交互 Python 优先 `C:\ProgramData\anaconda3\envs\mortal\python.exe`；不假设 `conda` 或裸 `python` 指向正确环境。命令统一在 [运行流程](docs/agent/workflows.md) 维护。
+- Rust 使用 Edition 2024；遵守 [libriichi/src/lib.rs](libriichi/src/lib.rs) 的 clippy deny。
+- Python 使用 4 空格、`snake_case` 函数/变量、`PascalCase` 类。
+- 特征常数：`ACTION_SPACE=46`、`obs_shape(v4)=(1012,34)`、`oracle_obs_shape(v4)=(217,34)`、`GRP_SIZE=7`、`MAX_VERSION=4`。变更必须同步 Rust、Python 与测试。
+- `Brain` 默认 `BN`，当前训练/评测入口使用 `GN`，实例化时显式传 norm。V3/V4 为 pre-activation ResBlock，保留每块的 SE-style channel attention。
+- [mortal/config.py](mortal/config.py) 默认读取 `mortal/config.toml`，可被 `MORTAL_CFG` 覆盖。PowerShell 写 TOML 优先 `apply_patch`，避免编码变化。
+- CPU affinity 是 opt-in；正常训练不设置 `MORTAL_CPU_AFFINITY`。
+- [mortal/core/common.py](mortal/core/common.py) 的 TCP / pickle 仅面向本机可信输入。
 
-```powershell
-C:\ProgramData\anaconda3\envs\mortal\python.exe
-```
+## 训练与评测
 
-常用入口：
+- `GRP best_loss` 默认供下游使用，`best_acc` 只做受控对照，`latest` 只用于续训。
+- RL 启动权重优先级：`[control].state_file` → `[online].init_state_file` → `[supervised].best_loss_state_file` → `[supervised].best_state_file`。
+- `1v3` challenger 使用 `[1v3.challenger].state_file`；训练默认关闭 `search`，推理增强单独 A/B。
+- Oracle critic 保留 `all_players` 与真实 outcome / `score_rank` / return-to-go 标签；不为方便改成 GRP 伪标签或缩窄输出。
+- 选择遵守预声明主指标和全部 guardrail；平局未决，不默认选择更大权重，不按已实现的结果幅度加权样本。offline finalist 决策前不打开 sealed test。
 
-```powershell
-.\scripts\build_libriichi.bat
-.\scripts\run_grp.bat
-.\scripts\run_supervised.bat
-.\scripts\run_sl_p1_only.bat
-.\scripts\run_online.bat
-.\scripts\run_online_fidelity.bat
-.\scripts\run_oracle_critic_pretrain.bat
-.\scripts\run_oracle_dependency_eval.bat
-```
+## 双机与提交
 
-Rust / PyO3 测试前固定解释器和 DLL 路径：
-
-```powershell
-$env:PYO3_PYTHON="C:\ProgramData\anaconda3\envs\mortal\python.exe"
-$env:PATH="C:\ProgramData\anaconda3\envs\mortal;C:\ProgramData\anaconda3\envs\mortal\Library\bin;C:\ProgramData\anaconda3\envs\mortal\Scripts;$env:PATH"
-cargo test -p libriichi state::test
-```
-
-Python smoke：
-
-```powershell
-C:\ProgramData\anaconda3\envs\mortal\python.exe -m mortal.tests.test_greedy
-```
-
-`conda` 在新 PowerShell 中不一定在 `PATH`；能用绝对解释器时不要假设 `conda run` 可用。
-
-## 代码约束
-
-- Rust：Edition 2024；`libriichi/src/lib.rs` 有严格 clippy deny；提交前运行 `cargo fmt`。
-- Python：4 空格缩进，函数和变量用 `snake_case`，类用 `PascalCase`。
-- 不要改特征通道数，除非同步更新 Rust 特征提取和 Python 模型输入。关键常数：`ACTION_SPACE=46`，`obs_shape(v4)=(1012,34)`，`oracle_obs_shape(v4)=(217,34)`，`GRP_SIZE=7`，`MAX_VERSION=4`。
-- `Brain.__init__` 默认是 `"BN"`，但当前配置和评测入口使用 `"GN"`；实例化时显式传 norm。
-- V3/V4 是 pre-activation ResBlock；每个 ResBlock 都有 SE-style channel attention，不要随手移除。
-- `mortal/config.toml` 可由 `MORTAL_CFG` 覆盖；不要提交真实数据路径或凭据。
-- Windows PowerShell 写 TOML / 配置时优先 `apply_patch`，避免 `Set-Content`、`Out-File`、`>` 产生编码问题。
-- CPU affinity 现在是 opt-in；正常训练默认不设置 `MORTAL_CPU_AFFINITY`。
-
-## 训练与产物口径
-
-- 当前阶段摘要看 `docs/agent/handoff.md`；不要从旧研究文档拼默认结论。
-- `GRP` checkpoint 分三类：`best_loss` 默认下游使用，`best_acc` 只做受控对照，`latest` 只用于续训。
-- 在线 RL 启动优先级：`[control].state_file` -> `[online].init_state_file` -> `[supervised].best_loss_state_file` -> `[supervised].best_state_file`。
-- `1v3` challenger 路径是 `[1v3.challenger].state_file`，不是 `[control].state_file`。
-- 训练阶段默认关闭 `search`；推理期增强要单独 A/B。
-
-## 双机纪律
-
-- 台式机 `main` 工作树是源码真源。
-- 笔记本是独立实验 runner，不默认共享梯度、replay buffer 或 checkpoint。
-- 双机同时跑同一阶段时，run name、输出目录和 checkpoint 路径必须带机器区分。
-- 笔记本 IP 可能变化，远程命令前先按 `docs/agent/remote-ops.md` 重新确认。
-
-## 测试与提交
-
-- Rust 测试放同模块 `#[cfg(test)]`，优先跑 targeted test。
-- Python 测试放 `mortal/tests/` 或相关模块附近，新增行为至少有可复现实测。
-- 安全注意：`mortal/core/common.py` 的 TCP / pickle 通信只面向本机可信输入。
-- commit subject 用短祈使句并带 scope，例如 `mortal: fix oracle dropout schedule`。
-
-## 相关本地说明
-
-`RTK.md` 是命令输出压缩规则；写代码时也遵循其中“减少改动范围、重视可读性和运行效率”的约束。
+- 源码只在本地台式机修改，`main` 工作树是源码真源；笔记本代码只能通过 Git 同步，禁止在笔记本直接修改源码。
+- 远程操作与本机采用同等授权，不因 SSH 额外要求确认；操作参考[远程流程](docs/agent/remote-ops.md)。
+- 笔记本是独立 runner，默认不共享梯度、replay 或 checkpoint；同阶段双机运行的 run name、输出目录与 checkpoint 路径带机器区分。
+- 后续所有笔记本计算任务都须在避免 RAM / VRAM OOM、保持训练与评测语义的前提下，最大限度利用计算资源，提高持续有效吞吐。按[性能与容量验收](docs/agent/remote-ops.md#性能与容量验收)验证峰值、并存负载与安全余量；持续低利用率须定位并优化，不能仅凭进程存活或未 OOM 判定调优完成。
+- commit subject 用简短祈使句并带 scope，例如 `mortal: fix oracle dropout schedule`。

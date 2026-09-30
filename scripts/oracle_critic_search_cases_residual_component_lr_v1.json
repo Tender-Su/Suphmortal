@@ -1,0 +1,36 @@
+[
+  {
+    "name": "dual_residual_uniform_repro",
+    "critic_arch": "dual_tower",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "visible_lr_scale": 1.0,
+    "oracle_lr_scale": 1.0,
+    "fusion_lr_scale": 1.0,
+    "value_lr_scale": 1.0,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random"
+    }
+  },
+  {
+    "name": "dual_residual_oracle2_fusion2",
+    "critic_arch": "dual_tower",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "visible_lr_scale": 1.0,
+    "oracle_lr_scale": 2.0,
+    "fusion_lr_scale": 2.0,
+    "value_lr_scale": 1.0,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random"
+    }
+  }
+]

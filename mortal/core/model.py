@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -208,10 +210,22 @@ class Brain(nn.Module):
 
 class OracleDualTowerBrain(nn.Module):
     """Oracle critic encoder with separate visible and perfect-info towers."""
-    def __init__(self, *, conv_channels, num_blocks, version=1, Norm="BN"):
+    def __init__(
+        self,
+        *,
+        conv_channels,
+        num_blocks,
+        version=1,
+        Norm="BN",
+        oracle_fusion_init=0.5,
+        oracle_fusion_mode="linear",
+        oracle_fusion_hidden=512,
+    ):
         super().__init__()
         self.is_oracle = True
         self.version = version
+        self.oracle_fusion_mode = str(oracle_fusion_mode).strip().lower()
+        self.oracle_fusion_hidden = int(oracle_fusion_hidden)
 
         norm_builder = partial(nn.BatchNorm1d, conv_channels, momentum=0.01)
         actv_builder = partial(nn.Mish, inplace=True)
@@ -247,23 +261,60 @@ class OracleDualTowerBrain(nn.Module):
             pre_actv=pre_actv,
         )
         self.actv = actv_builder()
-        self.fusion = nn.Linear(2048, 1024)
-        self._init_identity_fusion()
+        if self.oracle_fusion_mode == "linear":
+            self.fusion = nn.Linear(2048, 1024)
+            self._init_identity_fusion(oracle_fusion_init)
+        elif self.oracle_fusion_mode == "film":
+            if self.oracle_fusion_hidden <= 0:
+                raise ValueError("oracle_fusion_hidden must be positive")
+            self.fusion = nn.Sequential(
+                nn.LayerNorm(1024),
+                nn.Linear(1024, self.oracle_fusion_hidden),
+                actv_builder(),
+                nn.Linear(self.oracle_fusion_hidden, 2048),
+            )
+            nn.init.zeros_(self.fusion[-1].weight)
+            nn.init.zeros_(self.fusion[-1].bias)
+        elif self.oracle_fusion_mode == "residual_mlp":
+            if self.oracle_fusion_hidden <= 0:
+                raise ValueError("oracle_fusion_hidden must be positive")
+            self.fusion = nn.Sequential(
+                nn.LayerNorm(2048),
+                nn.Linear(2048, self.oracle_fusion_hidden),
+                actv_builder(),
+                nn.Linear(self.oracle_fusion_hidden, 1024),
+            )
+            nn.init.zeros_(self.fusion[-1].weight)
+            nn.init.zeros_(self.fusion[-1].bias)
+        else:
+            raise ValueError(
+                f"unsupported oracle_fusion_mode={oracle_fusion_mode!r}; "
+                "expected 'linear', 'film', or 'residual_mlp'"
+            )
         self._freeze_bn = False
 
-    def _init_identity_fusion(self):
+    def _init_identity_fusion(self, oracle_weight=0.5):
+        oracle_weight = float(oracle_weight)
+        if not 0.0 <= oracle_weight <= 1.0:
+            raise ValueError('oracle_fusion_init must be between 0 and 1')
+        visible_weight = 1.0 - oracle_weight
         with torch.no_grad():
             self.fusion.weight.zero_()
             self.fusion.bias.zero_()
             eye = torch.eye(1024, dtype=self.fusion.weight.dtype)
-            self.fusion.weight[:, :1024].copy_(0.5 * eye)
-            self.fusion.weight[:, 1024:].copy_(0.5 * eye)
+            self.fusion.weight[:, :1024].copy_(visible_weight * eye)
+            self.fusion.weight[:, 1024:].copy_(oracle_weight * eye)
 
     def forward(self, obs: Tensor, invisible_obs: Optional[Tensor] = None) -> Tensor:
         assert invisible_obs is not None
         visible_phi = self.actv(self.visible_encoder(obs))
         oracle_phi = self.actv(self.oracle_encoder(invisible_obs))
-        return self.fusion(torch.cat((visible_phi, oracle_phi), dim=-1))
+        if self.oracle_fusion_mode == "linear":
+            return self.fusion(torch.cat((visible_phi, oracle_phi), dim=-1))
+        if self.oracle_fusion_mode == "film":
+            gamma, beta = self.fusion(oracle_phi).chunk(2, dim=-1)
+            return visible_phi * (1.0 + gamma) + beta
+        return visible_phi + self.fusion(torch.cat((visible_phi, oracle_phi), dim=-1))
 
     def train(self, mode=True):
         super().train(mode)
@@ -294,22 +345,149 @@ class AuxNet(nn.Module):
 
 
 class ValueHead(nn.Module):
-    """Centralized value head for PPO critic (RVR-style 4-player output)."""
-    def __init__(self, num_players=4):
+    """Centralized scalar value head for PPO critic."""
+    def __init__(self, num_players=4, *, hidden_size=256, zero_sum=False):
         super().__init__()
         self.num_players = num_players
+        self.hidden_size = int(hidden_size)
+        self.zero_sum = bool(zero_sum)
+        if self.hidden_size <= 0:
+            raise ValueError("hidden_size must be positive")
         self.net = nn.Sequential(
-            nn.Linear(1024, 256),
+            nn.Linear(1024, self.hidden_size),
             nn.Mish(inplace=True),
-            nn.Linear(256, num_players),
+            nn.Linear(self.hidden_size, num_players),
         )
         for mod in self.net.modules():
             if isinstance(mod, nn.Linear):
                 orthogonal_init(mod)
 
     def forward(self, phi):
-        return self.net(phi)
+        value = self.net(phi)
+        if self.zero_sum:
+            value = value - value.mean(dim=-1, keepdim=True)
+        return value
 
+
+class HLGaussValueHead(nn.Module):
+    """Histogram value head using truncated-Gaussian regression targets."""
+
+    def __init__(
+        self,
+        num_players=4,
+        *,
+        hidden_size=256,
+        num_bins=100,
+        target_min=-6.0,
+        target_max=6.0,
+        sigma_to_bin_ratio=2.0,
+        padding_sigma=3.0,
+        zero_sum=False,
+    ):
+        super().__init__()
+        self.num_players = int(num_players)
+        self.hidden_size = int(hidden_size)
+        self.num_bins = int(num_bins)
+        self.target_min = float(target_min)
+        self.target_max = float(target_max)
+        self.sigma_to_bin_ratio = float(sigma_to_bin_ratio)
+        self.padding_sigma = float(padding_sigma)
+        self.zero_sum = bool(zero_sum)
+
+        if self.num_players <= 0:
+            raise ValueError("num_players must be positive")
+        if self.hidden_size <= 0:
+            raise ValueError("hidden_size must be positive")
+        if self.num_bins <= 1:
+            raise ValueError("num_bins must be greater than one")
+        if not self.target_min < self.target_max:
+            raise ValueError("target_min must be smaller than target_max")
+        if self.sigma_to_bin_ratio <= 0.0:
+            raise ValueError("sigma_to_bin_ratio must be positive")
+        if self.padding_sigma < 0.0:
+            raise ValueError("padding_sigma must be non-negative")
+
+        interior_bins = self.num_bins - 2.0 * self.sigma_to_bin_ratio * self.padding_sigma
+        if interior_bins <= 0.0:
+            raise ValueError(
+                "num_bins must exceed the bins reserved for HL-Gauss padding"
+            )
+        bin_width = (self.target_max - self.target_min) / interior_bins
+        sigma = self.sigma_to_bin_ratio * bin_width
+        support_min = self.target_min - self.padding_sigma * sigma
+        support_max = self.target_max + self.padding_sigma * sigma
+        edges = torch.linspace(support_min, support_max, self.num_bins + 1)
+
+        self.bin_width = float(bin_width)
+        self.sigma = float(sigma)
+        self.support_min = float(support_min)
+        self.support_max = float(support_max)
+        self.register_buffer("bin_edges", edges)
+        self.register_buffer("bin_centers", (edges[:-1] + edges[1:]) * 0.5)
+
+        self.net = nn.Sequential(
+            nn.Linear(1024, self.hidden_size),
+            nn.Mish(inplace=True),
+            nn.Linear(self.hidden_size, self.num_players * self.num_bins),
+        )
+        for mod in self.net.modules():
+            if isinstance(mod, nn.Linear):
+                orthogonal_init(mod)
+
+    def logits(self, phi):
+        return self.net(phi).reshape(-1, self.num_players, self.num_bins)
+
+    def target_probs(self, target):
+        target = target.float()
+        if target.ndim != 2 or target.shape[-1] != self.num_players:
+            raise ValueError(
+                f"target must have shape (batch, {self.num_players}), got {tuple(target.shape)}"
+            )
+        edges = self.bin_edges.float()
+        scaled_edges = (
+            edges.view(1, 1, -1) - target.unsqueeze(-1)
+        ) / (math.sqrt(2.0) * self.sigma)
+        cdf = torch.erf(scaled_edges)
+        normalizer = (cdf[..., -1] - cdf[..., 0]).clamp_min(
+            torch.finfo(cdf.dtype).eps
+        )
+        probs = (cdf[..., 1:] - cdf[..., :-1]).clamp_min(0.0)
+        probs = probs / normalizer.unsqueeze(-1)
+        return probs / probs.sum(dim=-1, keepdim=True).clamp_min(
+            torch.finfo(probs.dtype).eps
+        )
+
+    def values_from_logits(self, logits):
+        if logits.shape[-2:] != (self.num_players, self.num_bins):
+            raise ValueError(
+                "logits must end with "
+                f"({self.num_players}, {self.num_bins}), got {tuple(logits.shape)}"
+            )
+        probs = logits.float().softmax(dim=-1)
+        value = (probs * self.bin_centers.float()).sum(dim=-1)
+        if self.zero_sum:
+            value = value - value.mean(dim=-1, keepdim=True)
+        return value
+
+    def forward(self, phi):
+        return self.values_from_logits(self.logits(phi))
+
+    def cross_entropy(self, logits, target, output_weights=None):
+        target_probs = self.target_probs(target)
+        per_output = -(target_probs * logits.float().log_softmax(dim=-1)).sum(dim=-1)
+        if output_weights is not None:
+            weights = torch.as_tensor(
+                output_weights,
+                dtype=per_output.dtype,
+                device=per_output.device,
+            )
+            if weights.shape != (self.num_players,):
+                raise ValueError(
+                    f"output_weights must have shape ({self.num_players},), "
+                    f"got {tuple(weights.shape)}"
+                )
+            per_output = per_output * weights
+        return per_output.mean()
 
 class OpponentStateAuxNet(nn.Module):
     def __init__(self, *, shanten_dims=(4, 4, 4), tenpai_dims=(2, 2, 2)):

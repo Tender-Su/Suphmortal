@@ -1,26 +1,15 @@
-# 复盘文档索引
+# 复盘索引
 
-这里放的是人的成长、协同方法、问题发现过程和论文预备素材。它们有价值，但不直接充当当前默认手册。
+保留研究判断、协作过程与个人反思。标题与正文沿用当时语境，不作为当前训练配置或模型强度证明。当前工作见 [接手摘要](../agent/handoff.md)，事实证据见 [研究索引](../research/README.md)。
 
-## 当前条目
+| 日期 | 复盘 |
+| --- | --- |
+| 2026-04-10 | [2026-04-10：人类在 Oracle 争议里的真正价值](2026-04-10-human-value-in-oracle-ablation.md) |
+| 2026-04-09 | [2026-04-09：Look-Ahead / Oracle / Bridge 复盘备忘](2026-04-09-lookahead-oracle-bridge-review.md) |
+| 2026-04-06 | [2026-04-06：监督学习 Oracle 退役复盘](2026-04-06-supervised-oracle-retirement.md) |
+| 2026-03-30 | [2026-03-30 P1 protocol_decide 收口复盘](2026-03-30-p1-protocol-decide-closeout.md) |
+| 2026-03-28 | [2026-03-28 项目进度与人机协同方法复盘](2026-03-28-project-progress-and-human-ai-collaboration.md) |
+| 2026-03-26 | [2026-03-26 人机协同 Selector 复盘](2026-03-26-human-ai-selector-reflection.md) |
+| 2026-03-14 | [2026-03-14 复盘](2026-03-14-reflection.md) |
 
-- `2026-04-10-human-value-in-oracle-ablation.md`
-  - 这轮 actor Oracle 争议里，人类真正的价值为什么在于提出结构性质疑，并把它逼成可证伪实验
-- `2026-04-09-lookahead-oracle-bridge-review.md`
-  - 围绕 Suphx `look-ahead / Oracle actor / distillation / Oracle critic / bridge 初始化` 的集中复盘
-- `2026-04-06-supervised-oracle-retirement.md`
-  - 为什么监督学习 Oracle 最终被放弃、这轮讨论里人类与 agent 各自擅长什么
-- `2026-03-30-p1-protocol-decide-closeout.md`
-  - `protocol_decide` 为什么可以正式收口、失败 arm 补跑为什么必要、以及这轮的人机分工
-- `2026-03-14-reflection.md`
-  - 个人研究判断、能力定位，以及对监督学习后段旧方案的早期结构性怀疑
-- `2026-03-26-human-ai-selector-reflection.md`
-  - selector 口径修正里，人类与 AI 分别发挥了什么作用
-- `2026-03-28-project-progress-and-human-ai-collaboration.md`
-  - 项目进度应该记录在哪里、不同文档的职责、以及长期协同方法
-
-## 适用场景
-
-- 想写复盘、方法论总结或论文素材时看这里
-- 想知道今天项目默认怎么跑，不看这里，先看 `docs/agent/` 和 `docs/status/`
-- 较早的反思文档保留了当时的旧术语，这是历史记录，不代表当前项目默认命名
+新增内容写成独立的带日期文件。已有复盘如需补充事实修正，用明确的后记链接新证据，保留原来的判断过程。

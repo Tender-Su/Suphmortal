@@ -8,11 +8,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / 'scripts' / 'stop_after_p0_round2.ps1'
-POWERSHELL_EXE = shutil.which('pwsh') or shutil.which('powershell') or 'pwsh'
+POWERSHELL_EXE = shutil.which('pwsh') or shutil.which('powershell')
 
 
 def watcher_command(run_name: str) -> list[str]:
-    command = [POWERSHELL_EXE]
+    command = [POWERSHELL_EXE, '-NoProfile', '-NonInteractive']
     if not Path(POWERSHELL_EXE).name.lower().startswith('pwsh'):
         command.extend(['-ExecutionPolicy', 'Bypass'])
     command.extend([
@@ -45,6 +45,11 @@ class StopAfterP0Round2WatcherTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         try:
+            # Windows PowerShell can need more than two seconds to start on a busy host.
+            deadline = time.monotonic() + 15
+            while not log_path.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(log_path.exists(), f'watcher did not start; exit={proc.poll()}')
             with self.assertRaises(subprocess.TimeoutExpired):
                 proc.wait(timeout=2.0)
         finally:
@@ -58,6 +63,7 @@ class StopAfterP0Round2WatcherTests(unittest.TestCase):
         log_text = log_path.read_text(encoding='utf-8')
         self.assertIn('Ignoring stale existing p0_round2.json', log_text)
         self.assertNotIn('Detected p0_round2.json. Stopping fidelity runner before round3.', log_text)
+        self.assertTrue(run_dir.resolve().is_relative_to((REPO_ROOT / 'logs/sl_fidelity').resolve()))
         shutil.rmtree(run_dir, ignore_errors=True)
 
 

@@ -1,235 +1,45 @@
-# 在线 RL 主线结论
+# 在线 RL 当前状态
 
-这份文档只回答三件事：
+> 核验：2026-09-08 · 依据：审计修复、资源相关89项回归及多轮真实三角色容量测试；诊断副本已停止，尚未启动正式PPO训练。
 
-1. 当前代码已经接了什么
-2. 当前默认验证路线是什么
-3. 目前已经确认了哪些结果
+历史 RL 候选尚未证明稳定强于 SL。保留可复验的实现与实验记录，下一轮先明确奖励目标、建立可靠的 Oracle 资格，再用独立正式评测判断增益。
 
-它不再混入旧版 Phase 记录和大段历史过程。
+## 已有证据
 
-## 当前代码能力
+| 对象 | 核验结果 | 当前用途 |
+| --- | --- | --- |
+| 历史 C/D/E | 33 个完整评测含 canonical，共 66,000 局；32 个 RL 候选的名义配对 95% CI 下界均未为正 | 探索记录，不能宣布正式增益 |
+| E 9k / E 10k policy-stop | actor 与 policy 权重逐张量完全相同 | 两次对局点估计差不能解释为策略学习变化 |
+| 独立 Oracle critic | 已切换固定输入和新奖励校准，p0 资格仍待确认 | 见 [Oracle 状态](oracle-critic-mainline.md) |
+| replay / actor 契约修复 | PPO/V-trace actor 分离；拒绝旧 hybrid 静默续跑；提前过滤未知/过旧/未来行为版本，增加 KL / clip fraction 门槛 | 解析梯度与加载测试通过，未证明对局收益 |
 
-### 机器模式与对手池
+证据、名义区间的多重比较限制和已实施代码改动见 [独立审计](../research/sl-rl-audit-2026-09-05.md)。旧路线的完整结果保留在 [历史 RL 快照](../archive/status/online-rl-mainline-before-doc-refactor-2026-09-05.md)。
 
-- `mortal/online/online_machine_modes.py`
-  - 支持 `independent_arm / worker`
-  - 支持 `default / validation / formal` opponent-pool preset
-  - 已内置一组短窗、长窗和 smoke profile 家族
-- `mortal/online/online_role_runner.py`
-  - `server / trainer / client` 三角色统一入口
+9月8日完成资源诊断：GAE物理inference block可显式配置，默认2048；DataLoader在下一块构建前释放上一块dataset。已测配置为batch192、每轮128局、inference block512、Rayon4、Torch1和独立后台HighQoS；logical chunk50、完整轨迹及PPO/GAE目标保持不变。最后后台测试256个计数步中，AdamW实际执行255次，1次AMP跳过；按真实更新计算0.621次/秒，最低可用RAM4.42GiB，356条行为版本检查全部通过、版本差最大0，KL/clip无拒绝。详情与资源边界见[资源报告](../research/rl-resource-tuning-2026-09-08.md)。
 
-### 已接线的训练能力
+现有在线主循环的step及optimizer_steps会在AMP跳步时继续计数，此次已由scaler和AdamW内部时钟核实。资源harness现按实际AdamW调用停止并统计，旧结果保持原始255计数；本次未改变正式RL的scheduler/版本推进定义。下一轮正式训练前需统一成功更新时钟，不能把日志计数直接当作全部成功更新。容量测试所用critic尚未完成资格确认。
 
-- `mortal/online/train_online.py`
-  - actor Oracle guiding
-  - Oracle critic
-  - Step-Level GAE
-  - 版本级 replay importance sampling
-  - 单边 `entropy_floor`
-  - chosen-action `logit_thres` gradient gate
-- `mortal/online/server.py` / `mortal/core/common.py` / `mortal/online/client.py`
-  - trainer 发布 `param_version`
-  - worker / replay 会携带策略版本元信息
+## 奖励与评价口径
 
-### 已接线的推理与评测能力
+旧 run 使用 `env.pts=[6,4,2,0]`，中心化为 `[3,1,-1,-3]`；正式 `avg_pt` 使用 `[90,45,0,-135]`。新批准分支和配置模板采用 `[2,1,0,-3]`、gamma 1，与正式 pt 效用一致。旧新效用不能靠常数平移或正比例缩放互换。
 
-- `mortal/eval/engine.py` + `mortal/eval/search_runtime.py`
-  - local belief search / planner
-- `mortal/eval/oracle_experiments.py`
-  - `visible_only / actor_true / actor_shuffled / critic_only`
-- `mortal/eval/oracle_dependency_eval.py`
-  - `true / zero / shuffled` dependency eval
-- `mortal/research/run_online_fidelity.py`
-  - RL 版 `calibration / protocol_decide / winner_refine`
+新目标已用于独立 Oracle 校准，不覆盖旧 run。PPO reference / Oracle 配置有独立 checkpoint、replay、日志和端口，首段上限 500 steps；Oracle 配置要求已确认的 critic 文件。它们尚未启动，不能把配置准备写成已有 RL 收益。详见 [实施报告](../research/sl-rl-fixes-2026-09-07.md)。
 
-### 导出与评测口径
+最小参照使用近 on-policy PPO，默认关闭 V-trace 与 dual clip。KL 0.02、clip fraction 0.5 是保守起始门槛，尚未证明最优。显式 V-trace 分支仅用一次已校正 actor advantage，不再叠加 PPO ratio；恢复签名绑定 actor 目标版本、奖励和 critic 架构。
 
-- actor Oracle 开启时：
-  - `state_file` 可以保留 live 训练态
-  - `best_state_file` 导出 same-structure zero-oracle deploy checkpoint
-- `1v3` / `test_play` 默认都按 visible-only zero-oracle 口径评测
+## 下一轮最小协议
 
-## 当前默认验证路线
+1. 明确主目标，冻结可执行配置、SL 起点、对手、源码/扩展摘要与随机 seeds。保留 no-update SL 对照。
+2. 先完成 [Oracle 资格](oracle-critic-mainline.md#下一步与通过条件)，再在同一恢复状态和数据条件下比较 visible value 与 Oracle critic；checkpoint 必须包含 optimizer / scaler / scheduler / data cursor。
+3. 先验证 replay 新旧策略对应、reward 语义、`value / GAE`、IS / V-trace 和 train / eval 模式，再扩大训练。步数不自动赋予晋级资格。
+4. 正式比较固定对手、四座轮换和独立 seeds，按 seed 组做配对统计；候选筛选结束后做独立确认。`test_play=200/400` 与短 ranked 曲线只作诊断。
+5. 报告主指标、全部 guardrail、样本数、不确定性和失败/超时处理。不能只报最高点、单个 seed 或一次赢家。
 
-### 当前底座
+## 运行契约
 
-- visible-only actor
-- `policy.online_action_scope='all'`
-- `grp.label_smoothing=0`
-- `search.enabled=false`
-- `search_distill.enabled=false`
-- `value.oracle_critic=false`
-- `oracle_dependency_eval.enabled=false`
-- `online.importance_sampling.vtrace_mode=auto`
+- `server` 分发参数并管理 replay；`trainer` 执行更新并发布参数；`client` 自博弈并回传 replay。壳进程存在不代表三者有进展。
+- 初始化优先级与 checkpoint 语义见 [仓库规则](../../AGENTS.md#训练与评测)。`1v3` challenger 使用 `[1v3.challenger].state_file`。
+- 训练默认关闭 `search`；推理增强独立 A/B。对手池用 `--opponent-pool-preset` 明确选择，不手改 `baseline.train` 冒充相同实验。
+- 排因配置与正式训练配置分开记录；旧的 `ms_rl*` profile 名字只是预设，不能代替当前批准的实验协议。
 
-### 当前执行顺序
-
-- 默认先做 `RL-1` 单臂加回，不把 `RL-1 / RL-2` pair 当第一步
-- 默认先过三层门：
-  - `500 -> 1500 -> 3000`
-- 通过后再扩到 `20k / 40k`
-
-### 当前常用 profile 家族
-
-- `minimal`
-- `add_rank_opp_danger`
-- `add_value_gae_is`
-- `add_value_gae_is_oracle_critic`
-- `add_value_gae_is_rank_opp_danger`
-- `shared_stack`
-
-### 当前 opponent pool 纪律
-
-- `validation`
-  - 排因、Oracle 对照、短窗微探针
-- `formal`
-  - 更长窗口、冲上限训练
-
-### 当前冻结 opponent pool preset
-
-这两套 preset 当前都不是占位示意，而是已经冻结到仓库配置里的真实成员。
-
-- 当前代码行为：
-  - `baseline.train` 仍是 session 级抽样
-  - 每次 `train_play session` 先从池里抽一个 checkpoint
-  - 该 session 里的三家对手共用这个 checkpoint
-  - 不是“每个座位独立抽样”
-
-- `validation`
-  - `state_file = ./checkpoints/opponent_pool/baseline_anchor_legacy.pth`
-  - `champion_state_file = ./checkpoints/opponent_pool/sl_canonical_supervised_champion.pth`
-  - `anchor_state_file = ./checkpoints/opponent_pool/baseline_anchor_legacy.pth`
-  - `history_state_files = ['./checkpoints/opponent_pool/rl1_aux_only_500_20260415_best.pth']`
-  - `champion_prob = 0.20`
-  - `anchor_prob = 0.70`
-  - `history_prob = 0.10`
-  - 作用：固定排因、Oracle 对照、短窗门测
-  - 当前成员来源：
-    - `baseline_anchor_legacy.pth <- mortal/checkpoints/baseline.pth`
-    - `sl_canonical_supervised_champion.pth <- mortal/checkpoints/sl_canonical.pth`
-    - `rl1_aux_only_500_20260415_best.pth <- logs/online_modes/independent_arm/rl1_add_rank_opp_danger_500_20260415_020802/checkpoints/best.pth`
-
-- `formal`
-  - `state_file = ./checkpoints/opponent_pool/baseline_anchor_legacy.pth`
-  - `champion_state_file = ./checkpoints/opponent_pool/rl1_vgi_500_validation_20260416_best.pth`
-  - `anchor_state_file = ./checkpoints/opponent_pool/baseline_anchor_legacy.pth`
-  - `history_state_files = [`
-  - `  './checkpoints/opponent_pool/sl_canonical_supervised_champion.pth',`
-  - `  './checkpoints/opponent_pool/rl1_aux_only_500_20260415_best.pth',`
-  - `  './checkpoints/opponent_pool/rl1_mortal_policy_smoke_4k_20260411_best.pth',`
-  - `]`
-  - `champion_prob = 0.50`
-  - `anchor_prob = 0.25`
-  - `history_prob = 0.25`
-  - 作用：更长窗口、冲上限训练
-  - 当前成员来源：
-    - `baseline_anchor_legacy.pth <- mortal/checkpoints/baseline.pth`
-    - `rl1_vgi_500_validation_20260416_best.pth <- logs/online_modes/independent_arm/20260416_011753__rl1_add_value_gae_is_500_validation/checkpoints/best.pth`
-    - `sl_canonical_supervised_champion.pth <- mortal/checkpoints/sl_canonical.pth`
-    - `rl1_aux_only_500_20260415_best.pth <- logs/online_modes/independent_arm/rl1_add_rank_opp_danger_500_20260415_020802/checkpoints/best.pth`
-    - `rl1_mortal_policy_smoke_4k_20260411_best.pth <- logs/online_modes/independent_arm/rl1_mortal_policy_smoke_4k_20260411_231608/checkpoints/best.pth`
-
-- `baseline.test`
-  - 不属于这两套训练池
-  - 继续作为受控评测基线使用
-
-### 当前四个稳定器口径
-
-- `logit_thres`
-  - 当前实现是 chosen-action gradient gate
-  - 不再做前向 logits clamp
-- `entropy_floor`
-  - 单边熵下限
-  - 只在熵低于下限时加大熵权重，不再双边追 target
-- `importance_rho_clip / importance_c_clip`
-  - 当前在线 `value + GAE` 路径已接入真 `V-trace`
-  - `online.importance_sampling.vtrace_mode=auto` 时，只对足够陈旧的 replay 启用
-  - fresh replay 继续走 plain GAE
-- `warmup`
-  - 微探针固定为 `500 -> 50`
-  - `1500 -> 100`
-  - `3000 -> 150`
-
-## 当前已经确认的结果
-
-### 最小 PPO 底座
-
-- `rl1_mortal_policy_smoke_4k_20260411_231608`
-  - `step 0`: `avg_rank=2.5325`, `avg_pt=-3.0375`
-  - `step 1000`: `avg_rank=2.5225`, `avg_pt=-2.475`
-  - 结论：统一模型、all-action、无 label smoothing 的最小 PPO 已经拿到早期正向
-
-- `rl2_mortal_policy_smoke_4k_20260411_234157`
-  - `step 0`: `avg_rank=2.5325`, `avg_pt=-3.0375`
-  - `step 1000`: `avg_rank=2.57625`, `avg_pt=-6.13125`
-  - `step 2000`: `avg_rank=2.6150`, `avg_pt=-9.45`
-  - 结论：短窗里 `RL-2` 明显没优于 `RL-1`，但这仍不足以单独判死完整 Oracle curriculum
-
-### 三辅助头 vs `value / GAE / replay IS`
-
-- `2026-04-15` 的正式 `1v3=2000` 对照：
-  - `sl_canonical step0`: `avg_rank=2.507`, `avg_pt=-0.945`
-  - `add_rank_opp_danger_500`: `avg_rank=2.5075`, `avg_pt=+0.3825`
-  - `add_value_gae_is_500`: `avg_rank=2.53`, `avg_pt=-2.295`
-  - `add_value_gae_is_rank_opp_danger_500`: `avg_rank=2.511`, `avg_pt=-1.485`
-- 当前解读：
-  - 三辅助头本身已经出现了短窗微正信号
-  - 负向更像来自 `value / GAE / replay importance sampling` 这组三项在当前 critic/target 条件下仍未站稳
-
-### 冻结 validation 池上的后续补跑
-
-- `ms_rl1_add_value_gae_is_1500`
-  - 训练内 `test_play=400`：`avg_rank=2.615`, `avg_pt=-10.35`
-  - 正式 `1v3=2000`：`avg_rank=2.5515`, `avg_pt=-3.6675`
-- `ms_rl1_add_value_gae_is_rank_opp_danger_500`
-  - 训练内 `test_play=200`：`avg_rank=2.585`, `avg_pt=-6.525`
-  - 正式 `1v3=2000`：`avg_rank=2.54`, `avg_pt=-4.095`
-- 当前解读：
-  - `value / GAE / replay IS` 的正向信号目前无法稳定放大
-  - 一旦拉长到 `1500` 或叠上三辅助头，就回到明显负收益
-
-### Oracle critic protocol decide 重测
-
-- `2026-04-16` 的 `oracle_critic=true` 五臂 `protocol_decide` 已按正式 `1v3=2000` 口径重测
-- 形式 winner 仍是 `w004220`，但结论不显著：
-  - top-2 gap 只有 `0.09 pt`
-  - `ambiguous=true`
-  - `winner_flipped_by_stderr=true`
-- 当前解读：
-  - 不能继续按这个 winner 推 `winner_refine`
-  - 这不等价于“Oracle critic 没价值”
-  - 更合理的怀疑是：从 visible-only SL bridge 出来的 `oracle_brain` 一开始还不会稳定利用 Oracle 信息，直接接入 `value / GAE` 太猛
-
-## 当前最重要的判读规则
-
-- 是否“过门”优先看正式 `1v3`
-- 训练内 `test_play=200/400` 只保留为诊断信号，不再直接当 protocol ranking 依据
-- `RL-1 / RL-2` 成对对照要后置到共享优化栈已经站稳之后
-- 当前更值得优先排查的是：
-  - 为什么 `value / GAE / replay IS` 的早期正向不能持续
-  - 如何让 `Oracle critic` 在还没成熟时不要过早强力支配 actor
-  - 相关文献观测见 `docs/research/online-rl/oracle-critic-literature-observations-2026-04-16.md`
-
-## 当前下一步
-
-1. 不再把 `ms_rl1_add_value_gae_is_20k` 当当前下一步判断依据；它已经越过短窗验证阶段且仍明显负增长。
-2. 先继续扩 `add_rank_opp_danger`，当前最自然的下一门是 `1500`。
-3. `add_value_gae_is_rank_opp_danger` 先不要直接扩窗；应先回头检查为什么 `value / GAE / replay IS` 会把已有的微正信号拉坏。
-4. 对 `Oracle critic`，短期更推荐先实现轻量 `critic influence ramp`：`value_loss` 可以从 step 0 学，但 critic 对 actor / GAE 的影响从小到大；hard `oracle_critic_warmup` 暂时只作为后续备选，不作为论文公认默认。
-5. 只有某一层过了 `3000` 门，才把它扩到 `20k`；只有 `20k` 仍为正，才继续看 `40k`。
-6. 只有当共享优化栈已经稳定前进时，才在同一层做匹配的 `RL-1 / RL-2` 对照，不再在裸 smoke 上直接判死 `RL-2`。
-
-## 当前操作提醒
-
-- `one_vs_three.py` 真正读取 challenger 的路径是 `[1v3.challenger].state_file`
-- 这台 `RTX 5070 Ti` 默认会放大到 `seed_count=1024 / shard_count=4`
-- 若要强制回到受控 `1v3 = 2000`：
-
-```powershell
-$env:MORTAL_1V3_SEED_COUNT = '500'
-$env:MORTAL_1V3_SHARD_COUNT = '1'
-```
-
-- 做 opponent pool 切换时，不要手改 `baseline.train`，优先用 `--opponent-pool-preset`
-- 训练阶段默认关闭 `search`；后续若要评估 `search`，按推理期系统增强单独做 A/B
+命令见 [运行流程](../agent/workflows.md#在线-rl)，历史文献和方案见 [研究索引](../research/README.md)。

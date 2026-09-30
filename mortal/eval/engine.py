@@ -60,6 +60,7 @@ class MortalEngine:
         oracle_guiding_keep_prob = 1.0,
         oracle_input_mode = None,
         search_runtime_bundle: Optional[SearchRuntimeBundle] = None,
+        policy_kind = 'categorical',
     ):
         self.engine_type = 'mortal'
         self.device = device or torch.device('cpu')
@@ -82,6 +83,7 @@ class MortalEngine:
             oracle_input_mode or default_oracle_input_mode,
             field_name='oracle_input_mode',
         )
+        self.policy_kind = policy_kind
         self.search_runtime_bundle = search_runtime_bundle
         self.profile_enabled = _env_flag('MORTAL_ENGINE_PROFILE', False)
         self._profile_stats = {
@@ -187,8 +189,13 @@ class MortalEngine:
                     phi = self.brain(obs, invisible_obs)
                 else:
                     phi = self.brain(obs)
-                policy_logits = self.dqn.logits(phi, masks)
-                q_out = torch.softmax(policy_logits, dim=-1)
+                if self.policy_kind == 'categorical':
+                    policy_logits = self.dqn.logits(phi, masks)
+                    q_out = torch.softmax(policy_logits, dim=-1)
+                elif self.policy_kind == 'dqn':
+                    q_out = self.dqn(phi, masks)
+                else:
+                    raise ValueError(f'Unexpected policy kind {self.policy_kind}')
         forward_elapsed = time.perf_counter() - forward_started
 
         search_elapsed = 0.0

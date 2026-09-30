@@ -1,12 +1,14 @@
 # 监督学习阶段 保真版 A/B 实时结果
 
+> 历史归档 · 归档整理：2026-09-05。正文保留当时的事实、判断和命令，不作为当前运行依据。当前入口见 [文档地图](../../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 > Historical snapshot only. This file was generated before the `2026-03-28` P1 redesign.
 > Current default P1 structure is `calibration -> protocol_decide -> winner_refine`; `ablation` is `backlog / manual only`.
 > Historical note: the old `P2` checkpoint-selection layer shown below has also been removed from the current mainline.
 > Current `formal` no longer reads any `P2` output.
 > Do not use the old `p1_solo / pairwise / joint_refine` layout in this snapshot as the current default.
 
-- 运行目录：`C:\Users\numbe\Desktop\MahjongAI\logs\sl_fidelity\sl_fidelity_main`
+- 运行目录：`<USERPROFILE>\Desktop\MahjongAI\logs\sl_fidelity\sl_fidelity_main`
 - 更新时间：`2026-03-24 01:33:01`
 - 当前状态（historical snapshot）：`stopped_after_p1_solo`
 - 自动串联范围：`P0 + P1 + P2 + 监督学习阶段 formal`
@@ -120,5 +122,5 @@
 
 ## 路径
 
-- 状态文件：`C:\Users\numbe\Desktop\MahjongAI\logs\sl_fidelity\sl_fidelity_main\state.json`
-- 文档文件（归档后）：`C:\Users\numbe\Desktop\MahjongAI\docs\archive\status\sl-fidelity-results-root-legacy.md`
+- 状态文件：`<USERPROFILE>\Desktop\MahjongAI\logs\sl_fidelity\sl_fidelity_main\state.json`
+- 文档文件（归档后）：`<USERPROFILE>\Desktop\MahjongAI\docs\archive\status\sl-fidelity-results-root-legacy.md`

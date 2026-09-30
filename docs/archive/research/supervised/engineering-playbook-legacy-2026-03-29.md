@@ -1,5 +1,7 @@
 # 监督学习阶段 训练经验记录
 
+> 历史归档 · 归档整理：2026-09-05。正文保留当时的事实、判断和命令，不作为当前运行依据。当前入口见 [文档地图](../../../README.md)；旧 SL / RL 强度及 Oracle 验证结论须结合 [独立审计](../../../research/sl-rl-audit-2026-09-05.md) 阅读。
+
 > 历史说明：本文保留大量 `2026-03-28` 之前的工程与实验记录。
 > 凡是把 `P1` 主线写成 `SoloAuxGate -> Pairwise -> JointRefine` 的段落，都只能当历史设计与排错背景，不能当当前默认。
 > 当前默认 P1 结构以 `docs/agent/handoff.md` 与 `docs/status/supervised-mainline.md` 为准，即：
@@ -127,7 +129,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
 其中：
 
 - `south_factor = 1.59`、`all_last_factor = 1.617`、`gap_focus_points = 4000`、`gap_close_bonus = 0.0` 是 `2026-03-25` 起冻结的 **rank 形状模板**，来源是“18k 统计缩网格 + `A2y` 主线微型 AB + `P1 solo` 真实选模口径复核”的组合结论。旧的 `1.4 / 1.8 / 4000 / 1.5` 仍保留为有麻将语义的历史启发式基线，但不再是当前默认。
-- `turn_bucket_weight` 则是后来补进来的另一层权重，默认 `early / mid / late = 1.00 / 1.05 / 1.15`，这一层才是统计支持的。对应证据记录在 `docs/research/supervised/p1-aux-adjustment-2026-03-22.md`：使用 `1080` 局、`707,930` 个监督状态的本地样本，加上公开手速资料，把巡目分成 `0-4 / 5-11 / 12+`。其中 `rank_match_rate = 0.4719 / 0.4676 / 0.4643`，说明 `rank` 在线程内始终相关，但随巡目变化并没有像 `opp` / `danger` 那么陡，所以最后只给了一个很轻的后巡上调，而不是大幅重权。
+- `turn_bucket_weight` 则是后来补进来的另一层权重，默认 `early / mid / late = 1.00 / 1.05 / 1.15`，这一层才是统计支持的。对应证据记录在 `docs/archive/research/supervised/p1-aux-adjustment-2026-03-22.md`：使用 `1080` 局、`707,930` 个监督状态的本地样本，加上公开手速资料，把巡目分成 `0-4 / 5-11 / 12+`。其中 `rank_match_rate = 0.4719 / 0.4676 / 0.4643`，说明 `rank` 在线程内始终相关，但随巡目变化并没有像 `opp` / `danger` 那么陡，所以最后只给了一个很轻的后巡上调，而不是大幅重权。
 - `base_weight = 0.03` 与 `max_weight = 0.10` 当前也属于工程侧的保守约束，不是 calibration 产物。它们的作用是保证 `rank` 仍然是轻辅助，而不是重新变回一个会压住 `policy CE` 的粗暴主损失。
 
 **2. `opponent_state` 的内部组合方式**
@@ -155,7 +157,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
   - `P1` 搜索里如果需要打开它，非零权重不是拍脑袋给的，而是来自 `P1 calibration`：`opponent_state_weight = budget_ratio × opp_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 那轮更早期的 `0.064`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/handoff.md`。
 - **巡目权重 `opponent_turn_weighting`**
   - 默认是 `0.20 / 1.00 / 1.60`。
-  - 这一层确实来自统计，不是 calibration。证据同样在 `docs/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `opp_any_tenpai_rate = 0.0342 / 0.4078 / 0.8303`、`opp_any_near_rate = 0.2772 / 0.8721 / 0.9817`，说明“看懂别人”在早巡信息量有限，中后巡才快速变得关键，因此默认配置有明显的后巡抬升。
+  - 这一层确实来自统计，不是 calibration。证据同样在 `docs/archive/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `opp_any_tenpai_rate = 0.0342 / 0.4078 / 0.8303`、`opp_any_near_rate = 0.2772 / 0.8721 / 0.9817`，说明“看懂别人”在早巡信息量有限，中后巡才快速变得关键，因此默认配置有明显的后巡抬升。
 
 **3. `danger` 的内部组合方式**
 
@@ -187,7 +189,7 @@ CPU affinity 也已从“默认绑 `p_cores`”改为“显式 opt-in”。现�
   - `P1` 搜索里如果需要打开它，非零权重同样来自 `P1 calibration`：`danger_weight = budget_ratio × danger_weight_per_budget_unit`。历史上这里曾记录过 `2026-03-20` 的 `0.144`，但当前默认已改为沿用 `2026-03-25 post-shape calibration` 的单头映射，见 `docs/agent/handoff.md`。
 - **巡目权重 `danger_turn_weighting`**
   - 默认是 `0.05 / 1.00 / 2.50`。
-  - 这一层也来自统计，不是 calibration。对应证据同样写在 `docs/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `danger_state_has_any_rate = 0.0100 / 0.1650 / 0.4117`，`danger_positive_discard_rate_given_valid = 0.0014 / 0.0291 / 0.0909`。也就是说，早巡“立即放铳风险”几乎接近零，因此早巡默认大幅压低，后巡显著抬高。
+  - 这一层也来自统计，不是 calibration。对应证据同样写在 `docs/archive/research/supervised/p1-aux-adjustment-2026-03-22.md`：本地样本里 `danger_state_has_any_rate = 0.0100 / 0.1650 / 0.4117`，`danger_positive_discard_rate_given_valid = 0.0014 / 0.0291 / 0.0909`。也就是说，早巡“立即放铳风险”几乎接近零，因此早巡默认大幅压低，后巡显著抬高。
 - **`danger_ramp_steps`**
   - 这不是另一种“统计权重”，而是一个训练稳定性开关。实现上它会把整条 `danger` 辅助线的外层系数从 `0` 线性升到目标 `danger_weight`：`ramp = min(step / danger_ramp_steps, 1.0)`。
   - 目的很简单：`danger` 标签天然更稀疏、更偏后巡、也更容易在训练早期给 trunk 施加尖锐梯度，所以可以先让主干和主策略头站稳，再逐步把 `danger` 压上去。

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,10 @@ except ImportError:  # pragma: no cover - handled by CLI error path
     EventAccumulator = None
 
 from mortal.core.toml_utils import load_toml_file, write_toml_file
+from mortal.core.config_utils import (
+    deep_merge_dict as _deep_merge_dict,
+    get_dict_section as _cfg_section,
+)
 from mortal.online.online_machine_modes import build_independent_arm_config, load_resolved_base_config
 
 
@@ -21,21 +24,6 @@ DEFAULT_PROTOCOL_DECIDE_ORACLE_CRITIC_OPTIONS = (False, True)
 DEFAULT_WINNER_REFINE_SCALE_FACTORS = (0.80, 1.00, 1.20)
 DEFAULT_PROTOCOL_DECIDE_GAP_THRESHOLD = 0.5
 WEIGHT_SLUG_SCALE = 1_000_000
-
-
-def _cfg_section(node: dict[str, Any], key: str) -> dict[str, Any]:
-    section = node.get(key, {})
-    return section if isinstance(section, dict) else {}
-
-
-def _deep_merge_dict(dst: dict[str, Any], src: dict[str, Any]) -> None:
-    for key, value in src.items():
-        if isinstance(value, dict):
-            child = _cfg_section(dst, key)
-            dst[key] = child
-            _deep_merge_dict(child, value)
-        else:
-            dst[key] = deepcopy(value)
 
 
 def _round_weight(value: float) -> float:

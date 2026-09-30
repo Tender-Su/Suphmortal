@@ -83,8 +83,8 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             local_python='local-python',
             local_label='desktop',
             remote_host='mahjong-laptop',
-            remote_repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            remote_python=r'C:\Users\numbe\miniconda3\envs\mortal\python.exe',
+            remote_repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            remote_python=r'C:\Users\fixture_user\miniconda3\envs\mortal\python.exe',
             remote_label='laptop',
             ssh_key=None,
         )
@@ -116,8 +116,8 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI',
-            ssh_key=r'C:\Users\numbe\.ssh\mahjong_laptop_ed25519',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI',
+            ssh_key=r'C:\Users\fixture_user\.ssh\mahjong_laptop_ed25519',
         )
         command = formal_dist.build_remote_interactive_window_command(
             worker=worker,
@@ -126,8 +126,8 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
                 'task_id': 'formal__anchor',
                 'candidate_arm': 'anchor',
             },
-            remote_result_path=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\result.json'),
-            remote_runtime_root=Path(r'C:\Users\numbe\Desktop\MahjongAI\logs\runtime\formal__anchor'),
+            remote_result_path=Path(r'C:\Users\fixture_user\Desktop\MahjongAI\logs\result.json'),
+            remote_runtime_root=Path(r'C:\Users\fixture_user\Desktop\MahjongAI\logs\runtime\formal__anchor'),
             formal_overrides={
                 'num_workers': 4,
                 'file_batch_size': 10,
@@ -143,7 +143,7 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
         self.assertIn('-EncodedCommand', command)
         script = formal_dist.dispatch.decode_remote_powershell_command_arg(command[-1])
         self.assertIn(
-            r"C:\Users\numbe\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
+            r"C:\Users\fixture_user\Desktop\MahjongAI\scripts\start_interactive_remote_python.ps1",
             script,
         )
         self.assertIn('-WaitForStartOnly', script)
@@ -180,7 +180,7 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             label='laptop',
             python=r'C:\Python\python.exe',
             host='mahjong-laptop',
-            repo=r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            repo=r'C:\Users\fixture_user\Desktop\MahjongAI_longabc_runner',
             ssh_key=None,
         )
         task_state = {
@@ -213,11 +213,11 @@ class RunStage05FormalDistributedTests(unittest.TestCase):
             active.process.wait(timeout=10)
 
         self.assertIn(
-            r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            r'C:\Users\fixture_user\Desktop\MahjongAI_longabc_runner',
             str(build_command.call_args.kwargs['remote_result_path']),
         )
         self.assertIn(
-            r'C:\Users\numbe\Desktop\MahjongAI_longabc_runner',
+            r'C:\Users\fixture_user\Desktop\MahjongAI_longabc_runner',
             str(build_command.call_args.kwargs['remote_runtime_root']),
         )
         self.assertTrue(task_state['remote_detached'])

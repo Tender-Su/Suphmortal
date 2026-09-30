@@ -7,6 +7,11 @@ from typing import Any, Mapping, MutableMapping, Optional
 
 import torch
 
+from mortal.core.config_utils import (
+    coerce_bool as _coerce_bool,
+    get_dict_section as _cfg_section,
+)
+
 
 VALID_ORACLE_INPUT_MODES = frozenset({"true", "zero", "shuffled"})
 
@@ -63,26 +68,6 @@ _ARM_ALIASES = {
     "oracle_actor_shuffled": "actor_shuffled",
     "oracle_critic_only": "critic_only",
 }
-
-
-def _cfg_section(config_dict: Any, key: str) -> dict[str, Any]:
-    if not isinstance(config_dict, dict):
-        return {}
-    section = config_dict.get(key, {})
-    return section if isinstance(section, dict) else {}
-
-
-def _coerce_bool(value: Any, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    parsed = str(value).strip().lower()
-    if parsed in {"1", "true", "yes", "on"}:
-        return True
-    if parsed in {"0", "false", "no", "off"}:
-        return False
-    return default
 
 
 def normalize_oracle_input_mode(mode: Any, *, field_name: str = "oracle_input_mode") -> str:
@@ -251,4 +236,3 @@ def apply_oracle_experiment_to_config(
     exp_cfg["description"] = arm.description
     exp_cfg["_applied"] = True
     return arm, suffix
-

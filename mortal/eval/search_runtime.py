@@ -9,6 +9,10 @@ from torch import Tensor
 
 from mortal.config import config as global_config
 from mortal.core.checkpoint_utils import load_brain_state_with_input_bridge
+from mortal.core.config_utils import (
+    coerce_bool as _as_bool,
+    get_dict_section as _cfg_section,
+)
 from mortal.core.model import (
     Brain,
     DangerAuxNet,
@@ -28,26 +32,6 @@ _PASS_ACTION = 45
 _RIICHI_ACTION = 37
 _AGARI_ACTION = 43
 _RYUKYOKU_ACTION = 44
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    parsed = str(value).strip().lower()
-    if parsed in {"1", "true", "yes", "on"}:
-        return True
-    if parsed in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _cfg_section(config_dict: Any, key: str) -> dict[str, Any]:
-    if not isinstance(config_dict, dict):
-        return {}
-    section = config_dict.get(key, {})
-    return section if isinstance(section, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -512,7 +496,13 @@ def build_search_runtime_bundle_from_state(
         saved_cfg = state.get("config", {})
         value_cfg = _cfg_section(saved_cfg, "value")
         num_players = int(value_cfg.get("num_players", 4) or 4)
-        bundle.value_net = _maybe_compile(ValueHead(num_players=num_players).to(device).eval(), enable_compile)
+        bundle.value_net = _maybe_compile(
+            ValueHead(
+                num_players=num_players,
+                zero_sum=bool(value_cfg.get("exact_zero_sum", False)),
+            ).to(device).eval(),
+            enable_compile,
+        )
         bundle.value_net.load_state_dict(state["value_net"])
     if _state_has_module(state, "exp_reward_net"):
         saved_cfg = state.get("config", {})

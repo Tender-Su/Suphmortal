@@ -2,6 +2,7 @@ import hashlib
 import os
 import random
 import re
+import logging
 from itertools import repeat
 
 import numpy as np
@@ -18,13 +19,8 @@ from mortal.data.reward_calculator import RewardCalculator
 _REPLAY_PARAM_VERSION_RE = re.compile(r'^pv(\d+)_sid\d+_')
 
 
-def stable_source_game_id(filename):
-    digest = hashlib.blake2b(
-        str(filename).encode('utf-8'),
-        digest_size=8,
-        person=b'mortal-sl',
-    ).digest()
-    return int.from_bytes(digest, byteorder='little') & ((1 << 63) - 1)
+def _is_invalid_game_log_error(exc):
+    return 'empty or invalid game log' in str(exc).lower()
 
 
 def replay_param_version_from_path(filename):
@@ -32,6 +28,15 @@ def replay_param_version_from_path(filename):
     if match is None:
         return None
     return int(match.group(1))
+
+
+def stable_source_game_id(filename):
+    digest = hashlib.blake2b(
+        str(filename).encode('utf-8'),
+        digest_size=8,
+        person=b'mortal-sl',
+    ).digest()
+    return int.from_bytes(digest, byteorder='little') & ((1 << 63) - 1)
 
 
 def rotate_values_to_relative_order(values_by_player, player_id):
@@ -119,7 +124,7 @@ def regret_labels_enabled():
     )
 
 
-def iter_loaded_gameplay_batches(loader, file_list):
+def iter_loaded_gameplay_batches(loader, file_list, *, bulk_event_cache=False):
     if not file_list:
         return
     if file_list and str(file_list[0]).endswith('.pt'):
@@ -129,14 +134,37 @@ def iter_loaded_gameplay_batches(loader, file_list):
             for gameplay_batch in loader.load_logs(raw_logs):
                 yield str(cache_file), gameplay_batch
         return
-    if not any(str(filename).endswith('.events.zst') for filename in file_list):
-        loaded_batches = loader.load_log_files(file_list)
-        if len(loaded_batches) == len(file_list):
-            for filename, gameplay_batch in zip(file_list, loaded_batches):
-                yield str(filename), gameplay_batch
-            return
+    event_cache_files = [
+        filename for filename in file_list
+        if str(filename).endswith('.events.zst')
+    ]
+    if bulk_event_cache and len(event_cache_files) == len(file_list):
+        for index, gameplay_batch in enumerate(loader.load_log_files(file_list)):
+            yield f'{file_list[0]}#{index}', gameplay_batch
+        return
+    if not event_cache_files:
+        try:
+            loaded_batches = loader.load_log_files(file_list)
+        except RuntimeError as exc:
+            if not _is_invalid_game_log_error(exc):
+                raise
+            logging.warning(
+                'bulk log load hit an empty or invalid game log; falling back to per-file load'
+            )
+        else:
+            if len(loaded_batches) == len(file_list):
+                for filename, gameplay_batch in zip(file_list, loaded_batches):
+                    yield str(filename), gameplay_batch
+                return
     for filename in file_list:
-        for gameplay_batch in loader.load_log_files([filename]):
+        try:
+            loaded_batches = loader.load_log_files([filename])
+        except RuntimeError as exc:
+            if not _is_invalid_game_log_error(exc):
+                raise
+            logging.warning('skipping empty or invalid game log: %s', filename)
+            continue
+        for gameplay_batch in loaded_batches:
             yield str(filename), gameplay_batch
 
 
@@ -601,6 +629,8 @@ def worker_init_fn(*args, **kwargs):
             torch.set_num_interop_threads(torch_num_interop_threads)
         except RuntimeError:
             pass
+    if bool(getattr(dataset, 'shards_files_in_iter', False)):
+        return
     per_worker = int(np.ceil(len(dataset.file_list) / worker_info.num_workers))
     start = worker_info.id * per_worker
     end = start + per_worker

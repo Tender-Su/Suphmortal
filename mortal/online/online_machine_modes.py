@@ -8,6 +8,10 @@ from typing import Any
 
 from mortal._repo import MORTAL_ROOT
 from mortal.core.toml_utils import load_toml_file, write_toml_file
+from mortal.core.config_utils import (
+    deep_merge_dict as _deep_merge_dict,
+    ensure_dict_section as _cfg_section,
+)
 
 
 PATH_KEYS = {
@@ -1044,24 +1048,6 @@ def resolve_config_paths(node: Any, base_dir: Path) -> Any:
 def load_resolved_base_config(base_config_path: str | Path) -> dict[str, Any]:
     base_path = Path(base_config_path).resolve()
     return resolve_config_paths(load_toml_file(base_path), base_path.parent)
-
-
-def _cfg_section(config_dict: dict[str, Any], key: str) -> dict[str, Any]:
-    section = config_dict.get(key)
-    if isinstance(section, dict):
-        return section
-    section = {}
-    config_dict[key] = section
-    return section
-
-
-def _deep_merge_dict(dst: dict[str, Any], src: dict[str, Any]) -> None:
-    for key, value in src.items():
-        if isinstance(value, dict):
-            child = _cfg_section(dst, key)
-            _deep_merge_dict(child, value)
-        else:
-            dst[key] = deepcopy(value)
 
 
 def _available_opponent_pool_preset_names(config_dict: dict[str, Any]) -> list[str]:

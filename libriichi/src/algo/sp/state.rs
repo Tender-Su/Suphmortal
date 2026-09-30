@@ -41,8 +41,12 @@ impl From<InitState> for State {
     ) -> Self {
         let mut tiles_in_wall = tiles_seen;
         let mut akas_in_wall = akas_seen;
-        tiles_in_wall.iter_mut().for_each(|v| *v = 4 - *v);
-        akas_in_wall.iter_mut().for_each(|v| *v = !*v);
+        for value in &mut tiles_in_wall {
+            *value = 4 - *value;
+        }
+        for value in &mut akas_in_wall {
+            *value = !*value;
+        }
         Self {
             tehai,
             akas_in_hand,
@@ -54,7 +58,7 @@ impl From<InitState> for State {
 }
 
 impl State {
-    pub(super) fn discard(&mut self, tile: Tile) {
+    pub(super) const fn discard(&mut self, tile: Tile) {
         self.tehai[tile.deaka().as_usize()] -= 1;
         match tile.as_u8() {
             tu8!(5mr) => self.akas_in_hand[0] = false,
@@ -64,7 +68,7 @@ impl State {
         }
     }
 
-    pub(super) fn undo_discard(&mut self, tile: Tile) {
+    pub(super) const fn undo_discard(&mut self, tile: Tile) {
         self.tehai[tile.deaka().as_usize()] += 1;
         match tile.as_u8() {
             tu8!(5mr) => self.akas_in_hand[0] = true,
@@ -74,7 +78,7 @@ impl State {
         }
     }
 
-    pub(super) fn deal(&mut self, tile: Tile) {
+    pub(super) const fn deal(&mut self, tile: Tile) {
         self.tiles_in_wall[tile.deaka().as_usize()] -= 1;
         match tile.as_u8() {
             tu8!(5mr) => self.akas_in_wall[0] = false,
@@ -85,7 +89,7 @@ impl State {
         self.undo_discard(tile);
     }
 
-    pub(super) fn undo_deal(&mut self, tile: Tile) {
+    pub(super) const fn undo_deal(&mut self, tile: Tile) {
         self.discard(tile);
         self.tiles_in_wall[tile.deaka().as_usize()] += 1;
         match tile.as_u8() {

@@ -1,7 +1,7 @@
 param(
     [string]$Branch = 'main',
     [string]$LaptopHost = 'mahjong-laptop',
-    [string]$LaptopRepo = 'C:\Users\numbe\Desktop\MahjongAI',
+    [string]$LaptopRepo = (Join-Path $env:USERPROFILE 'Desktop\MahjongAI'),
     [switch]$SkipWorktreeUpdate
 )
 

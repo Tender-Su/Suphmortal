@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -17,10 +16,23 @@ from pathlib import Path
 
 import torch
 from mortal._repo import MORTAL_ROOT, REPO_ROOT
+from mortal.core.artifacts import (
+    atomic_torch_save,
+    atomic_write_json,
+    atomic_write_toml as write_toml,
+    file_sha256,
+    load_json as load_json_file,
+    stable_json_digest as stable_digest,
+)
 from mortal.core.cpu_affinity import AFFINITY_ENV_VAR
+from mortal.core.external_pause import EXTERNAL_PAUSE_EXIT_CODE
 from mortal.supervised.adaptive_curriculum import (
     AdaptiveCurriculumConfig,
     inherit_adaptive_curriculum_baseline,
+)
+from mortal.supervised.auxiliary_config import (
+    auxiliary_recipe_from_config,
+    effective_auxiliary_recipe,
 )
 from mortal.supervised.sl_selection import (
     LOSS_EPSILON,
@@ -30,7 +42,7 @@ from mortal.supervised.sl_selection import (
     scenario_quality_score,
     selection_tiebreak_key,
 )
-from mortal.core.toml_utils import load_toml_file, write_toml_file
+from mortal.core.toml_utils import load_toml_file
 
 
 MORTAL_DIR = MORTAL_ROOT
@@ -39,7 +51,6 @@ BASE_INDEX_PATH = MORTAL_DIR / 'checkpoints' / 'file_index_supervised_json.pth'
 AB_ROOT = REPO_ROOT / 'logs' / 'sl_ab'
 AB_ROOT.mkdir(parents=True, exist_ok=True)
 PHASE_PLAN_SCHEMA_VERSION = 2
-EXTERNAL_PAUSE_EXIT_CODE = 75
 
 PROVENANCE_IGNORED_SUPERVISED_KEYS = {
     'state_file',
@@ -520,6 +531,9 @@ def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool
     adaptive_cfg = supervised_cfg.get('adaptive_curriculum') or {}
     if bool(adaptive_cfg.get('enabled', False)):
         adaptive_state = state.get('adaptive_curriculum_state') or {}
+        if adaptive_state.get('last_action') == 'inconclusive':
+            raise RuntimeError('adaptive phase is inconclusive; retain its baseline and '
+                               'expand validation before advancing the curriculum')
         return bool(adaptive_state.get('completed', False))
 
     convergence_cfg = supervised_cfg.get('convergence') or {}
@@ -551,16 +565,6 @@ def checkpoint_is_complete_for_config(state: dict, supervised_cfg: dict) -> bool
         and patience_counter >= patience_checks
         and num_lr_reductions >= min_lr_reductions
     )
-def stable_digest(value) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(',', ':'),
-    ).encode('utf-8')
-    return hashlib.sha256(payload).hexdigest()
-
-
 def semantic_config_digest(cfg: dict) -> str:
     semantic_cfg = deepcopy(cfg)
     supervised_cfg = semantic_cfg.get('supervised')
@@ -650,41 +654,11 @@ def build_phase_plan(
     return plan
 
 
-def load_json_file(path: Path) -> dict:
-    return json.loads(path.read_text(encoding='utf-8-sig'))
-
-
-def atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
-    try:
-        temp_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-            encoding='utf-8',
-            newline='\n',
-        )
-        os.replace(temp_path, path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
 def record_phase_handoff(manifest_path: Path, handoff: dict) -> None:
     manifest = load_json_file(manifest_path)
     manifest['handoff'] = handoff
     manifest['updated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
     atomic_write_json(manifest_path, manifest)
-
-
-def atomic_torch_save(payload, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
-    try:
-        torch.save(payload, temp_path)
-        os.replace(temp_path, path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
 
 
 EXTENSION_MUTABLE_SUPERVISED_KEYS = {
@@ -781,14 +755,6 @@ def extension_config_differences(source_cfg: dict, target_cfg: dict) -> list[tup
         extension_immutable_config_view(source_cfg),
         extension_immutable_config_view(target_cfg),
     )
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def nested_state_equal(left, right) -> bool:
@@ -1034,6 +1000,7 @@ ADAPTIVE_PHASE_PRESERVED_STATE_KEYS = (
     'scaler',
     'steps',
     'optimizer_steps',
+    'auxiliary_optimizer_steps',
     'skipped_optimizer_steps',
     'nonfinite_batches',
 )
@@ -1143,26 +1110,44 @@ def migrate_adaptive_phase_handoff(
     ).resolve()
     if adaptive_best_path == target_path:
         raise ValueError('adaptive best and latest checkpoint paths must differ')
-    atomic_torch_save(migrated, adaptive_best_path)
-    atomic_torch_save(migrated, target_path)
-    verified = torch.load(target_path, map_location='cpu', weights_only=False)
-    for key in ADAPTIVE_PHASE_PRESERVED_STATE_KEYS:
-        if not nested_state_equal(source_state.get(key), verified.get(key)):
-            raise RuntimeError(
-                f'adaptive phase handoff changed preserved state field: {key}'
-            )
-    record = deepcopy(verified['adaptive_phase_handoff_migration'])
-    record.update({
-        'source_phase': source_plan.get('phase_name'),
-        'target_phase': expected_plan.get('phase_name'),
-        'target_path': str(target_path),
-        'target_adaptive_best_path': str(adaptive_best_path),
-        'target_checkpoint_id': verified['checkpoint_id'],
-        'target_file_sha256': file_sha256(target_path),
-        'target_adaptive_best_sha256': file_sha256(adaptive_best_path),
-    })
-    atomic_write_json(target_path.parent.parent / 'adaptive_phase_handoff.json', record)
-    return record
+    target_root = target_path.parent.parent
+    staged_latest = target_path.with_name(f'.{target_path.name}.adaptive_handoff')
+    try:
+        atomic_torch_save(migrated, adaptive_best_path)
+        atomic_torch_save(migrated, staged_latest)
+        verified = torch.load(staged_latest, map_location='cpu', weights_only=False)
+        for key in ADAPTIVE_PHASE_PRESERVED_STATE_KEYS:
+            if not nested_state_equal(source_state.get(key), verified.get(key)):
+                raise RuntimeError(
+                    f'adaptive phase handoff changed preserved state field: {key}'
+                )
+        record = deepcopy(verified['adaptive_phase_handoff_migration'])
+        record.update({
+            'source_phase': source_plan.get('phase_name'),
+            'target_phase': expected_plan.get('phase_name'),
+            'target_path': str(target_path),
+            'target_adaptive_best_path': str(adaptive_best_path),
+            'target_checkpoint_id': verified['checkpoint_id'],
+            'target_file_sha256': file_sha256(staged_latest),
+            'target_adaptive_best_sha256': file_sha256(adaptive_best_path),
+        })
+        atomic_write_json(target_root / 'adaptive_phase_handoff.json', record)
+        atomic_write_json(
+            target_root / 'phase_manifest.json',
+            {
+                'schema_version': PHASE_PLAN_SCHEMA_VERSION,
+                'plan': deepcopy(expected_plan),
+                'status': 'running',
+                'migration_id': migration_id,
+                'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            },
+        )
+        # latest.pth is the final marker that makes the handoff resumable.
+        os.replace(staged_latest, target_path)
+        return record
+    finally:
+        if staged_latest.exists():
+            staged_latest.unlink()
 
 
 def validate_existing_phase_artifacts(
@@ -1314,14 +1299,48 @@ def build_base_config() -> dict:
     return load_toml_file(BASE_CFG_PATH)
 
 
-def write_toml(path: Path, data: dict) -> None:
-    temp_path = path.with_name(f'.{path.name}.{os.getpid()}.{time.time_ns()}.tmp')
-    try:
-        write_toml_file(temp_path, data)
-        os.replace(temp_path, path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
+def resolve_bootstrap_auxiliary_recipe(
+    base_cfg: dict,
+    source_cfg: dict | None,
+    *,
+    policy: str = 'inherit',
+) -> tuple[dict, dict]:
+    """Keep curriculum bootstrap from silently replacing the auxiliary objective.
+
+    Learning rate, optimizer reset and data windows remain independently configured.
+    Choosing the current config is an explicit objective ablation, recorded in the
+    immutable bootstrap manifest. This never changes an existing checkpoint.
+    """
+    if policy not in {'inherit', 'current'}:
+        raise ValueError('adaptive bootstrap auxiliary policy must be inherit or current')
+    if source_cfg is None and policy == 'inherit':
+        raise ValueError(
+            'bootstrap checkpoint has no config for auxiliary inheritance; '
+            'use an explicit current auxiliary policy only for a new objective branch'
+        )
+
+    current = auxiliary_recipe_from_config(base_cfg)
+    source = auxiliary_recipe_from_config(source_cfg) if source_cfg is not None else None
+    effective = source if policy == 'inherit' else current
+    resolved = deepcopy(base_cfg)
+    resolved['aux'] = deepcopy(effective['aux'])
+    resolved.setdefault('supervised', {})['rank_aux'] = deepcopy(effective['rank_aux'])
+    if policy == 'inherit':
+        # A destination override would otherwise undo the inherited top-level aux.
+        resolved['supervised'].pop('aux', None)
+        if 'aux' in source_cfg.get('supervised', {}):
+            resolved['supervised']['aux'] = deepcopy(effective['section_aux'])
+    return resolved, {
+        'policy': policy,
+        'source': source,
+        'current_config': current,
+        'effective': deepcopy(effective),
+        'effective_training_recipe': effective_auxiliary_recipe(resolved),
+        'changed_from_source': (
+            None if source is None
+            else effective_auxiliary_recipe(resolved) != effective_auxiliary_recipe(source_cfg)
+        ),
+    }
 
 
 def write_index(path: Path, *, train_files: list[str], monitor_recent_files: list[str], full_recent_files: list[str], old_regression_files: list[str], meta: dict) -> None:
@@ -1860,6 +1879,7 @@ def run_arm(
     adaptive_start_phase: str | None = None,
     adaptive_bootstrap_state_file: str | None = None,
     adaptive_peak_lr: float | None = None,
+    adaptive_bootstrap_auxiliary_policy: str = 'inherit',
 ) -> dict:
     if adaptive_curriculum_profile is not None and convergence_profile is not None:
         raise ValueError('adaptive curriculum and convergence profiles are exclusive')
@@ -1908,6 +1928,17 @@ def run_arm(
         bootstrap_path = Path(adaptive_bootstrap_state_file).resolve()
         bootstrap_identity = checkpoint_identity(bootstrap_path)
         bootstrap_summary = load_state_summary(bootstrap_path)
+        bootstrap_state = torch.load(bootstrap_path, map_location='cpu', weights_only=False)
+        source_cfg = bootstrap_state.get('config')
+        if source_cfg is not None and not isinstance(source_cfg, dict):
+            raise ValueError('bootstrap checkpoint config must be a mapping')
+        base_cfg, auxiliary_recipe = resolve_bootstrap_auxiliary_recipe(
+            base_cfg, source_cfg, policy=adaptive_bootstrap_auxiliary_policy,
+        )
+        base_cfg['supervised']['init_auxiliary_schedule'] = (
+            'inherit' if adaptive_bootstrap_auxiliary_policy == 'inherit' else 'reset'
+        )
+        del bootstrap_state
         source_lr = float(bootstrap_summary.get('lr') or 0.0)
         if not math.isfinite(source_lr) or source_lr <= 0:
             raise ValueError(
@@ -1952,6 +1983,8 @@ def run_arm(
             'data_traversal_restart': True,
             'eval_split_digests_match': eval_digests_match,
             'source_summary': bootstrap_summary,
+            'auxiliary_recipe': auxiliary_recipe,
+            'auxiliary_schedule_initialization': base_cfg['supervised']['init_auxiliary_schedule'],
         }
         record_path = AB_ROOT / ab_name / 'adaptive_bootstrap.json'
         if record_path.exists():
@@ -1990,15 +2023,18 @@ def run_arm(
             'storage_root': storage_root_override,
             'allow_early_stopping': allow_early_stopping,
         }
+        if init_state_file and bootstrap_record is None:
+            # Ordinary A -> B -> C weights-only handoffs also retain the ramp.
+            phase_kwargs['base_cfg'] = deepcopy(base_cfg)
+            phase_kwargs['base_cfg'].setdefault('supervised', {})['init_auxiliary_schedule'] = 'inherit'
         if adaptive_curriculum_profile is not None:
             phase_kwargs['adaptive_curriculum_profile'] = (
                 adaptive_curriculum_profile
             )
             phase_kwargs['adaptive_handoff_source'] = adaptive_handoff_source
             phase_kwargs['adaptive_peak_lr'] = adaptive_peak_lr
-            phase_kwargs['adaptive_warmup_init_lr'] = (
-                adaptive_warmup_init_lr if phase_name == start_phase else None
-            )
+            # Handoffs preserve the scheduler, including its bootstrap metadata.
+            phase_kwargs['adaptive_warmup_init_lr'] = adaptive_warmup_init_lr
         if convergence_profile is not None:
             phase_kwargs['convergence_profile'] = convergence_profile
         extension_source = (phase_extension_sources or {}).get(phase_name)
@@ -2100,10 +2136,37 @@ def run_arm(
 
 def save_results(ab_name: str, results: dict) -> Path:
     out_path = AB_ROOT / ab_name / 'summary.json'
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open('w', encoding='utf-8', newline='\n') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    atomic_write_json(out_path, results)
     return out_path
+
+
+def run_arm_grid(
+    base_cfg: dict,
+    grouped: dict[str, list[str]],
+    *,
+    ab_name: str,
+    seed: int,
+    step_scale: float,
+    arm_specs: list[tuple[str, dict[str, str]]],
+) -> dict:
+    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
+    results = {
+        arm_name: run_arm(
+            base_cfg,
+            grouped,
+            ab_name=ab_name,
+            arm_name=arm_name,
+            seed=seed,
+            eval_splits=eval_splits,
+            step_scale=step_scale,
+            **profiles,
+        )
+        for arm_name, profiles in arm_specs
+    }
+    winner, selection = select_winner_by_policy(results)
+    payload = {'winner': winner, 'selection': selection, 'results': results}
+    save_results(ab_name, payload)
+    return payload
 
 
 def run_ab1(
@@ -2114,202 +2177,213 @@ def run_ab1(
     *,
     ab_name: str = 'sl_ab1_scheduler',
 ) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    for arm_name, scheduler_profile in [('A_plateau', 'plateau'), ('B_cosine', 'cosine'), ('C_phasewise', 'phasewise')]:
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name=ab_name,
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile='broad_to_recent',
-            weight_profile='two_stage',
-            window_profile='24m_12m',
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
-        )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results(ab_name, payload)
-    return payload
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name=ab_name,
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': 'broad_to_recent',
+                    'weight_profile': 'two_stage',
+                    'window_profile': '24m_12m',
+                },
+            )
+            for arm_name, scheduler_profile in (
+                ('A_plateau', 'plateau'),
+                ('B_cosine', 'cosine'),
+                ('C_phasewise', 'phasewise'),
+            )
+        ],
+    )
 
 
 def run_ab2(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, step_scale: float) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    for arm_name, curriculum_profile in [('A_broad_to_recent', 'broad_to_recent'), ('B_recent_broad_recent', 'recent_broad_recent')]:
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name='sl_ab2_curriculum',
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile='two_stage',
-            window_profile='24m_12m',
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
-        )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results('sl_ab2_curriculum', payload)
-    return payload
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name='sl_ab2_curriculum',
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': curriculum_profile,
+                    'weight_profile': 'two_stage',
+                    'window_profile': '24m_12m',
+                },
+            )
+            for arm_name, curriculum_profile in (
+                ('A_broad_to_recent', 'broad_to_recent'),
+                ('B_recent_broad_recent', 'recent_broad_recent'),
+            )
+        ],
+    )
 
 
 def run_ab3(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, curriculum_profile: str, step_scale: float) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    for arm_name, weight_profile in [('A_mild', 'mild'), ('B_strong', 'strong'), ('C_two_stage', 'two_stage')]:
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name='sl_ab3_weights',
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile=weight_profile,
-            window_profile='24m_12m',
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
-        )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results('sl_ab3_weights', payload)
-    return payload
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name='sl_ab3_weights',
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': curriculum_profile,
+                    'weight_profile': weight_profile,
+                    'window_profile': '24m_12m',
+                },
+            )
+            for arm_name, weight_profile in (
+                ('A_mild', 'mild'),
+                ('B_strong', 'strong'),
+                ('C_two_stage', 'two_stage'),
+            )
+        ],
+    )
 
 
 def run_ab4(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, curriculum_profile: str, weight_profile: str, step_scale: float) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    for arm_name, window_profile in [('A_24m_12m', '24m_12m'), ('B_12m_6m', '12m_6m'), ('C_6m_6m', '6m_6m')]:
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name='sl_ab4_windows',
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile=weight_profile,
-            window_profile=window_profile,
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
-        )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results('sl_ab4_windows', payload)
-    return payload
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name='sl_ab4_windows',
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': curriculum_profile,
+                    'weight_profile': weight_profile,
+                    'window_profile': window_profile,
+                },
+            )
+            for arm_name, window_profile in (
+                ('A_24m_12m', '24m_12m'),
+                ('B_12m_6m', '12m_6m'),
+                ('C_6m_6m', '6m_6m'),
+            )
+        ],
+    )
 
 
 def run_ab23_joint(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, window_profile: str, step_scale: float) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    arms = [
+    arms = (
         ('A1_broad_mild', 'broad_to_recent', 'mild'),
         ('A2_broad_strong', 'broad_to_recent', 'strong'),
         ('A3_broad_two_stage', 'broad_to_recent', 'two_stage'),
         ('B1_recent_mild', 'recent_broad_recent', 'mild'),
         ('B2_recent_strong', 'recent_broad_recent', 'strong'),
         ('B3_recent_two_stage', 'recent_broad_recent', 'two_stage'),
-    ]
-    for idx, (arm_name, curriculum_profile, weight_profile) in enumerate(arms):
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name='sl_ab23_joint',
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile=weight_profile,
-            window_profile=window_profile,
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
-        )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results('sl_ab23_joint', payload)
-    return payload
+    )
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name='sl_ab23_joint',
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': curriculum_profile,
+                    'weight_profile': weight_profile,
+                    'window_profile': window_profile,
+                },
+            )
+            for arm_name, curriculum_profile, weight_profile in arms
+        ],
+    )
 
 
 def run_ab234_joint(base_cfg: dict, grouped: dict[str, list[str]], seed: int, scheduler_profile: str, step_scale: float) -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    arms = []
-    for curriculum_prefix, curriculum_profile in [('A', 'broad_to_recent'), ('B', 'recent_broad_recent')]:
-        for weight_prefix, weight_profile in [('1', 'mild'), ('2', 'strong'), ('3', 'two_stage')]:
-            for window_prefix, window_profile in [('x', '24m_12m'), ('y', '12m_6m')]:
-                arm_name = f'{curriculum_prefix}{weight_prefix}{window_prefix}_{curriculum_profile}_{weight_profile}_{window_profile}'
-                arms.append((arm_name, curriculum_profile, weight_profile, window_profile))
-
-    for idx, (arm_name, curriculum_profile, weight_profile, window_profile) in enumerate(arms):
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name='sl_ab234_joint',
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile=weight_profile,
-            window_profile=window_profile,
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
+    arms = [
+        (
+            f'{curriculum_prefix}{weight_prefix}{window_prefix}_'
+            f'{curriculum_profile}_{weight_profile}_{window_profile}',
+            curriculum_profile,
+            weight_profile,
+            window_profile,
         )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results('sl_ab234_joint', payload)
-    return payload
+        for curriculum_prefix, curriculum_profile in (
+            ('A', 'broad_to_recent'),
+            ('B', 'recent_broad_recent'),
+        )
+        for weight_prefix, weight_profile in (
+            ('1', 'mild'),
+            ('2', 'strong'),
+            ('3', 'two_stage'),
+        )
+        for window_prefix, window_profile in (
+            ('x', '24m_12m'),
+            ('y', '12m_6m'),
+        )
+    ]
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name='sl_ab234_joint',
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=[
+            (
+                arm_name,
+                {
+                    'scheduler_profile': scheduler_profile,
+                    'curriculum_profile': curriculum_profile,
+                    'weight_profile': weight_profile,
+                    'window_profile': window_profile,
+                },
+            )
+            for arm_name, curriculum_profile, weight_profile, window_profile in arms
+        ],
+    )
 
 
 def run_ab1234_joint(base_cfg: dict, grouped: dict[str, list[str]], seed: int, step_scale: float, ab_name: str = 'sl_ab1234_joint') -> dict:
-    results = {}
-    eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
-    arms = []
-    for scheduler_prefix, scheduler_profile in SCHEDULER_PREFIXES:
-        for curriculum_prefix, curriculum_profile in CURRICULUM_PREFIXES:
-            for weight_prefix, weight_profile in WEIGHT_PREFIXES:
-                for window_prefix, window_profile in WINDOW_PREFIXES:
-                    arm_name = (
-                        f'{scheduler_prefix}_{curriculum_prefix}{weight_prefix}{window_prefix}_'
-                        f'{scheduler_profile}_{curriculum_profile}_{weight_profile}_{window_profile}'
-                    )
-                    arms.append((
-                        arm_name,
-                        scheduler_profile,
-                        curriculum_profile,
-                        weight_profile,
-                        window_profile,
-                    ))
-
-    for arm_name, scheduler_profile, curriculum_profile, weight_profile, window_profile in arms:
-        results[arm_name] = run_arm(
-            base_cfg,
-            grouped,
-            ab_name=ab_name,
-            arm_name=arm_name,
-            scheduler_profile=scheduler_profile,
-            curriculum_profile=curriculum_profile,
-            weight_profile=weight_profile,
-            window_profile=window_profile,
-            seed=seed,
-            eval_splits=eval_splits,
-            step_scale=step_scale,
+    arms = [
+        (
+            f'{scheduler_prefix}_{curriculum_prefix}{weight_prefix}{window_prefix}_'
+            f'{scheduler_profile}_{curriculum_profile}_{weight_profile}_{window_profile}',
+            {
+                'scheduler_profile': scheduler_profile,
+                'curriculum_profile': curriculum_profile,
+                'weight_profile': weight_profile,
+                'window_profile': window_profile,
+            },
         )
-    winner, selection = select_winner_by_policy(results)
-    payload = {'winner': winner, 'selection': selection, 'results': results}
-    save_results(ab_name, payload)
-    return payload
+        for scheduler_prefix, scheduler_profile in SCHEDULER_PREFIXES
+        for curriculum_prefix, curriculum_profile in CURRICULUM_PREFIXES
+        for weight_prefix, weight_profile in WEIGHT_PREFIXES
+        for window_prefix, window_profile in WINDOW_PREFIXES
+    ]
+    return run_arm_grid(
+        base_cfg,
+        grouped,
+        ab_name=ab_name,
+        seed=seed,
+        step_scale=step_scale,
+        arm_specs=arms,
+    )
 
 
 def run_ab5_quality_signal(grouped: dict[str, list[str]]) -> dict:
-    sample_files = load_all_files()[:100000]
+    files = load_all_files()[:100000]
     room_codes = {}
-    for file_path in sample_files:
+    for file_path in files:
         match = re.search(r'gm-([0-9a-f]{4})-', Path(file_path).name)
         room_codes[match.group(1) if match else 'UNKNOWN'] = room_codes.get(match.group(1) if match else 'UNKNOWN', 0) + 1
     unique_codes = sorted(room_codes)
@@ -2373,6 +2447,7 @@ def run_adaptive_curriculum(
     adaptive_start_phase: str = 'phase_a',
     adaptive_bootstrap_state_file: str | None = None,
     adaptive_peak_lr: float | None = None,
+    adaptive_bootstrap_auxiliary_policy: str = 'inherit',
 ) -> dict:
     eval_splits = build_eval_splits(grouped, seed, BASE_SCREENING['eval_files'])
     result = run_arm(
@@ -2396,6 +2471,7 @@ def run_adaptive_curriculum(
         adaptive_start_phase=adaptive_start_phase,
         adaptive_bootstrap_state_file=adaptive_bootstrap_state_file,
         adaptive_peak_lr=adaptive_peak_lr,
+        adaptive_bootstrap_auxiliary_policy=adaptive_bootstrap_auxiliary_policy,
     )
     finalist_name, finalist_selection = select_checkpoint_candidate(
         result['cross_phase_candidates']
@@ -2450,6 +2526,11 @@ def main() -> None:
     )
     parser.add_argument('--adaptive-bootstrap-state-file')
     parser.add_argument('--adaptive-peak-lr', type=float)
+    parser.add_argument(
+        '--adaptive-bootstrap-auxiliary-policy', choices=['inherit', 'current'],
+        default='inherit',
+        help='inherit checkpoint aux/rank_aux by default; current explicitly changes the objective',
+    )
     parser.add_argument('--phase-a-extension-source')
     args = parser.parse_args()
 
@@ -2526,6 +2607,7 @@ def main() -> None:
             adaptive_start_phase=args.adaptive_start_phase,
             adaptive_bootstrap_state_file=args.adaptive_bootstrap_state_file,
             adaptive_peak_lr=args.adaptive_peak_lr,
+            adaptive_bootstrap_auxiliary_policy=args.adaptive_bootstrap_auxiliary_policy,
         ), ensure_ascii=False, indent=2))
         return
 

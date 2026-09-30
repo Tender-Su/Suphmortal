@@ -61,6 +61,8 @@ best_loss_state_file = '/path/to/sl_canonical.pth'
 best_acc_state_file = '/path/to/sl_best_acc.pth'
 best_rank_state_file = '/path/to/sl_best_rank.pth'
 init_state_file = '/path/to/optional_init_only_checkpoint.pth'
+# Generic weights-only init resets the auxiliary ramp; curriculum handoffs inherit it.
+init_auxiliary_schedule = 'reset' # 'inherit' requires the same auxiliary recipe
 tensorboard_dir = '/path/to/tb_log_supervised_main'
 file_index = '/path/to/file_index_supervised_json.pth'
 batch_size = 1024
@@ -142,7 +144,8 @@ conv_channels = 192
 num_blocks = 40
 
 [env]
-pts = [6.0, 4.0, 2.0, 0.0]
+# Formal rank pt divided by 45. A different utility requires a new run.
+pts = [2.0, 1.0, 0.0, -3.0]
 
 [oracle_critic_pretrain]
 run_name = 'oracle_critic_score_rank_mc_bridge'
@@ -154,8 +157,9 @@ file_index = '/path/to/file_index_oracle_critic_json.pth'
 init_state_file = '/path/to/sl_canonical.pth'
 target_mode = 'all_players'
 return_mode = 'score_rank_mc'
-discount_gamma = 0.999
-train_scope = 'oracle_input_value'
+discount_gamma = 1.0
+train_scope = 'all'
+critic_arch = 'dual_tower'
 batch_size = 512
 num_workers = 4
 val_num_workers = 0
@@ -166,15 +170,53 @@ val_prefetch_factor = 5
 log_every = 100
 save_every = 1000
 val_every_steps = 2000
+# Run the more expensive true/zero/shuffled Oracle qualification at this interval.
+# Zero disables it between the normal validation points; the final step always runs it.
+dependency_val_every_steps = 0
 val_batches = 256
+test_batches = 1024
+# Sealed test is opened only after a checkpoint-hashed finalist decision.
+final_test_enabled = false
+# Emit validation throughput and sample-coverage progress without changing metrics.
+eval_log_every_batches = 32
 max_steps = 100000
-val_ratio = 0.02
+scheduler_horizon_steps = 2500000
+val_ratio = 0.01
+test_ratio = 0.01
 min_val_files = 64
+min_test_files = 64
 max_val_files = 512
+max_test_files = 2048
 max_train_files = 0
 num_epochs = 1
 seed = 20260416
+split_seed = 20260416
+data_shuffle_seed = 20260416
+train_oracle_imputation_seed = 20260416
+val_oracle_imputation_seed = 20260905
+enable_augmentation = false
+reserve_ratio = 0.0
+# One pass emits one deterministic fold per game; all folds cover every state once.
+state_fold_count = 1
+state_fold_seed = 20260416
+# Native folding discards unselected decisions before expensive feature encoding.
+state_fold_backend = 'native_hash'
+# A larger validation fold count evaluates more independent games per batch budget.
+val_state_fold_count = 1
 zero_sum_weight = 0.01
+# Optional dual-tower discriminative fine-tuning controls.
+# visible_lr_scale = 0.25
+# oracle_lr_scale = 1.0
+# fusion_lr_scale = 1.0
+# value_lr_scale = 1.0
+# weight_decay = 0.03
+# oracle_fusion_init = 0.1
+# oracle_first_conv_init = 'hand_aligned' # legacy_mean_scaled | random | hand_aligned
+# oracle_hand_init_scale = 0.3333333333333333
+# exact_zero_sum = true
+# amp_init_scale = 2048.0
+# amp_growth_interval = 1000000
+# eval_enable_amp = false
 
 [oracle_critic_pretrain.scheduler]
 peak = 5e-5
@@ -189,11 +231,19 @@ awr_beta = 1.0
 awr_clip = 100
 entropy_weight = 1e-3
 clip_ratio = 0.2
-dual_clip  = 3.0
+actor_objective = 'ppo'
+gae_gamma = 1.0
+gae_lambda = 0.95
+dual_clip = 0.0
+target_kl = 0.02
+max_clip_fraction = 0.5
+max_behavior_version_gap = 1
 online_action_scope = 'all'
 logit_thres = 0.0
 importance_rho_clip = 0.0
 importance_c_clip = 0.0
+vtrace_target_rho_clip = 0.0
+vtrace_target_c_clip = 0.0
 entropy_floor = 0.0
 entropy_floor_start_step = 0
 entropy_target = 0.0   # legacy alias for entropy_floor
@@ -296,6 +346,10 @@ reward_source = 'score_rank'
 zero_sum_weight = 0.01
 oracle_critic = true
 oracle_critic_state_file = '/path/to/oracle_critic_best.pth'
+# Actor-freeze online calibration window: 0 disables it.
+critic_warmup_steps = 0
+# Keep actor LR at step 0 while only the critic is being calibrated.
+independent_actor_lr_clock = true
 
 [oracle_guiding]
 actor_enabled = false
@@ -354,14 +408,16 @@ stop_at_max_steps = true
 
 [online.importance_sampling]
 enabled = true
-max_policy_versions = 8
-drop_untracked_samples = false
-vtrace_mode = 'auto'
-vtrace_min_version_gap = 2
+max_policy_versions = 2
+drop_untracked_samples = true
+vtrace_mode = 'disabled'
 
 [online.remote]
 host = '127.0.0.1'
 port = 5000
+connect_timeout_sec = 10
+connect_retry_sec = 3
+connect_max_wait_sec = 300
 
 [online.server]
 buffer_dir = '/path/to/buffer'

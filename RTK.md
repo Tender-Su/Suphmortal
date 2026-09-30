@@ -1,41 +1,29 @@
-# RTK - Rust Token Killer (Codex CLI)
+# RTK 命令输出约定
 
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Use `rtk` for external commands that may produce long output, especially `git`, `cargo`, `rg`, `npm`, and test runners. Do not wrap PowerShell built-ins, environment-variable probes, pipelines, or short shell expressions with `rtk`; commands such as `Get-Location`, `Get-Content`, `Test-Path`, `$env:...`, and `Select-String` should run directly.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-Run these directly:
+长输出外部命令使用 `rtk`；PowerShell 内建、短探针和管道直接运行。原始错误或完整证据需要保留时用 `rtk proxy`。
 
 ```powershell
-Get-Location
+rtk git status --short
+rtk cargo test -p libriichi
+rtk proxy C:\ProgramData\anaconda3\envs\mortal\python.exe -m unittest mortal.tests.test_greedy
+```
+
+这些命令直接运行：
+
+```powershell
 Get-Content .\AGENTS.md
-$env:PYO3_PYTHON
 Test-Path .\mortal\config.toml
+$env:PYO3_PYTHON
+rg --files mortal | Select-String 'test_'
 ```
 
-## Meta Commands
+检查可用性和压缩统计：
 
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
+```powershell
+Get-Command rtk
 rtk --version
 rtk gain
-which rtk
+rtk gain --history
 ```
+
+没有 `rtk` 时保留任务本身，直接执行并限制输出。代码整理继续遵守 [重构与验证](docs/agent/code-health.md)：缩小改动范围，保持可读性和运行效率。

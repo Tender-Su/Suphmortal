@@ -507,6 +507,13 @@ class Stage05ABTests(unittest.TestCase):
                     'epoch': 8,
                     'timestamp': 1.0,
                     'optimizer': {'param_groups': [{'lr': 5e-6}]},
+                    'config': {
+                        'aux': {'opponent_state_weight': 0.00135, 'danger_enabled': True},
+                        'supervised': {
+                            'rank_aux': {'base_weight': 0.001548},
+                            'aux': {'danger_weight': 0.00804},
+                        },
+                    },
                     'last_full_recent_metrics': {
                         'policy_loss': 0.44,
                         'action_quality_score': -0.20,
@@ -593,11 +600,18 @@ class Stage05ABTests(unittest.TestCase):
             )
             self.assertEqual([1e-5, 1e-5], [call['adaptive_peak_lr'] for call in calls])
             self.assertEqual(5e-6, calls[0]['adaptive_warmup_init_lr'])
-            self.assertIsNone(calls[1]['adaptive_warmup_init_lr'])
+            self.assertEqual(5e-6, calls[1]['adaptive_warmup_init_lr'])
             self.assertTrue(result['adaptive_bootstrap']['eval_split_digests_match'])
             self.assertFalse(result['adaptive_bootstrap']['optimizer_state_preserved'])
             self.assertEqual(5e-6, result['adaptive_bootstrap']['source_lr'])
             self.assertEqual(2.0, result['adaptive_bootstrap']['rewarm_ratio'])
+            self.assertEqual('inherit', result['adaptive_bootstrap']['auxiliary_recipe']['policy'])
+            self.assertEqual('inherit', result['adaptive_bootstrap']['auxiliary_schedule_initialization'])
+            for call in calls:
+                self.assertEqual(0.001548, call['base_cfg']['supervised']['rank_aux']['base_weight'])
+                self.assertTrue(call['base_cfg']['aux']['danger_enabled'])
+                self.assertEqual(0.00804, call['base_cfg']['supervised']['aux']['danger_weight'])
+                self.assertEqual('inherit', call['base_cfg']['supervised']['init_auxiliary_schedule'])
             self.assertIn('bootstrap_anchor', result['cross_phase_candidates'])
             self.assertTrue(
                 (root / 'sl_ab' / 'bootstrap_unit' / 'adaptive_bootstrap.json').exists()
@@ -1263,6 +1277,7 @@ class Stage05ABTests(unittest.TestCase):
                 'scaler': {'scale': 1024.0},
                 'steps': 150_000,
                 'optimizer_steps': 149_997,
+                'auxiliary_optimizer_steps': 3_029_997,
                 'skipped_optimizer_steps': 3,
                 'nonfinite_batches': 1,
                 'epoch': 12,
@@ -1341,6 +1356,14 @@ class Stage05ABTests(unittest.TestCase):
             self.assertEqual('source-checkpoint', migration['source_checkpoint_id'])
             self.assertTrue(
                 (target_path.parent.parent / 'adaptive_phase_handoff.json').exists()
+            )
+            manifest = sl_ab.load_json_file(
+                target_path.parent.parent / 'phase_manifest.json'
+            )
+            self.assertEqual('target-plan', manifest['plan']['plan_id'])
+            self.assertEqual(migration['migration_id'], manifest['migration_id'])
+            self.assertFalse(
+                target_path.with_name(f'.{target_path.name}.adaptive_handoff').exists()
             )
             adaptive_best_path = Path(
                 target_cfg['supervised']['adaptive_best_state_file']

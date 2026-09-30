@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
-ADAPTIVE_CURRICULUM_STATE_SCHEMA_VERSION = 1
+ADAPTIVE_CURRICULUM_STATE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class MetricSpec:
     name: str
     direction: str = 'lower'
     meaningful_delta: float = 0.0
+    noninferiority_margin: float = 0.0
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> MetricSpec:
@@ -20,11 +21,14 @@ class MetricSpec:
             name=str(raw.get('name') or '').strip(),
             direction=str(raw.get('direction', 'lower')).strip().lower(),
             meaningful_delta=float(raw.get('meaningful_delta', 0.0)),
+            noninferiority_margin=float(raw.get('noninferiority_margin', 0.0)),
         )
         spec.validate()
         return spec
 
     def validate(self) -> None:
+        if not math.isfinite(self.noninferiority_margin) or self.noninferiority_margin < 0:
+            raise ValueError('guardrail noninferiority_margin must be finite and non-negative')
         if not self.name:
             raise ValueError('adaptive metric name must not be empty')
         if self.direction not in {'lower', 'higher'}:
@@ -49,6 +53,8 @@ class AdaptiveCurriculumConfig:
     primary_noninferiority_margin: float = 0.0
     guardrails: tuple[MetricSpec, ...] = ()
     lr_levels: tuple[float, ...] = ()
+    max_unresolved_gates: int = 4
+    min_paired_games: int = 2
 
     @classmethod
     def from_mapping(
@@ -75,11 +81,15 @@ class AdaptiveCurriculumConfig:
                 for item in raw.get('guardrails', ())
             ),
             lr_levels=tuple(float(value) for value in raw.get('lr_levels', ())),
+            max_unresolved_gates=int(raw.get('max_unresolved_gates', 4)),
+            min_paired_games=int(raw.get('min_paired_games', 2)),
         )
         config.validate()
         return config
 
     def validate(self) -> None:
+        if self.max_unresolved_gates < 1 or self.min_paired_games < 2:
+            raise ValueError('adaptive evidence budget must be positive and min_paired_games >= 2')
         if not self.phase_name:
             raise ValueError('adaptive curriculum phase_name must not be empty')
         self.primary.validate()
@@ -231,6 +241,7 @@ def initial_adaptive_curriculum_state(
         'gate_index': 0,
         'last_gate_step': None,
         'consecutive_futile_gates': 0,
+        'consecutive_unresolved_gates': 0,
         'best_step': None,
         'best_metrics': None,
         'best_cluster_records': None,
@@ -336,8 +347,8 @@ def _is_clear_improvement(
     summary: Mapping[str, float | int],
 ) -> bool:
     if spec.direction == 'lower':
-        return float(summary['ci_high']) <= -spec.meaningful_delta
-    return float(summary['ci_low']) >= spec.meaningful_delta
+        return float(summary['ci_high']) <= -spec.meaningful_delta and float(summary['mean']) < 0
+    return float(summary['ci_low']) >= spec.meaningful_delta and float(summary['mean']) > 0
 
 
 def _can_still_improve(
@@ -357,6 +368,18 @@ def _is_primary_noninferior(
     if config.primary.direction == 'lower':
         return float(summary['ci_high']) <= margin
     return float(summary['ci_low']) >= -margin
+
+
+def _guardrails_noninferior(config, comparisons):
+    return all(
+        int(comparisons[spec.name]['num_games']) >= config.min_paired_games
+        and (
+            float(comparisons[spec.name]['ci_high']) <= spec.noninferiority_margin
+            if spec.direction == 'lower' else
+            float(comparisons[spec.name]['ci_low']) >= -spec.noninferiority_margin
+        )
+        for spec in config.guardrails
+    )
 
 
 def _record_history(
@@ -398,7 +421,10 @@ def observe_adaptive_curriculum(
     )
     if state['completed']:
         return AdaptiveCurriculumDecision(
-            action='stop' if config.final_phase else 'transition',
+            action=(
+                'inconclusive' if state.get('last_action') == 'inconclusive'
+                else 'stop' if config.final_phase else 'transition'
+            ),
             state=state,
             comparisons={},
             target_lr=(
@@ -450,11 +476,16 @@ def observe_adaptive_curriculum(
         for spec in (config.primary, *config.guardrails)
     }
     primary_summary = comparisons[config.primary.name]
-    if _is_clear_improvement(config.primary, primary_summary):
+    enough_games = all(
+        int(item['num_games']) >= config.min_paired_games for item in comparisons.values()
+    )
+    guards_pass = _guardrails_noninferior(config, comparisons)
+    if enough_games and guards_pass and _is_clear_improvement(config.primary, primary_summary):
         state['best_step'] = optimizer_steps
         state['best_metrics'] = normalized_metrics
         state['best_cluster_records'] = normalized_records
         state['consecutive_futile_gates'] = 0
+        state['consecutive_unresolved_gates'] = 0
         state['last_action'] = 'update_best'
         state['last_reason'] = (
             f'{config.primary.name} made a paired meaningful improvement'
@@ -481,12 +512,31 @@ def observe_adaptive_curriculum(
 
     can_still_improve = _can_still_improve(config.primary, primary_summary)
     guardrail_compensation = False
-    if _is_primary_noninferior(config, primary_summary):
+    if enough_games and guards_pass and _is_primary_noninferior(config, primary_summary):
         guardrail_compensation = any(
             _is_clear_improvement(spec, comparisons[spec.name])
             for spec in config.guardrails
         )
-    futile = not can_still_improve and not guardrail_compensation
+    futile = enough_games and not can_still_improve and not guardrail_compensation
+    state['consecutive_unresolved_gates'] = (
+        0 if futile else int(state.get('consecutive_unresolved_gates', 0)) + 1
+    )
+    if state['consecutive_unresolved_gates'] >= config.max_unresolved_gates:
+        state.update({
+            'completed': True,
+            'completed_step': optimizer_steps,
+            'last_action': 'inconclusive',
+            'last_reason': (
+                'predeclared unresolved-gate budget exhausted; retain the baseline '
+                'and expand independent validation before continuing or advancing phase'
+            ),
+        })
+        _record_history(state, step=optimizer_steps, action='inconclusive', futile=False,
+                        reason=state['last_reason'], comparisons=comparisons)
+        return AdaptiveCurriculumDecision(
+            action='inconclusive', state=state, comparisons=comparisons,
+            reason=state['last_reason'],
+        )
     if futile:
         state['consecutive_futile_gates'] += 1
     else:
@@ -496,6 +546,8 @@ def observe_adaptive_curriculum(
         state['last_action'] = 'observe'
         if guardrail_compensation:
             state['last_reason'] = 'guardrail compensation keeps the phase open'
+        elif not enough_games or not guards_pass:
+            state['last_reason'] = 'paired evidence does not establish every guardrail as noninferior'
         elif can_still_improve:
             state['last_reason'] = (
                 'paired interval still permits a meaningful primary improvement'

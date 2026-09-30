@@ -99,6 +99,43 @@ class DummyOptimizer:
         ]
 
 
+class DummyScheduler:
+    def __init__(self):
+        self.init = 1e-8
+        self.peak = 1e-4
+        self.final = 1e-5
+        self.warm_up_steps = 1000
+        self.max_steps = 20000
+        self.offset = 0
+        self.epoch_size = 0
+        self.base_lrs = [1.0, 1.0]
+        self.last_epoch = 20000
+        self._last_lr = [1e-5, 1e-5]
+
+    def _step_inner(self, steps):
+        if self.warm_up_steps > 0 and steps < self.warm_up_steps:
+            return self.init + (self.peak - self.init) / self.warm_up_steps * steps
+        if steps < self.max_steps:
+            cos_steps = steps - self.warm_up_steps
+            cos_max_steps = self.max_steps - self.warm_up_steps
+            return self.final + 0.5 * (self.peak - self.final) * (
+                1 + np.cos(cos_steps / cos_max_steps * np.pi)
+            )
+        return self.final
+
+
+class DummyStateModule:
+    def __init__(self, state):
+        self._state = dict(state)
+        self.loaded_state = None
+
+    def state_dict(self):
+        return dict(self._state)
+
+    def load_state_dict(self, state):
+        self.loaded_state = dict(state)
+
+
 class TrainOnlineCheckpointTests(unittest.TestCase):
     def test_online_reached_max_steps_uses_scheduler_max_steps_by_default(self):
         config = make_config(online=True)
@@ -142,6 +179,26 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
 
         self.assertEqual(1.0, train_online.policy_importance_c_clip(config))
 
+    def test_policy_vtrace_target_clips_prefer_dedicated_keys(self):
+        config = make_config(online=True)
+        config['policy']['importance_rho_clip'] = 2.0
+        config['policy']['importance_c_clip'] = 2.0
+        config['policy']['vtrace_target_rho_clip'] = 1.1
+        config['policy']['vtrace_target_c_clip'] = 0.9
+
+        self.assertEqual(2.0, train_online.policy_importance_rho_clip(config))
+        self.assertEqual(2.0, train_online.policy_importance_c_clip(config))
+        self.assertEqual(1.1, train_online.policy_vtrace_target_rho_clip(config))
+        self.assertEqual(0.9, train_online.policy_vtrace_target_c_clip(config))
+
+    def test_policy_vtrace_target_clips_fall_back_without_dedicated_keys(self):
+        config = make_config(online=True)
+        config['policy']['importance_rho_clip'] = 1.3
+        config['policy']['importance_c_clip'] = 0.7
+
+        self.assertEqual(1.3, train_online.policy_vtrace_target_rho_clip(config))
+        self.assertEqual(0.7, train_online.policy_vtrace_target_c_clip(config))
+
     def test_policy_entropy_floor_uses_entropy_target_alias(self):
         config = make_config(online=True)
         config['policy']['entropy_target'] = 0.9
@@ -155,6 +212,153 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
             123,
             train_online.policy_entropy_floor_start_step(config, default=123),
         )
+
+    def test_policy_lr_scales_default_to_one(self):
+        config = make_config(online=True)
+
+        self.assertEqual(1.0, train_online.policy_actor_lr_scale(config))
+        self.assertEqual(1.0, train_online.policy_head_lr_scale(config))
+
+    def test_policy_lr_scales_are_non_negative(self):
+        config = make_config(online=True)
+        config['policy']['actor_lr_scale'] = -0.5
+        config['policy']['policy_head_lr_scale'] = 0.25
+
+        self.assertEqual(0.0, train_online.policy_actor_lr_scale(config))
+        self.assertEqual(0.25, train_online.policy_head_lr_scale(config))
+
+    def test_policy_update_throttle_defaults_to_every_step(self):
+        config = make_config(online=True)
+
+        self.assertEqual(1, train_online.policy_update_interval(config))
+        self.assertEqual(0, train_online.policy_update_phase(config))
+        self.assertTrue(train_online.policy_update_active(config, 0))
+        self.assertTrue(train_online.policy_update_active(config, 17))
+
+    def test_policy_update_throttle_uses_interval_and_phase(self):
+        config = make_config(online=True)
+        config['policy']['update_interval'] = 3
+        config['policy']['update_phase'] = 1
+
+        self.assertEqual(3, train_online.policy_update_interval(config))
+        self.assertEqual(1, train_online.policy_update_phase(config))
+        self.assertFalse(train_online.policy_update_active(config, 0))
+        self.assertTrue(train_online.policy_update_active(config, 1))
+        self.assertFalse(train_online.policy_update_active(config, 2))
+        self.assertFalse(train_online.policy_update_active(config, 3))
+        self.assertTrue(train_online.policy_update_active(config, 4))
+
+    def test_policy_lr_scales_do_not_change_model_signature(self):
+        base = make_config(online=True)
+        scaled = make_config(online=True)
+        scaled['policy']['actor_lr_scale'] = 0.5
+        scaled['policy']['policy_head_lr_scale'] = 0.25
+
+        self.assertEqual(
+            train_online.online_resume_model_signature(base),
+            train_online.online_resume_model_signature(scaled),
+        )
+
+    def test_value_critic_warmup_defaults_to_disabled(self):
+        config = make_config(online=True, value_enabled=True, oracle_critic=True)
+
+        self.assertEqual(0, train_online.value_critic_warmup_steps(config))
+        self.assertFalse(train_online.value_critic_warmup_active(config, 0))
+
+    def test_value_critic_warmup_uses_new_key_before_legacy_alias(self):
+        config = make_config(online=True, value_enabled=True, oracle_critic=True)
+        config['value']['actor_freeze_steps'] = 100
+        config['value']['critic_warmup_steps'] = 300
+
+        self.assertEqual(300, train_online.value_critic_warmup_steps(config))
+        self.assertTrue(train_online.value_critic_warmup_active(config, 299))
+        self.assertFalse(train_online.value_critic_warmup_active(config, 300))
+
+    def test_value_critic_warmup_legacy_actor_freeze_alias(self):
+        config = make_config(online=True, value_enabled=True, oracle_critic=True)
+        config['value']['actor_freeze_steps'] = 100
+
+        self.assertEqual(100, train_online.value_critic_warmup_steps(config))
+        self.assertTrue(train_online.value_critic_warmup_active(config, 0))
+        self.assertFalse(train_online.value_critic_warmup_active(config, 100))
+
+    def test_value_critic_warmup_inactive_when_value_disabled(self):
+        config = make_config(online=True, value_enabled=False, oracle_critic=False)
+        config['value']['critic_warmup_steps'] = 100
+
+        self.assertEqual(100, train_online.value_critic_warmup_steps(config))
+        self.assertFalse(train_online.value_critic_warmup_active(config, 0))
+
+    def test_critic_warmup_enables_independent_actor_lr_clock_by_default(self):
+        config = make_config(online=True, value_enabled=True, oracle_critic=True)
+        config['value']['critic_warmup_steps'] = 100
+
+        self.assertTrue(train_online.value_independent_actor_lr_clock(config))
+        config['value']['independent_actor_lr_clock'] = False
+        self.assertFalse(train_online.value_independent_actor_lr_clock(config))
+
+    def test_independent_actor_lr_clock_starts_after_critic_warmup(self):
+        config = make_config(online=True, value_enabled=True, oracle_critic=True)
+        config['value']['critic_warmup_steps'] = 100
+        config['optim']['scheduler'] = {
+            'init': 1e-8,
+            'peak': 1e-4,
+            'final': 1e-5,
+            'warm_up_steps': 20,
+            'max_steps': 300,
+        }
+        optimizer = DummyOptimizer([1, 1])
+        optimizer.param_groups[0].update({
+            'schedule_role': 'actor',
+            'lr_scale': 0.5,
+            'lr': 0.0,
+        })
+        optimizer.param_groups[1].update({
+            'schedule_role': 'critic',
+            'lr_scale': 1.0,
+            'lr': 7e-5,
+        })
+        scheduler = DummyScheduler()
+
+        warmup_lr = train_online.apply_independent_actor_lr_clock(
+            optimizer,
+            scheduler,
+            config,
+            steps=100,
+        )
+        warmup_actor_group_lr = optimizer.param_groups[0]['lr']
+        first_actor_lr = train_online.apply_independent_actor_lr_clock(
+            optimizer,
+            scheduler,
+            config,
+            steps=101,
+        )
+
+        self.assertEqual(1e-8, warmup_lr)
+        self.assertGreater(first_actor_lr, warmup_lr)
+        self.assertAlmostEqual(warmup_lr * 0.5, warmup_actor_group_lr)
+        self.assertAlmostEqual(first_actor_lr * 0.5, optimizer.param_groups[0]['lr'])
+        self.assertEqual(7e-5, optimizer.param_groups[1]['lr'])
+
+    def test_critic_warmup_loss_freezes_actor_gradients(self):
+        actor = torch.nn.Linear(3, 4)
+        policy = torch.nn.Linear(4, 2)
+        critic = torch.nn.Linear(5, 4)
+        value = torch.nn.Linear(4, 1)
+        obs = torch.randn(6, 3)
+        oracle_obs = torch.randn(6, 5)
+        target = torch.randn(6, 1)
+
+        with torch.no_grad():
+            phi = actor(obs)
+            _ = policy(phi)
+        loss = torch.nn.functional.mse_loss(value(critic(oracle_obs)), target)
+        loss.backward()
+
+        self.assertTrue(all(param.grad is None for param in actor.parameters()))
+        self.assertTrue(all(param.grad is None for param in policy.parameters()))
+        self.assertTrue(all(param.grad is not None for param in critic.parameters()))
+        self.assertTrue(all(param.grad is not None for param in value.parameters()))
 
     def test_ensure_parent_dir_for_file_creates_missing_parent(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -343,6 +547,67 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
                 optimizer=DummyOptimizer([2, 1]),
             )
         )
+
+    def test_reconcile_loaded_scheduler_state_guards_against_lr_increase(self):
+        optimizer = DummyOptimizer([2, 1])
+        for group in optimizer.param_groups:
+            group['lr'] = 1e-5
+            group['initial_lr'] = 1.0
+        scheduler = DummyScheduler()
+
+        changes = train_online.reconcile_loaded_scheduler_state(
+            scheduler,
+            optimizer,
+            {
+                'init': 1e-8,
+                'peak': 1e-4,
+                'final': 1e-5,
+                'warm_up_steps': 2500,
+                'max_steps': 50000,
+                'offset': 0,
+                'epoch_size': 0,
+            },
+            steps=20000,
+        )
+
+        self.assertEqual((1000, 2500), changes['warm_up_steps'])
+        self.assertEqual((20000, 50000), changes['max_steps'])
+        self.assertIn('lr_increase_guard', changes)
+        self.assertEqual(20000, scheduler.last_epoch)
+        self.assertEqual(1000, scheduler.warm_up_steps)
+        self.assertEqual(20000, scheduler.max_steps)
+        self.assertEqual(1e-5, optimizer.param_groups[0]['lr'])
+        self.assertEqual(1e-5, scheduler._last_lr[0])
+
+    def test_reconcile_loaded_scheduler_state_allows_lr_decrease(self):
+        optimizer = DummyOptimizer([2, 1])
+        for group in optimizer.param_groups:
+            group['lr'] = 1e-4
+            group['initial_lr'] = 1.0
+        scheduler = DummyScheduler()
+
+        changes = train_online.reconcile_loaded_scheduler_state(
+            scheduler,
+            optimizer,
+            {
+                'init': 1e-8,
+                'peak': 1e-4,
+                'final': 1e-5,
+                'warm_up_steps': 2500,
+                'max_steps': 50000,
+                'offset': 0,
+                'epoch_size': 0,
+            },
+            steps=20000,
+        )
+
+        self.assertEqual((1000, 2500), changes['warm_up_steps'])
+        self.assertEqual((20000, 50000), changes['max_steps'])
+        self.assertNotIn('lr_increase_guard', changes)
+        self.assertEqual(2500, scheduler.warm_up_steps)
+        self.assertEqual(50000, scheduler.max_steps)
+        self.assertLess(optimizer.param_groups[0]['lr'], 1e-4)
+        self.assertEqual(scheduler._last_lr[0], optimizer.param_groups[0]['lr'])
 
     # --- New tests for added features ---
 
@@ -752,6 +1017,60 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
         self.assertFalse(train_online.initial_test_play_enabled(cfg))
         self.assertEqual(600, train_online.initial_test_play_games(cfg))
 
+    def test_periodic_test_play_due_requires_enable_flag(self):
+        self.assertFalse(
+            train_online.periodic_test_play_due(
+                enabled=False,
+                steps=3000,
+                test_every=3000,
+            )
+        )
+        self.assertTrue(
+            train_online.periodic_test_play_due(
+                enabled=True,
+                steps=3000,
+                test_every=3000,
+            )
+        )
+
+    def test_periodic_test_play_due_ignores_zero_interval(self):
+        self.assertFalse(
+            train_online.periodic_test_play_due(
+                enabled=True,
+                steps=3000,
+                test_every=0,
+            )
+        )
+
+    def test_old_policy_update_due_is_independent_from_save_every(self):
+        due_steps = [
+            step
+            for step in range(1, 1201)
+            if train_online.old_policy_update_due(step, old_update_every=400)
+        ]
+
+        self.assertEqual([400, 800, 1200], due_steps)
+
+    def test_old_policy_update_due_ignores_zero_interval(self):
+        self.assertFalse(train_online.old_policy_update_due(400, old_update_every=0))
+
+    def test_refresh_old_policy_snapshot_reuses_existing_modules(self):
+        old_mortal = DummyStateModule({"old": 1})
+        old_policy = DummyStateModule({"old_policy": 1})
+        mortal = DummyStateModule({"new": 2})
+        policy = DummyStateModule({"new_policy": 2})
+
+        returned = train_online.refresh_old_policy_snapshot(
+            old_mortal,
+            old_policy,
+            mortal,
+            policy,
+        )
+
+        self.assertIsNone(returned)
+        self.assertEqual({"new": 2}, old_mortal.loaded_state)
+        self.assertEqual({"new_policy": 2}, old_policy.loaded_state)
+
     def test_recorded_step0_baseline_reads_profile_metadata(self):
         cfg = make_config(online=True)
         cfg['online_experiment_profile'] = {
@@ -788,6 +1107,16 @@ class TrainOnlineCheckpointTests(unittest.TestCase):
         self.assertEqual((2, 3), history.versions())
         self.assertEqual(3, history.get(3)['mortal']['a'])
 
+    def test_online_stats_track_replay_is_window_extremes(self):
+        stats = train_online.init_online_stats(device=torch.device('cpu'))
+
+        self.assertEqual(1.0, stats['replay_is_coverage_min'].item())
+        self.assertEqual(0.0, stats['replay_is_missing_fraction_max'].item())
+        self.assertEqual(0.0, stats['replay_is_version_gap_max'].item())
+        self.assertEqual(0.0, stats['ratio_batch_max_sum'].item())
+        self.assertEqual(0.0, stats['ratio_window_max'].item())
+        self.assertEqual(0.0, stats['clipped_ratio_window_max'].item())
+
 
 class RewardTargetScaleTests(unittest.TestCase):
     def test_prepare_policy_advantage_normalizes_actor_only(self):
@@ -814,6 +1143,30 @@ class RewardTargetScaleTests(unittest.TestCase):
         self.assertAlmostEqual(0.0, normalized_advantage.mean().item(), places=6)
         self.assertAlmostEqual(1.0, normalized_advantage.std().item(), places=6)
         self.assertTrue(torch.equal(prepared_v_target, v_target))
+
+    def test_policy_objective_keeps_samplewise_entropy_shape(self):
+        clip_loss = torch.tensor([1.0, -2.0, 3.0], dtype=torch.float32)
+        entropy = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
+
+        loss = train_online.compute_policy_objective_loss(
+            clip_loss,
+            entropy,
+            entropy_weight=0.5,
+        )
+
+        expected = -((clip_loss + entropy * 0.5).mean())
+        self.assertTrue(torch.equal(loss, expected))
+
+    def test_policy_objective_rejects_broadcasted_entropy_shape(self):
+        clip_loss = torch.tensor([1.0, -2.0, 3.0], dtype=torch.float32)
+        entropy = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float32)
+
+        with self.assertRaisesRegex(ValueError, 'identical shapes'):
+            train_online.compute_policy_objective_loss(
+                clip_loss,
+                entropy,
+                entropy_weight=0.5,
+            )
 
     def test_reward_calculator_keeps_raw_delta_pt_scale_across_calls(self):
         from mortal.data.reward_calculator import RewardCalculator

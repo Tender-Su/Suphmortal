@@ -1,0 +1,654 @@
+diff --git a/bot/local/engine.py b/bot/local/engine.py
+index a05ac88..f528940 100644
+--- a/bot/local/engine.py
++++ b/bot/local/engine.py
+@@ -1,39 +1,74 @@
+-""" Mortal Engine for 4p game"""
+-import torch
++"""Mortal inference engine for local four-player models."""
++
++import logging
++from pathlib import Path
++
+ import numpy as np
+-from torch.distributions import Normal, Categorical
+-from bot.local.model import Brain, DQN
++import torch
++from torch.distributions import Categorical, Normal
++
++from bot.local.model import Brain, CategoricalPolicy, DQN
++
++try:
++    import libriichi
++except ImportError:
++    import riichi as libriichi
++
++
++LOGGER = logging.getLogger("majsoul_copilot")
++FIRST_CONV_KEY = "encoder.net.0.weight"
++
++
++def _as_tensor(value, *, device, dtype):
++    if torch.is_tensor(value):
++        tensor = value
++    else:
++        array = value if isinstance(value, np.ndarray) else np.stack(value, axis=0)
++        tensor = torch.as_tensor(np.ascontiguousarray(array))
++    return tensor.to(device=device, dtype=dtype)
++
+ 
+ class MortalEngine:
+-    """ Mortal Engine for local Bot 4p"""
++    """Mortal engine compatible with legacy DQN and current policy checkpoints."""
++
+     def __init__(
+         self,
+         brain,
+         dqn,
+         is_oracle,
+         version,
+-        device = None,
+-        stochastic_latent = False,
+-        enable_amp = False,
+-        enable_quick_eval = True,
+-        enable_rule_based_agari_guard = False,
+-        name = 'NoName',
+-        boltzmann_epsilon = 0,
+-        boltzmann_temp = 1,
+-        top_p = 1,
++        device=None,
++        stochastic_latent=False,
++        enable_amp=False,
++        enable_quick_eval=True,
++        enable_rule_based_agari_guard=False,
++        enable_metadata=True,
++        name="NoName",
++        boltzmann_epsilon=0,
++        boltzmann_temp=1,
++        top_p=1,
++        policy_kind=None,
+     ):
+-        self.engine_type = 'mortal'
+-        self.device = device or torch.device('cpu')
+-        assert isinstance(self.device, torch.device)
++        self.engine_type = "mortal"
++        self.device = device or torch.device("cpu")
++        if not isinstance(self.device, torch.device):
++            raise TypeError("device must be a torch.device")
++
+         self.brain = brain.to(self.device).eval()
+         self.dqn = dqn.to(self.device).eval()
+-        self.is_oracle = is_oracle
+-        self.version = version
++        self.policy_kind = policy_kind or (
++            "categorical" if isinstance(dqn, CategoricalPolicy) else "dqn"
++        )
++        # Keep this False for live play. Oracle-structure actors receive zeroed
++        # hidden features inside Python instead of asking libriichi for them.
++        self.is_oracle = bool(is_oracle)
++        self.version = int(version)
+         self.stochastic_latent = stochastic_latent
+ 
+-        self.enable_amp = enable_amp
++        self.enable_amp = bool(enable_amp and self.device.type == "cuda")
+         self.enable_quick_eval = enable_quick_eval
+         self.enable_rule_based_agari_guard = enable_rule_based_agari_guard
++        self.enable_metadata = enable_metadata
+         self.name = name
+ 
+         self.boltzmann_epsilon = boltzmann_epsilon
+@@ -43,40 +78,74 @@ class MortalEngine:
+     def react_batch(self, obs, masks, invisible_obs):
+         with (
+             torch.autocast(self.device.type, enabled=self.enable_amp),
+-            torch.no_grad(),
++            torch.inference_mode(),
+         ):
+             return self._react_batch(obs, masks, invisible_obs)
+ 
+     def _react_batch(self, obs, masks, invisible_obs):
+-        obs = torch.as_tensor(np.stack(obs, axis=0), device=self.device)
+-        masks = torch.as_tensor(np.stack(masks, axis=0), device=self.device)
+-        invisible_obs = None
+-        if self.is_oracle:
+-            invisible_obs = torch.as_tensor(np.stack(invisible_obs, axis=0), device=self.device)
++        obs = _as_tensor(obs, device=self.device, dtype=torch.float32)
++        masks = _as_tensor(masks, device=self.device, dtype=torch.bool)
+         batch_size = obs.shape[0]
+ 
++        oracle_obs = None
++        if self.brain.is_oracle:
++            if invisible_obs is None:
++                oracle_channels = libriichi.consts.oracle_obs_shape(self.version)[0]
++                oracle_obs = torch.zeros(
++                    batch_size,
++                    oracle_channels,
++                    obs.shape[-1],
++                    dtype=obs.dtype,
++                    device=self.device,
++                )
++            else:
++                oracle_obs = _as_tensor(
++                    invisible_obs,
++                    device=self.device,
++                    dtype=torch.float32,
++                )
++
+         match self.version:
+             case 1:
+-                mu, logsig = self.brain(obs, invisible_obs)
++                mu, logsig = self.brain(obs, oracle_obs)
+                 if self.stochastic_latent:
+                     latent = Normal(mu, logsig.exp() + 1e-6).sample()
+                 else:
+                     latent = mu
+-                q_out = self.dqn(latent, masks)
++                logits = self.dqn(latent, masks)
++                action_scores = logits
+             case 2 | 3 | 4:
+-                phi = self.brain(obs)
+-                q_out = self.dqn(phi, masks)
++                phi = self.brain(obs, oracle_obs) if self.brain.is_oracle else self.brain(obs)
++                if self.policy_kind == "categorical":
++                    logits = self.dqn.logits(phi, masks)
++                    action_scores = torch.softmax(logits, dim=-1)
++                else:
++                    logits = self.dqn(phi, masks)
++                    action_scores = logits
++            case _:
++                raise ValueError(f"Unexpected version {self.version}")
+ 
+         if self.boltzmann_epsilon > 0:
+-            is_greedy = torch.full((batch_size,), 1-self.boltzmann_epsilon, device=self.device).bernoulli().to(torch.bool)
+-            logits = (q_out / self.boltzmann_temp).masked_fill(~masks, -torch.inf)
+-            sampled = sample_top_p(logits, self.top_p)
+-            actions = torch.where(is_greedy, q_out.argmax(-1), sampled)
++            if self.boltzmann_temp <= 0:
++                raise ValueError("boltzmann_temp must be positive")
++            is_greedy = torch.full(
++                (batch_size,),
++                1 - self.boltzmann_epsilon,
++                device=self.device,
++            ).bernoulli().to(torch.bool)
++            sampled = sample_top_p(logits / self.boltzmann_temp, self.top_p)
++            actions = torch.where(is_greedy, action_scores.argmax(-1), sampled)
+         else:
+             is_greedy = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+-            actions = q_out.argmax(-1)
++            actions = action_scores.argmax(-1)
++
++        return (
++            actions.tolist(),
++            action_scores.tolist(),
++            masks.tolist(),
++            is_greedy.tolist(),
++        )
+ 
+-        return actions.tolist(), q_out.tolist(), masks.tolist(), is_greedy.tolist()
+ 
+ def sample_top_p(logits, p):
+     if p >= 1:
+@@ -87,40 +156,186 @@ def sample_top_p(logits, p):
+     probs_sort, probs_idx = probs.sort(-1, descending=True)
+     probs_sum = probs_sort.cumsum(-1)
+     mask = probs_sum - probs_sort > p
+-    probs_sort[mask] = 0.
++    probs_sort[mask] = 0.0
+     sampled = probs_idx.gather(-1, probs_sort.multinomial(1)).squeeze(-1)
+     return sampled
+ 
+-def get_engine(model_file:str) -> MortalEngine:
+-    """ Create and return Mortal engine object
+-    params:
+-        model_file(str): Mortal model file path"""
+-    # check if GPU is available
+-    if torch.cuda.is_available():
+-        device = torch.device('cuda')
++
++def _strip_wrapper_prefix(state_dict):
++    stripped = state_dict
++    changed = True
++    while stripped and changed:
++        changed = False
++        for prefix in ("_orig_mod.", "module."):
++            if all(key.startswith(prefix) for key in stripped):
++                stripped = {key[len(prefix):]: value for key, value in stripped.items()}
++                changed = True
++                break
++    return stripped
++
++
++def _infer_version(config, first_conv):
++    control = config.get("control", {}) if isinstance(config, dict) else {}
++    if isinstance(control, dict) and control.get("version") is not None:
++        return int(control["version"])
++
++    input_channels = int(first_conv.shape[1])
++    for version in range(1, int(libriichi.consts.MAX_VERSION) + 1):
++        visible = int(libriichi.consts.obs_shape(version)[0])
++        oracle = int(libriichi.consts.oracle_obs_shape(version)[0])
++        if input_channels in (visible, visible + oracle):
++            return version
++    raise ValueError(f"Cannot infer Mortal feature version from {input_channels} input channels")
++
++
++def _infer_num_blocks(config, mortal_state):
++    resnet = config.get("resnet", {}) if isinstance(config, dict) else {}
++    if isinstance(resnet, dict) and resnet.get("num_blocks") is not None:
++        return int(resnet["num_blocks"])
++
++    block_indices = {
++        int(key.split(".")[2])
++        for key in mortal_state
++        if key.startswith("encoder.net.") and ".res_unit." in key
++    }
++    if not block_indices:
++        raise ValueError("Cannot infer Mortal ResNet block count from checkpoint")
++    return len(block_indices)
++
++
++def _infer_brain_spec(state, mortal_state):
++    config = state.get("config", {})
++    first_conv = mortal_state.get(FIRST_CONV_KEY)
++    if not torch.is_tensor(first_conv) or first_conv.ndim != 3:
++        raise ValueError(f"Checkpoint is missing a valid {FIRST_CONV_KEY}")
++
++    version = _infer_version(config, first_conv)
++    visible_channels = int(libriichi.consts.obs_shape(version)[0])
++    oracle_channels = int(libriichi.consts.oracle_obs_shape(version)[0])
++    input_channels = int(first_conv.shape[1])
++    if input_channels == visible_channels:
++        is_oracle_structure = False
++    elif input_channels == visible_channels + oracle_channels:
++        is_oracle_structure = True
++    else:
++        raise ValueError(
++            f"Checkpoint has {input_channels} input channels; version {version} expects "
++            f"{visible_channels} visible or {visible_channels + oracle_channels} Oracle channels"
++        )
++
++    has_batch_norm_stats = any(
++        key.endswith(("running_mean", "running_var", "num_batches_tracked"))
++        for key in mortal_state
++    )
++    norm = "BN" if version not in (3, 4) or has_batch_norm_stats else "GN"
++    return {
++        "version": version,
++        "conv_channels": int(first_conv.shape[0]),
++        "num_blocks": _infer_num_blocks(config, mortal_state),
++        "is_oracle_structure": is_oracle_structure,
++        "norm": norm,
++    }
++
++
++def _select_policy(state, version):
++    if isinstance(state.get("policy_net"), dict):
++        state_key = "policy_net"
++    elif isinstance(state.get("current_dqn"), dict):
++        state_key = "current_dqn"
+     else:
+-        device = torch.device('cpu')
++        raise ValueError("Checkpoint has neither policy_net nor current_dqn weights")
++
++    policy_state = _strip_wrapper_prefix(state[state_key])
++    keys = set(policy_state)
++    if {"fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"}.issubset(keys):
++        if version == 1:
++            raise ValueError("CategoricalPolicy checkpoints require Mortal feature version 2 or newer")
++        return CategoricalPolicy(), policy_state, "categorical", state_key
++    if "net.weight" in keys or any(key.startswith(("v_head.", "a_head.")) for key in keys):
++        return DQN(version=version), policy_state, "dqn", state_key
++    raise ValueError(f"Unsupported policy layout in checkpoint key {state_key}")
++
++
++def get_engine(model_file: str, device=None) -> MortalEngine:
++    """Load legacy Akagi or current MahjongAI supervised/RL checkpoints."""
++    model_path = Path(model_file)
++    if not model_path.is_file():
++        raise FileNotFoundError(f"Model checkpoint does not exist: {model_path}")
+ 
+-    # Get the path of control_state_file = current directory / control_state_file
+-    state = torch.load(model_file, map_location=device)
++    if device is None:
++        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
++    elif not isinstance(device, torch.device):
++        device = torch.device(device)
+ 
+-    mortal = Brain(version=state['config']['control']['version'],
+-        conv_channels=state['config']['resnet']['conv_channels'],
+-        num_blocks=state['config']['resnet']['num_blocks']).eval()
+-    dqn = DQN(version=state['config']['control']['version']).eval()
+-    mortal.load_state_dict(state['mortal'])
+-    dqn.load_state_dict(state['current_dqn'])
++    state = torch.load(model_path, weights_only=True, map_location=torch.device("cpu"))
++    if not isinstance(state, dict):
++        raise ValueError("Model checkpoint root must be a dictionary")
++    if not isinstance(state.get("mortal"), dict):
++        raise ValueError("Model checkpoint is missing mortal weights")
+ 
++    mortal_state = _strip_wrapper_prefix(state["mortal"])
++    spec = _infer_brain_spec(state, mortal_state)
++    mortal = Brain(
++        version=spec["version"],
++        conv_channels=spec["conv_channels"],
++        num_blocks=spec["num_blocks"],
++        is_oracle=spec["is_oracle_structure"],
++        Norm=spec["norm"],
++    ).eval()
++    policy, policy_state, policy_kind, policy_state_key = _select_policy(
++        state,
++        spec["version"],
++    )
++
++    try:
++        mortal.load_state_dict(mortal_state, strict=True)
++    except RuntimeError as exc:
++        raise ValueError(
++            f"Mortal backbone does not match inferred {spec['norm']} architecture"
++        ) from exc
++    try:
++        policy.load_state_dict(policy_state, strict=True)
++    except RuntimeError as exc:
++        raise ValueError(f"Policy weights in {policy_state_key} do not match their layout") from exc
++
++    label = state.get("tag") or state.get("checkpoint_label") or model_path.stem
+     engine = MortalEngine(
+         mortal,
+-        dqn,
+-        is_oracle = False,
+-        device = device,
+-        enable_amp = False,
+-        enable_quick_eval = False,
+-        enable_rule_based_agari_guard = False,
+-        name = 'mortal',
+-        version = state['config']['control']['version'],
++        policy,
++        is_oracle=False,
++        device=device,
++        enable_amp=device.type == "cuda",
++        enable_quick_eval=False,
++        enable_rule_based_agari_guard=True,
++        enable_metadata=True,
++        name=str(label),
++        version=spec["version"],
++        policy_kind=policy_kind,
+     )
++    engine.checkpoint_path = str(model_path.resolve())
++    engine.checkpoint_format = f"{policy_state_key}/{policy_kind}/{spec['norm']}"
++    engine.checkpoint_steps = int(state.get("steps", 0) or 0)
++    engine.deploy_zero_oracle = bool(spec["is_oracle_structure"])
+ 
+-    return engine
+\ No newline at end of file
++    checkpoint_config = state.get("config", {})
++    search_cfg = checkpoint_config.get("search", {}) if isinstance(checkpoint_config, dict) else {}
++    if isinstance(search_cfg, dict) and search_cfg.get("enabled"):
++        LOGGER.warning(
++            "Checkpoint %s enables search, but MahjongCopilot local inference currently uses "
++            "the actor policy only",
++            model_path,
++        )
++    LOGGER.info(
++        "Loaded Mortal checkpoint %s: version=%s channels=%s blocks=%s norm=%s "
++        "policy=%s oracle_structure=%s steps=%s device=%s",
++        model_path,
++        spec["version"],
++        spec["conv_channels"],
++        spec["num_blocks"],
++        spec["norm"],
++        policy_kind,
++        spec["is_oracle_structure"],
++        engine.checkpoint_steps,
++        device,
++    )
++    return engine
+diff --git a/bot/local/model.py b/bot/local/model.py
+index d7c5c1b..d97f8d1 100644
+--- a/bot/local/model.py
++++ b/bot/local/model.py
+@@ -112,7 +112,7 @@ class ResNet(nn.Module):
+         return self.net(x)
+ 
+ class Brain(nn.Module):
+-    def __init__(self, *, conv_channels, num_blocks, is_oracle=False, version=1):
++    def __init__(self, *, conv_channels, num_blocks, is_oracle=False, version=1, Norm="BN"):
+         super().__init__()
+         self.is_oracle = is_oracle
+         self.version = version
+@@ -139,6 +139,13 @@ class Brain(nn.Module):
+                 pass
+             case 3 | 4:
+                 norm_builder = partial(nn.BatchNorm1d, conv_channels, momentum=0.01, eps=1e-3)
++                if Norm == "GN":
++                    norm_builder = partial(
++                        nn.GroupNorm,
++                        num_channels=conv_channels,
++                        num_groups=32,
++                        eps=1e-3,
++                    )
+             case _:
+                 raise ValueError(f'Unexpected version {self.version}')
+ 
+@@ -200,6 +207,20 @@ class AuxNet(nn.Module):
+     def forward(self, x):
+         return self.net(x).split(self.dims, dim=-1)
+ 
++class CategoricalPolicy(nn.Module):
++    """Policy head used by current MahjongAI supervised and RL checkpoints."""
++    def __init__(self):
++        super().__init__()
++        self.fc1 = nn.Linear(1024, 256)
++        self.fc2 = nn.Linear(256, libriichi.consts.ACTION_SPACE)
++
++    def logits(self, phi, mask):
++        phi = torch.tanh(self.fc1(phi))
++        return self.fc2(phi).masked_fill(~mask, -torch.inf)
++
++    def forward(self, phi, mask):
++        return torch.softmax(self.logits(phi, mask), dim=-1)
++
+ class DQN(nn.Module):
+     def __init__(self, *, version=1):
+         super().__init__()
+diff --git a/readme.md b/readme.md
+index ecf6828..e1fb648 100644
+--- a/readme.md
++++ b/readme.md
+@@ -62,9 +62,20 @@ python main.py
+ ```
+ ### 配置模型
+ 本程序支持几种模型来源。其中，本地模型（Local）是基于 Akagi 兼容的 Mortal 模型。要获取 Akagi 的模型，请参见 <a href="https://github.com/shinkuan/Akagi" target="_blank"> Akagi Github </a> 的说明。
++
++四麻本地模型同时支持新版 MahjongAI checkpoint：
++
++- 监督学习与在线 RL 使用的 `mortal + policy_net` 格式
++- v3/v4 `GroupNorm` 模型，以及旧版 `BatchNorm + current_dqn` 模型
++- 包含 Oracle actor 结构的部署 checkpoint；实战时隐藏信息通道固定补零
++
++RL checkpoint 中的 critic 和训练器状态不会参与出牌。若 checkpoint 显式启用 `search`，当前本地模式仍只运行 actor policy，并在日志中给出提示。模型使用的 `libriichi` 特征版本必须和程序内置版本一致。
++
+ ### Model Configuration
+ This program supports different types of AI models. The 'Local' Model type uses Mortal models compatible with Akagi. To acquire Akagi's models, please refer to <a href="https://github.com/shinkuan/Akagi" target="_blank"> Akagi Github </a>.
+ 
++The four-player local engine also accepts current MahjongAI supervised and online-RL checkpoints using `mortal + policy_net`, including v3/v4 GroupNorm and deployable zero-Oracle actor checkpoints. Legacy BatchNorm checkpoints using `current_dqn` remain supported. Critic/trainer state is ignored during play. Checkpoints that enable `search` currently fall back to actor-only inference with a warning. The bundled `libriichi` feature version must match the model.
++
+ 
+ ## 截图 / Screenshots
+ 
+diff --git a/tests/test_local_engine.py b/tests/test_local_engine.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_local_engine.py
+@@ -0,0 +1,172 @@
++import importlib.util
++import sys
++import tempfile
++import types
++import unittest
++from pathlib import Path
++
++import numpy as np
++import torch
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++
++
++def _install_libriichi_stub():
++    consts = types.SimpleNamespace(
++        ACTION_SPACE=46,
++        GRP_SIZE=7,
++        MAX_VERSION=4,
++        obs_shape=lambda version: {
++            1: (938, 34),
++            2: (942, 34),
++            3: (934, 34),
++            4: (1012, 34),
++        }[version],
++        oracle_obs_shape=lambda version: {
++            1: (211, 34),
++            2: (217, 34),
++            3: (217, 34),
++            4: (217, 34),
++        }[version],
++    )
++    module = types.ModuleType("libriichi")
++    module.consts = consts
++    sys.modules["libriichi"] = module
++
++
++def _load_local_modules():
++    _install_libriichi_stub()
++    bot_package = types.ModuleType("bot")
++    bot_package.__path__ = [str(PROJECT_ROOT / "bot")]
++    local_package = types.ModuleType("bot.local")
++    local_package.__path__ = [str(PROJECT_ROOT / "bot" / "local")]
++    sys.modules["bot"] = bot_package
++    sys.modules["bot.local"] = local_package
++
++    model_spec = importlib.util.spec_from_file_location(
++        "bot.local.model",
++        PROJECT_ROOT / "bot" / "local" / "model.py",
++    )
++    model = importlib.util.module_from_spec(model_spec)
++    sys.modules[model_spec.name] = model
++    model_spec.loader.exec_module(model)
++
++    engine_spec = importlib.util.spec_from_file_location(
++        "bot.local.engine",
++        PROJECT_ROOT / "bot" / "local" / "engine.py",
++    )
++    engine = importlib.util.module_from_spec(engine_spec)
++    sys.modules[engine_spec.name] = engine
++    engine_spec.loader.exec_module(engine)
++    return model, engine
++
++
++MODEL, ENGINE = _load_local_modules()
++
++
++class LocalEngineCheckpointTests(unittest.TestCase):
++    def _save_checkpoint(self, payload):
++        temp_dir = tempfile.TemporaryDirectory()
++        self.addCleanup(temp_dir.cleanup)
++        checkpoint = Path(temp_dir.name) / "model.pth"
++        torch.save(payload, checkpoint)
++        return checkpoint
++
++    @staticmethod
++    def _config():
++        return {
++            "control": {"version": 4},
++            "resnet": {"conv_channels": 32, "num_blocks": 1},
++        }
++
++    @staticmethod
++    def _smoke(engine):
++        obs = np.zeros((1, 1012, 34), dtype=np.float32)
++        masks = np.zeros((1, 46), dtype=np.bool_)
++        masks[0, [0, 4, 45]] = True
++        actions, scores, masks_out, is_greedy = engine.react_batch(obs, masks, None)
++        return actions, np.asarray(scores), masks_out, is_greedy
++
++    def test_loads_current_supervised_checkpoint(self):
++        brain = MODEL.Brain(
++            version=4,
++            conv_channels=32,
++            num_blocks=1,
++            Norm="GN",
++        )
++        policy = MODEL.CategoricalPolicy()
++        checkpoint = self._save_checkpoint({
++            "mortal": brain.state_dict(),
++            "policy_net": policy.state_dict(),
++            "steps": 390000,
++            "checkpoint_label": "s70-test",
++            "config": self._config(),
++        })
++
++        loaded = ENGINE.get_engine(checkpoint, device="cpu")
++        actions, scores, _, is_greedy = self._smoke(loaded)
++
++        self.assertEqual("policy_net/categorical/GN", loaded.checkpoint_format)
++        self.assertEqual(390000, loaded.checkpoint_steps)
++        self.assertEqual([True], is_greedy)
++        self.assertIn(actions[0], (0, 4, 45))
++        self.assertAlmostEqual(1.0, float(scores.sum()), places=5)
++        self.assertTrue(any(isinstance(mod, torch.nn.GroupNorm) for mod in loaded.brain.modules()))
++
++    def test_loads_current_rl_oracle_structure_with_zero_hidden_input(self):
++        brain = MODEL.Brain(
++            version=4,
++            conv_channels=32,
++            num_blocks=1,
++            is_oracle=True,
++            Norm="GN",
++        )
++        policy = MODEL.CategoricalPolicy()
++        config = self._config()
++        config["search"] = {"enabled": False}
++        checkpoint = self._save_checkpoint({
++            "mortal": brain.state_dict(),
++            "policy_net": policy.state_dict(),
++            "oracle_brain": {"unused": torch.zeros(1)},
++            "value_net": {"unused": torch.zeros(1)},
++            "brain_is_oracle_structure": True,
++            "deploy_zero_oracle": True,
++            "steps": 9000,
++            "config": config,
++        })
++
++        loaded = ENGINE.get_engine(checkpoint, device=torch.device("cpu"))
++        actions, scores, _, _ = self._smoke(loaded)
++
++        self.assertTrue(loaded.brain.is_oracle)
++        self.assertFalse(loaded.is_oracle)
++        self.assertTrue(loaded.deploy_zero_oracle)
++        self.assertIn(actions[0], (0, 4, 45))
++        self.assertAlmostEqual(1.0, float(scores.sum()), places=5)
++
++    def test_keeps_legacy_batch_norm_dqn_compatibility(self):
++        brain = MODEL.Brain(
++            version=4,
++            conv_channels=32,
++            num_blocks=1,
++            Norm="BN",
++        )
++        dqn = MODEL.DQN(version=4)
++        checkpoint = self._save_checkpoint({
++            "mortal": brain.state_dict(),
++            "current_dqn": dqn.state_dict(),
++            "config": self._config(),
++        })
++
++        loaded = ENGINE.get_engine(checkpoint, device="cpu")
++        actions, scores, _, _ = self._smoke(loaded)
++
++        self.assertEqual("current_dqn/dqn/BN", loaded.checkpoint_format)
++        self.assertIn(actions[0], (0, 4, 45))
++        self.assertTrue(np.isneginf(scores[0, 1]))
++        self.assertTrue(any(isinstance(mod, torch.nn.BatchNorm1d) for mod in loaded.brain.modules()))
++
++
++if __name__ == "__main__":
++    unittest.main()

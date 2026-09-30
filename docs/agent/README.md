@@ -1,26 +1,17 @@
 # Agent 入口
 
-先读一屏接手摘要，再按任务打开对应文档。不要从研究长文或归档里拼当前默认。
+按任务选择相关页面；需要整体背景时读 [接手摘要](handoff.md)。长期规则在 [AGENTS.md](../../AGENTS.md)，全量导航在 [文档地图](../README.md)。
 
-## 默认阅读顺序
-
-1. `docs/agent/handoff.md`
-2. `docs/status/online-rl-mainline.md`
-3. `docs/status/supervised-mainline.md`
-4. `docs/status/machine-benchmarks.md`
-
-## 按任务加读
-
-| 任务 | 加读 |
+| 当前任务 | 主要入口 |
 | --- | --- |
-| 跑训练、评测或生成配置 | `docs/agent/workflows.md` |
-| 调度笔记本、同步代码、远程排障 | `docs/agent/remote-ops.md` |
-| 找 Python 模块、入口脚本或放置新文件 | `docs/agent/code-map.md` |
-| 改文档结构或新增长文 | `docs/agent/doc-maintenance.md` |
-| 追溯某个研究判断 | `docs/research/README.md` |
+| GRP 或标签来源 | [GRP 状态](../status/grp-mainline.md) |
+| SL 训练、selector、发布 | [SL 状态](../status/supervised-mainline.md) |
+| Oracle critic 训练、验证、接入 | [Oracle 状态](../status/oracle-critic-mainline.md) |
+| PPO、replay、value / GAE | [RL 状态](../status/online-rl-mainline.md) |
+| 启动或评测 | [运行流程](workflows.md) + [机器与资源](../status/machine-benchmarks.md) |
+| 笔记本、同步或恢复 | [远程流程](remote-ops.md) |
+| 修改或重构代码 | [代码地图](code-map.md) + [验证要求](code-health.md) |
+| 修改文档结构 | [文档维护](doc-maintenance.md) |
+| 追溯旧判断 | [研究与证据](../research/README.md)，再按链接查历史 |
 
-## 冲突规则
-
-- `status/` 覆盖 `agent/` 的摘要。
-- `agent/` 覆盖 `research/` 的旧计划。
-- `archive/` 和 `reflections/` 默认不指导当前运行。
+不要默认通读所有研究和归档。日期较新的运行摘要也不能覆盖未满足的评测门槛；先核对有效配置、checkpoint 内部字段和原始结果。

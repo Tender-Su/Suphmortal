@@ -25,7 +25,7 @@ SCRIPT_RELATIVE_PATH = SCRIPT_PATH.relative_to(REPO_ROOT)
 INTERACTIVE_REMOTE_PYTHON_HELPER = REPO_ROOT / 'scripts' / 'start_interactive_remote_python.ps1'
 DEFAULT_REMOTE_HOST = 'mahjong-laptop'
 DEFAULT_REMOTE_REPO = str(REPO_ROOT)
-DEFAULT_REMOTE_PYTHON = r'C:\Users\numbe\miniconda3\envs\mortal\python.exe'
+DEFAULT_REMOTE_PYTHON = str(Path.home() / 'miniconda3' / 'envs' / 'mortal' / 'python.exe')
 DEFAULT_SSH_KEY = str(Path.home() / '.ssh' / 'mahjong_laptop_ed25519')
 DEFAULT_LOCAL_LABEL = 'desktop'
 DEFAULT_REMOTE_LABEL = 'laptop'
@@ -42,7 +42,7 @@ DEFAULT_REMOTE_SCREENING_PREFETCH_FACTOR = 4
 DEFAULT_REMOTE_SCREENING_VAL_FILE_BATCH_SIZE = 7
 DEFAULT_REMOTE_SCREENING_VAL_PREFETCH_FACTOR = 5
 DISPATCH_SCHEMA_VERSION = 1
-CONTROL_SCHEMA_VERSION = 1
+CONTROL_SCHEMA_VERSION = dispatch.CONTROL_SCHEMA_VERSION
 TASK_RESULT_SCHEMA_VERSION = 1
 REMOTE_LAUNCH_MODES = frozenset({'ssh_inline', 'interactive_window'})
 ROUND_KIND_WINNER_REFINE = 'winner_refine'
@@ -58,6 +58,18 @@ ROUND_KIND_CHOICES = (
 WorkerSpec = dispatch.WorkerSpec
 ActiveTask = dispatch.ActiveTask
 JsonTaskLaunchSpec = dispatch.JsonTaskLaunchSpec
+initialize_dispatch_control_state = dispatch.initialize_dispatch_control_state
+load_dispatch_control = dispatch.load_dispatch_control
+write_dispatch_control = dispatch.write_dispatch_control
+ensure_control_state_workers = dispatch.ensure_control_state_workers
+worker_control_entry = dispatch.worker_control_entry
+set_worker_pause = dispatch.set_worker_pause
+update_worker_pause_control = dispatch.update_worker_pause_control
+reset_running_tasks_for_resume = dispatch.reset_running_tasks_for_resume
+find_next_pending_task = dispatch.find_next_pending_task
+stage_all_tasks_completed = dispatch.stage_all_tasks_completed
+stage_any_task_failed = dispatch.stage_any_task_failed
+reset_task_after_operator_interrupt = dispatch.reset_task_after_operator_interrupt
 
 
 REMOTE_INTERACTIVE_TASK_NAME_PREFIX = 'MahjongAI-WinnerRefine-'
@@ -161,113 +173,6 @@ def load_dispatch_state(path: Path) -> dict[str, Any]:
 def write_dispatch_state(path: Path, payload: dict[str, Any]) -> None:
     payload['updated_at'] = fidelity.ts_now()
     fidelity.atomic_write_json(path, payload)
-
-
-def initialize_dispatch_control_state(
-    *,
-    local_label: str | None,
-    remote_label: str | None,
-    remote_launch_mode: str,
-) -> dict[str, Any]:
-    workers = {}
-    if local_label:
-        workers[local_label] = {
-            'kind': 'local',
-            'paused': False,
-            'interrupt_requested': False,
-        }
-    if remote_label:
-        workers[remote_label] = {
-            'kind': 'remote',
-            'paused': False,
-            'interrupt_requested': False,
-            'launch_mode': remote_launch_mode,
-        }
-    return {
-        'schema_version': CONTROL_SCHEMA_VERSION,
-        'created_at': fidelity.ts_now(),
-        'updated_at': fidelity.ts_now(),
-        'workers': workers,
-    }
-
-
-def load_dispatch_control(path: Path) -> dict[str, Any]:
-    return fidelity.load_json(path)
-
-
-def write_dispatch_control(path: Path, payload: dict[str, Any]) -> None:
-    payload['updated_at'] = fidelity.ts_now()
-    fidelity.atomic_write_json(path, payload)
-
-
-def ensure_control_state_workers(
-    *,
-    control_state: dict[str, Any],
-    local_label: str | None,
-    remote_label: str | None,
-    remote_launch_mode: str,
-) -> bool:
-    workers = control_state.setdefault('workers', {})
-    changed = False
-    if local_label:
-        local = workers.get(local_label)
-        if not isinstance(local, dict):
-            workers[local_label] = {
-                'kind': 'local',
-                'paused': False,
-                'interrupt_requested': False,
-            }
-            changed = True
-        else:
-            local.setdefault('kind', 'local')
-            local.setdefault('paused', False)
-            local.setdefault('interrupt_requested', False)
-    if remote_label:
-        remote = workers.get(remote_label)
-        if not isinstance(remote, dict):
-            workers[remote_label] = {
-                'kind': 'remote',
-                'paused': False,
-                'interrupt_requested': False,
-                'launch_mode': remote_launch_mode,
-            }
-            changed = True
-        else:
-            remote.setdefault('kind', 'remote')
-            remote.setdefault('paused', False)
-            remote.setdefault('interrupt_requested', False)
-            remote.setdefault('launch_mode', remote_launch_mode)
-    return changed
-
-
-def worker_control_entry(control_state: dict[str, Any], worker_label: str) -> dict[str, Any]:
-    workers = control_state.setdefault('workers', {})
-    entry = workers.get(worker_label)
-    if not isinstance(entry, dict):
-        entry = {
-            'paused': False,
-            'interrupt_requested': False,
-        }
-        workers[worker_label] = entry
-    entry.setdefault('paused', False)
-    entry.setdefault('interrupt_requested', False)
-    return entry
-
-
-def set_worker_pause(
-    control_state: dict[str, Any],
-    *,
-    worker_label: str,
-    paused: bool,
-    stop_active: bool = False,
-) -> dict[str, Any]:
-    entry = worker_control_entry(control_state, worker_label)
-    entry['paused'] = bool(paused)
-    if paused and stop_active:
-        entry['interrupt_requested'] = True
-    elif not paused:
-        entry['interrupt_requested'] = False
-    return entry
 
 
 def update_run_state_for_dispatch(
@@ -1053,57 +958,6 @@ def initialize_protocol_decide_dispatch_state(
         'final_protocol_winner': None,
         'final_protocol_compare': None,
     }
-
-
-def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
-    for stage_key in ('seed1', 'seed2'):
-        stage_state = dispatch_state.get(stage_key)
-        if not isinstance(stage_state, dict):
-            continue
-        for task in stage_state.get('tasks', {}).values():
-            if str(task.get('status')) == 'running':
-                task['status'] = 'pending'
-                task.pop('started_at', None)
-                task.pop('worker_label', None)
-                task.pop('local_result_path', None)
-                task.pop('remote_result_path', None)
-                task.pop('log_path', None)
-
-
-def find_next_pending_task(stage_state: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    pending = [
-        (task_id, task)
-        for task_id, task in stage_state.get('tasks', {}).items()
-        if str(task.get('status', 'pending')) == 'pending'
-    ]
-    if not pending:
-        return None
-    pending.sort(key=lambda item: item[0])
-    return pending[0]
-
-
-def stage_all_tasks_completed(stage_state: dict[str, Any]) -> bool:
-    tasks = list(stage_state.get('tasks', {}).values())
-    return bool(tasks) and all(str(task.get('status')) == 'completed' for task in tasks)
-
-
-def stage_any_task_failed(stage_state: dict[str, Any]) -> bool:
-    return any(str(task.get('status')) == 'failed' for task in stage_state.get('tasks', {}).values())
-
-
-def reset_task_after_operator_interrupt(task_state: dict[str, Any], *, note: str) -> None:
-    attempts = int(task_state.get('attempts', 0))
-    task_state['status'] = 'pending'
-    task_state['attempts'] = max(0, attempts - 1)
-    task_state['error'] = note
-    task_state['interrupted_at'] = fidelity.ts_now()
-    task_state.pop('finished_at', None)
-    task_state.pop('started_at', None)
-    task_state.pop('worker_label', None)
-    task_state.pop('local_result_path', None)
-    task_state.pop('remote_result_path', None)
-    task_state.pop('log_path', None)
-    task_state.pop('pid', None)
 
 
 def launch_local_task(
@@ -2620,27 +2474,15 @@ def update_worker_pause(args: argparse.Namespace, *, paused: bool) -> int:
     dispatch_state = load_dispatch_state(dispatch_state_path)
     local_label = str(dispatch_state.get('local_label') or DEFAULT_LOCAL_LABEL)
     remote_label = dispatch_state.get('remote_label')
-    if dispatch_control_path.exists():
-        control_state = load_dispatch_control(dispatch_control_path)
-    else:
-        control_state = initialize_dispatch_control_state(
-            local_label=local_label,
-            remote_label=remote_label,
-            remote_launch_mode=DEFAULT_REMOTE_LAUNCH_MODE,
-        )
-    ensure_control_state_workers(
-        control_state=control_state,
+    entry = update_worker_pause_control(
+        dispatch_control_path,
         local_label=local_label,
         remote_label=remote_label,
         remote_launch_mode=DEFAULT_REMOTE_LAUNCH_MODE,
-    )
-    entry = set_worker_pause(
-        control_state,
         worker_label=args.worker_label,
         paused=paused,
         stop_active=bool(getattr(args, 'stop_active', False)),
     )
-    write_dispatch_control(dispatch_control_path, control_state)
     payload = {
         'round_kind': round_kind,
         'run_name': args.run_name,

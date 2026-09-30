@@ -186,12 +186,12 @@ impl DirectStateBatch {
     }
 
     #[inline]
-    fn capacity(&self) -> usize {
+    const fn capacity(&self) -> usize {
         self.capacity
     }
 
     #[inline]
-    fn slot_len(&self) -> usize {
+    const fn slot_len(&self) -> usize {
         self.rows * 34
     }
 
@@ -203,17 +203,18 @@ impl DirectStateBatch {
         at_kan_select: bool,
         use_obs_encode_into: bool,
     ) -> [bool; ACTION_SPACE] {
-        let slot_slice = self.slot_slice_mut(slot);
-        slot_slice.fill(0.0);
-        let mut mask = [false; ACTION_SPACE];
-        if use_obs_encode_into {
-            state.encode_obs_row_major_into(version, at_kan_select, slot_slice, &mut mask);
-            mask
-        } else {
-            let (feature, mask) = encode_obs_legacy(state, version, at_kan_select);
-            slot_slice.copy_from_slice(feature.as_slice());
-            mask
-        }
+        self.with_slot_mut(slot, |slot_slice| {
+            slot_slice.fill(0.0);
+            let mut mask = [false; ACTION_SPACE];
+            if use_obs_encode_into {
+                state.encode_obs_row_major_into(version, at_kan_select, slot_slice, &mut mask);
+                mask
+            } else {
+                let (feature, mask) = encode_obs_legacy(state, version, at_kan_select);
+                slot_slice.copy_from_slice(feature.as_slice());
+                mask
+            }
+        })
     }
 
     fn view(&self, batch_size: usize) -> Result<ArrayView3<'_, f32>> {
@@ -227,14 +228,14 @@ impl DirectStateBatch {
             .context("failed to build contiguous state batch view")
     }
 
-    fn slot_slice_mut(&self, slot: usize) -> &mut [f32] {
+    fn with_slot_mut<R>(&self, slot: usize, write: impl FnOnce(&mut [f32]) -> R) -> R {
         assert!(slot < self.capacity, "state batch slot out of range");
         let start = slot * self.slot_len();
         let end = start + self.slot_len();
         // SAFETY: The boxed slice is allocated once in `new()` and never
         // reallocated. Each slot is reserved exactly once per batch under
         // `SyncFields`, so concurrent workers only write to disjoint ranges.
-        unsafe { &mut (&mut *self.data.get())[start..end] }
+        unsafe { write(&mut (&mut *self.data.get())[start..end]) }
     }
 
     fn data_slice(&self, len: usize) -> &[f32] {
@@ -414,19 +415,26 @@ impl MortalBatchAgent {
                 self.perf.batch_pack_elapsed += started.elapsed();
             }
             let owner = owner_bound.borrow();
+            // SAFETY: `owner_bound` owns the Arcs backing `state_view` and
+            // `mask_view`, so both buffers outlive the borrowed NumPy arrays.
             let states =
                 unsafe { PyArray3::borrow_from_array(&state_view, owner_bound.clone().into_any()) };
+            // SAFETY: Same owner and lifetime invariant as `states` above.
             let masks =
                 unsafe { PyArray2::borrow_from_array(&mask_view, owner_bound.clone().into_any()) };
             let invisible_states = owner
                 .invisible_state_batch
                 .as_ref()
                 .filter(|_| invisible_states.is_some())
-                .map(|batch| unsafe {
-                    PyArray3::borrow_from_array(
-                        &batch.slice(s![..self.last_batch_size, .., ..]),
-                        owner_bound.clone().into_any(),
-                    )
+                .map(|batch| {
+                    // SAFETY: `batch` is stored in `owner_bound`, which is
+                    // attached as the NumPy owner and therefore outlives it.
+                    unsafe {
+                        PyArray3::borrow_from_array(
+                            &batch.slice(s![..self.last_batch_size, .., ..]),
+                            owner_bound.clone().into_any(),
+                        )
+                    }
                 });
             let args = (states, masks, invisible_states);
             if self.enable_metadata {
@@ -652,10 +660,10 @@ impl BatchAgent for MortalBatchAgent {
         state: &PlayerState,
         _: Option<InvisibleState>,
     ) -> Result<EventExt> {
-        if self.enable_quick_eval {
-            if let Some(ev) = self.quick_eval_reactions[index].take() {
-                return Ok(EventExt::no_meta(ev));
-            }
+        if self.enable_quick_eval
+            && let Some(ev) = self.quick_eval_reactions[index].take()
+        {
+            return Ok(EventExt::no_meta(ev));
         }
 
         if !self.evaluated {
@@ -1013,15 +1021,19 @@ mod test {
     #[test]
     fn direct_state_batch_view_preserves_order() {
         let batch = DirectStateBatch::new(2, 2);
-        batch.slot_slice_mut(0)[0] = 1.0;
-        batch.slot_slice_mut(0)[34] = 2.0;
-        batch.slot_slice_mut(1)[1] = 3.0;
-        batch.slot_slice_mut(1)[35] = 4.0;
+        batch.with_slot_mut(0, |slot| {
+            slot[0] = 1.0;
+            slot[34] = 2.0;
+        });
+        batch.with_slot_mut(1, |slot| {
+            slot[1] = 3.0;
+            slot[35] = 4.0;
+        });
 
         let view = batch.view(2).unwrap();
-        assert_eq!(view[[0, 0, 0]], 1.0);
-        assert_eq!(view[[0, 1, 0]], 2.0);
-        assert_eq!(view[[1, 0, 1]], 3.0);
-        assert_eq!(view[[1, 1, 1]], 4.0);
+        assert!((view[[0, 0, 0]] - 1.0).abs() < f32::EPSILON);
+        assert!((view[[0, 1, 0]] - 2.0).abs() < f32::EPSILON);
+        assert!((view[[1, 0, 1]] - 3.0).abs() < f32::EPSILON);
+        assert!((view[[1, 1, 1]] - 4.0).abs() < f32::EPSILON);
     }
 }

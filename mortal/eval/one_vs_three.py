@@ -17,7 +17,7 @@ from mortal.config import config
 from mortal.core.checkpoint_utils import checkpoint_brain_is_oracle_structure, load_brain_state_with_input_bridge
 from mortal.eval.engine import MortalEngine
 from libriichi.arena import OneVsThree
-from mortal.core.model import Brain, CategoricalPolicy
+from mortal.core.model import Brain, CategoricalPolicy, DQN
 from mortal.eval.oracle_experiments import apply_oracle_experiment_to_config, normalize_oracle_input_mode
 from mortal.eval.search_runtime import build_search_runtime_bundle_from_state
 
@@ -174,6 +174,49 @@ def plan_shards(total_seed_count, requested_shard_count):
     return [base + (1 if index < remainder else 0) for index in range(shard_count)]
 
 
+def _strip_state_dict_prefixes(state_dict):
+    stripped = state_dict
+    changed = True
+    while stripped and changed:
+        changed = False
+        for prefix in ('_orig_mod.', 'module.'):
+            if all(key.startswith(prefix) for key in stripped):
+                stripped = {key[len(prefix):]: value for key, value in stripped.items()}
+                changed = True
+                break
+    return stripped
+
+
+def _infer_checkpoint_norm(version, mortal_state):
+    has_batch_norm_stats = any(
+        key.endswith(('running_mean', 'running_var', 'num_batches_tracked'))
+        for key in mortal_state
+    )
+    return 'BN' if version not in (3, 4) or has_batch_norm_stats else 'GN'
+
+
+def _load_policy_from_checkpoint(state, version):
+    if isinstance(state.get('policy_net'), dict):
+        state_key = 'policy_net'
+    elif isinstance(state.get('current_dqn'), dict):
+        state_key = 'current_dqn'
+    else:
+        raise ValueError('checkpoint has neither policy_net nor current_dqn weights')
+
+    policy_state = _strip_state_dict_prefixes(state[state_key])
+    keys = set(policy_state)
+    if {'fc1.weight', 'fc1.bias', 'fc2.weight', 'fc2.bias'}.issubset(keys):
+        policy = CategoricalPolicy().eval()
+        policy_kind = 'categorical'
+    elif 'net.weight' in keys or any(key.startswith(('v_head.', 'a_head.')) for key in keys):
+        policy = DQN(version=version).eval()
+        policy_kind = 'dqn'
+    else:
+        raise ValueError(f'unsupported policy layout in checkpoint key {state_key}')
+    policy.load_state_dict(policy_state)
+    return policy, policy_kind
+
+
 def load_mortal_engine(engine_cfg, *, enable_metadata=True):
     state = torch.load(engine_cfg['state_file'], weights_only=True, map_location=torch.device('cpu'))
     saved_cfg = state['config']
@@ -181,19 +224,20 @@ def load_mortal_engine(engine_cfg, *, enable_metadata=True):
     conv_channels = saved_cfg['resnet']['conv_channels']
     num_blocks = saved_cfg['resnet']['num_blocks']
     brain_is_oracle = checkpoint_brain_is_oracle_structure(state)
+    mortal_state = _strip_state_dict_prefixes(state['mortal'])
+    norm = _infer_checkpoint_norm(version, mortal_state)
     mortal = Brain(
         version=version,
         num_blocks=num_blocks,
         conv_channels=conv_channels,
         is_oracle=brain_is_oracle,
-        Norm='GN',
+        Norm=norm,
     ).eval()
-    dqn = CategoricalPolicy().eval()
-    load_brain_state_with_input_bridge(mortal, state['mortal'])
-    dqn.load_state_dict(state['policy_net'])
+    policy, policy_kind = _load_policy_from_checkpoint(state, version)
+    load_brain_state_with_input_bridge(mortal, mortal_state)
     if engine_cfg['enable_compile']:
         mortal.compile()
-        dqn.compile()
+        policy.compile()
     search_runtime_bundle = build_search_runtime_bundle_from_state(
         state,
         device=torch.device(engine_cfg['device']),
@@ -212,7 +256,7 @@ def load_mortal_engine(engine_cfg, *, enable_metadata=True):
     runtime_is_oracle = bool(brain_is_oracle and oracle_input_mode != 'zero')
     engine = MortalEngine(
         mortal,
-        dqn,
+        policy,
         is_oracle=runtime_is_oracle,
         version=version,
         device=torch.device(engine_cfg['device']),
@@ -223,6 +267,7 @@ def load_mortal_engine(engine_cfg, *, enable_metadata=True):
         oracle_guiding_keep_prob=oracle_guiding_keep_prob,
         oracle_input_mode=oracle_input_mode,
         search_runtime_bundle=search_runtime_bundle,
+        policy_kind=policy_kind,
     )
     return engine
 

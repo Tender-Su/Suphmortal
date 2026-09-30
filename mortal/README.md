@@ -1,20 +1,15 @@
-# mortal Python 包结构
+# mortal Python 包
 
-`mortal/` 现在按职责分层，根层只保留配置文件和包入口。仓库内入口走 `scripts/` 或 `python -m mortal...`，不再依赖仓库外部命令封装。
+从仓库根目录以模块方式运行：`python -m mortal.<子包>.<模块>`。实际解释器、配置解析和可执行示例统一见 [运行流程](../docs/agent/workflows.md)。
 
-| 目录 | 职责 |
+| 子包 | 职责 |
 | --- | --- |
-| `core/` | 模型、checkpoint、配置工具、复现、训练公共工具 |
-| `data/` | 数据集迭代器、标签和奖励相关数据处理 |
-| `supervised/` | GRP、监督学习训练、P0/P1/formal/fidelity 编排 |
-| `online/` | 在线 RL 的 server、client、trainer、机器模式和角色入口 |
-| `eval/` | 推理 engine、`1v3`、Oracle 评测、搜索运行时 |
-| `research/` | 一次性探针、审计脚本、辅助实验工具 |
-| `tests/` | Python 单元测试 |
+| [core/](core/) | 模型、checkpoint 和训练公共机制 |
+| [data/](data/) | 数据迭代器、标签和奖励 |
+| [supervised/](supervised/) | GRP、SL 训练及实验编排 |
+| [online/](online/) | Oracle critic 预训练、RL server / client / trainer |
+| [eval/](eval/) | 推理、`1v3`、Oracle 依赖度、配对统计 |
+| [research/](research/) | 探针、审计与辅助实验 |
+| [tests/](tests/) | Python 回归测试 |
 
-仓库内常用入口仍从 `scripts/` 运行。直接跑模块时优先使用：
-
-```powershell
-C:\ProgramData\anaconda3\envs\mortal\python.exe -m mortal.supervised.run_sl_formal --help
-C:\ProgramData\anaconda3\envs\mortal\python.exe -m mortal.online.online_machine_modes --help
-```
+关键模块与形状契约见 [代码地图](../docs/agent/code-map.md)。配置模板是 [config.example.toml](config.example.toml)，具体实验以所用配置和 manifest 为准。

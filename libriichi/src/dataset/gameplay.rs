@@ -18,6 +18,7 @@ use derivative::Derivative;
 use flate2::read::GzDecoder;
 use ndarray::prelude::*;
 use numpy::{PyArray1, PyArray2, PyArray3};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -35,8 +36,41 @@ fn danger_ron_loss(ron: i32, honba: u8) -> u32 {
 }
 
 #[inline]
-fn estimated_player_sample_capacity(event_count: usize) -> usize {
-    event_count.div_ceil(4).saturating_add(8).max(16)
+fn estimated_player_sample_capacity(event_count: usize, sample_fold_count: u32) -> usize {
+    event_count
+        .div_ceil(4)
+        .div_ceil(sample_fold_count.max(1) as usize)
+        .saturating_add(8)
+        .max(16)
+}
+
+#[inline]
+fn stable_hash64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[inline]
+const fn mix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[inline]
+fn sample_fold_id(
+    sample_key: u64,
+    player_id: u8,
+    candidate_index: usize,
+    fold_count: u32,
+    seed: u64,
+) -> u32 {
+    let value = sample_key
+        ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ u64::from(player_id).wrapping_mul(0xd6e8_feb8_6659_fd93)
+        ^ (candidate_index as u64).wrapping_mul(0xa076_1d64_78bd_642f);
+    (mix64(value) % u64::from(fold_count)) as u32
 }
 
 #[pyclass]
@@ -63,6 +97,14 @@ pub struct GameplayLoader {
     track_danger_labels: bool,
     #[pyo3(get)]
     track_regret_labels: bool,
+    #[pyo3(get)]
+    sample_fold_count: u32,
+    #[pyo3(get)]
+    sample_fold_index: u32,
+    #[pyo3(get)]
+    sample_fold_seed: u64,
+    #[pyo3(get)]
+    oracle_imputation_seed: Option<u64>,
 
     #[derivative(Debug = "ignore")]
     player_names_set: AHashSet<String>,
@@ -79,6 +121,9 @@ pub struct Gameplay {
     pub actions: Vec<i64>,
     pub masks: Vec<bool>,
     pub at_kyoku: Vec<u8>,
+    // Lightweight full decision clock, retained even when feature encoding is folded.
+    pub full_at_kyoku: Vec<u8>,
+    pub sample_indices: Vec<u64>,
     pub dones: Vec<bool>,
     pub apply_gamma: Vec<bool>,
     pub at_turns: Vec<u8>,
@@ -127,6 +172,8 @@ struct LoaderContext<'a> {
     rinshan_idx: usize,
     obs_scratch: Simple2DArray<34, f32>,
     mask_scratch: [bool; ACTION_SPACE],
+    sample_key: u64,
+    sample_candidate_index: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,6 +190,8 @@ struct EventCacheChunk {
 
 #[pymethods]
 impl GameplayLoader {
+    // This signature is the stable Python keyword API, not an internal Rust API.
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         version,
@@ -184,6 +233,10 @@ impl GameplayLoader {
             track_opponent_states,
             track_danger_labels,
             track_regret_labels,
+            sample_fold_count: 1,
+            sample_fold_index: 0,
+            sample_fold_seed: 0,
+            oracle_imputation_seed: None,
             player_names_set,
             excludes_set,
         }
@@ -192,7 +245,27 @@ impl GameplayLoader {
     // Nested result is too hard to handle...
     fn load_log(&self, raw_log: &str) -> Result<Vec<Gameplay>> {
         let events = self.parse_events(raw_log, true)?;
-        self.load_events(&events)
+        self.load_events_with_sample_key(&events, stable_hash64(raw_log.as_bytes()))
+    }
+
+    #[pyo3(signature = (seed=None))]
+    const fn set_oracle_imputation_seed(&mut self, seed: Option<u64>) {
+        self.oracle_imputation_seed = seed;
+    }
+
+    fn set_sample_fold(&mut self, count: u32, index: u32, seed: u64) -> PyResult<()> {
+        if count == 0 {
+            return Err(PyValueError::new_err("sample fold count must be positive"));
+        }
+        if index >= count {
+            return Err(PyValueError::new_err(format!(
+                "sample fold index must be in [0, {count}), got {index}"
+            )));
+        }
+        self.sample_fold_count = count;
+        self.sample_fold_index = index;
+        self.sample_fold_seed = seed;
+        Ok(())
     }
 
     #[pyo3(name = "load_gz_log_files")]
@@ -264,7 +337,14 @@ impl GameplayLoader {
                 if self.augmented {
                     entry.events.iter_mut().for_each(Event::augment);
                 }
-                self.load_events(&entry.events)
+                let source_name = Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&entry.path);
+                self.load_events_with_sample_key(
+                    &entry.events,
+                    stable_hash64(source_name.as_bytes()),
+                )
             })
             .collect()
     }
@@ -283,7 +363,16 @@ impl GameplayLoader {
                         self.load_event_cache_file(filename)
                     } else {
                         let raw = self.read_raw_log_from_file(filename)?;
-                        self.load_log(&raw).map(|v| vec![v])
+                        let source_name = Path::new(filename)
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or(filename);
+                        let events = self.parse_events(&raw, true)?;
+                        self.load_events_with_sample_key(
+                            &events,
+                            stable_hash64(source_name.as_bytes()),
+                        )
+                        .map(|v| vec![v])
                     }
                 };
                 inner().with_context(|| format!("error when reading {filename}"))
@@ -300,7 +389,11 @@ impl GameplayLoader {
     {
         raw_logs
             .into_par_iter()
-            .map(|raw| self.load_log(raw.as_ref()))
+            .map(|raw| {
+                let raw = raw.as_ref();
+                let events = self.parse_events(raw, true)?;
+                self.load_events_with_sample_key(&events, stable_hash64(raw.as_bytes()))
+            })
             .collect()
     }
 
@@ -358,7 +451,23 @@ impl GameplayLoader {
     }
 
     pub fn load_events(&self, events: &[Event]) -> Result<Vec<Gameplay>> {
-        let invisibles = self.oracle.then(|| Invisible::new(events, self.trust_seed));
+        self.load_events_with_sample_key(events, 0)
+    }
+
+    fn load_events_with_sample_key(
+        &self,
+        events: &[Event],
+        sample_key: u64,
+    ) -> Result<Vec<Gameplay>> {
+        let imputation_seed = self.oracle_imputation_seed.map(|seed| {
+            // Canonical events make completion independent of path, compression and cache format.
+            // FNV1a + mix64 + ChaCha8 is the versioned oracle imputation v1 contract.
+            let content = serde_json::to_vec(events).expect("events must serialize");
+            mix64(stable_hash64(&content) ^ seed)
+        });
+        let invisibles = self
+            .oracle
+            .then(|| Invisible::new(events, self.trust_seed, imputation_seed));
 
         let [Event::StartGame { names, .. }, ..] = events else {
             bail!("empty or invalid game log");
@@ -381,7 +490,8 @@ impl GameplayLoader {
         // `events.len()` is the whole-log raw event count, while each Gameplay only
         // stores one player's supervised decision samples. Reserving from the raw
         // event count over-allocates the heavy obs/mask buffers by several times.
-        let sample_capacity = estimated_player_sample_capacity(events.len());
+        let sample_capacity =
+            estimated_player_sample_capacity(events.len(), self.sample_fold_count);
 
         let mut gameplays = player_ids
             .into_iter()
@@ -406,6 +516,8 @@ impl GameplayLoader {
                         rinshan_idx: 0,
                         obs_scratch: Simple2DArray::new(obs_shape(self.version).0),
                         mask_scratch: [false; ACTION_SPACE],
+                        sample_key,
+                        sample_candidate_index: 0,
                     },
                 )
             })
@@ -471,6 +583,12 @@ impl Gameplay {
     fn take_at_kyoku_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u8>> {
         PyArray1::from_vec(py, mem::take(&mut self.at_kyoku))
     }
+    fn take_full_at_kyoku_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u8>> {
+        PyArray1::from_vec(py, mem::take(&mut self.full_at_kyoku))
+    }
+    fn take_sample_indices_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
+        PyArray1::from_vec(py, mem::take(&mut self.sample_indices))
+    }
     fn take_dones(&mut self) -> Vec<bool> {
         mem::take(&mut self.dones)
     }
@@ -526,10 +644,7 @@ impl Gameplay {
     fn take_hand_value_valid_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
         PyArray1::from_vec(py, mem::take(&mut self.hand_value_valid))
     }
-    fn take_hand_value_points_batch<'py>(
-        &mut self,
-        py: Python<'py>,
-    ) -> Bound<'py, PyArray2<f32>> {
+    fn take_hand_value_points_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
         PyArray2::from_owned_array(py, self.take_hand_value_points_batch_array())
     }
 
@@ -639,6 +754,8 @@ impl Gameplay {
             actions: Vec::with_capacity(sample_capacity),
             masks: Vec::with_capacity(mask_capacity),
             at_kyoku: Vec::with_capacity(sample_capacity),
+            full_at_kyoku: Vec::new(),
+            sample_indices: Vec::with_capacity(sample_capacity),
             dones: Vec::with_capacity(sample_capacity),
             apply_gamma: Vec::with_capacity(sample_capacity),
             at_turns: Vec::with_capacity(sample_capacity),
@@ -662,7 +779,7 @@ impl Gameplay {
             player_id,
             player_name: String::new(),
             sample_count: 0,
-            version: version as u32,
+            version,
         }
     }
 
@@ -761,16 +878,12 @@ impl Gameplay {
     /// Furo regret label: records whether this is a call/pass decision and the
     /// shanten context. Valid only when the player can call (chi/pon/kan) or when
     /// the player has just called (in the subsequent discard).
-    fn push_furo_labels(
-        &mut self,
-        state: &PlayerState,
-        at_kan_select: bool,
-        label: usize,
-    ) {
+    fn push_furo_labels(&mut self, state: &PlayerState, at_kan_select: bool, label: usize) {
         let cans = state.last_cans();
         // A furo decision point is when the player can chi, pon, or daiminkan
         // (but not when at kan_select, which is choosing which tile to kan).
-        let is_call_decision = !at_kan_select && cans.can_pass()
+        let is_call_decision = !at_kan_select
+            && cans.can_pass()
             && (cans.can_chi() || cans.can_pon || cans.can_daiminkan);
         self.furo_valid.push(is_call_decision);
 
@@ -820,11 +933,7 @@ impl Gameplay {
                     continue;
                 }
 
-                let deaka_idx = if idx >= 34 {
-                    (idx - 34) * 9 + 4
-                } else {
-                    idx
-                };
+                let deaka_idx = if idx >= 34 { (idx - 34) * 9 + 4 } else { idx };
 
                 let mut tehai_after = tehai;
                 tehai_after[deaka_idx] -= 1;
@@ -863,15 +972,13 @@ impl Gameplay {
                     // use a simpler proxy: base 2000 × (han estimate).
                     // Han estimate = 1 (base) + doras in completed hand.
                     let dora_factor = state.dora_factor();
-                    let doras_in_completed =
-                        state.doras_owned_self() + dora_factor[wait_tid];
+                    let doras_in_completed = state.doras_owned_self() + dora_factor[wait_tid];
                     let han_estimate = 1 + doras_in_completed;
                     let point_estimate = match han_estimate {
                         0..=1 => 1000.0,
                         2 => 2000.0,
                         3 => 4000.0,
-                        4 => 8000.0,
-                        5 => 8000.0,
+                        4 | 5 => 8000.0,
                         6..=7 => 12000.0,
                         8..=10 => 16000.0,
                         11..=12 => 24000.0,
@@ -901,7 +1008,7 @@ impl Gameplay {
             player_id,
             grp,
             config.version,
-            estimated_player_sample_capacity(events.len()),
+            estimated_player_sample_capacity(events.len(), config.sample_fold_count),
         );
 
         let mut ctx = LoaderContext {
@@ -916,6 +1023,8 @@ impl Gameplay {
             rinshan_idx: 0,
             obs_scratch: Simple2DArray::new(obs_shape(config.version).0),
             mask_scratch: [false; ACTION_SPACE],
+            sample_key: 0,
+            sample_candidate_index: 0,
         };
 
         // It is guaranteed that there are at least 4 events.
@@ -1040,7 +1149,7 @@ impl Gameplay {
                     // Check if the POV is one of those who made Hora.
                     for ev in &wnd[1..] {
                         match *ev {
-                            Event::EndKyoku { .. } => break,
+                            Event::EndKyoku => break,
                             Event::Hora { actor, .. } if actor == self.player_id => {
                                 ret = Some(43);
                                 break;
@@ -1081,6 +1190,22 @@ impl Gameplay {
     }
 
     fn add_entry(&mut self, ctx: &mut LoaderContext<'_>, at_kan_select: bool, label: usize) {
+        let candidate_index = ctx.sample_candidate_index;
+        ctx.sample_candidate_index += 1;
+        self.full_at_kyoku.push(ctx.kyoku_idx as u8);
+        if ctx.config.sample_fold_count > 1
+            && sample_fold_id(
+                ctx.sample_key,
+                self.player_id,
+                candidate_index,
+                ctx.config.sample_fold_count,
+                ctx.config.sample_fold_seed,
+            ) != ctx.config.sample_fold_index
+        {
+            return;
+        }
+
+        self.sample_indices.push(candidate_index as u64);
         ctx.obs_scratch.reset();
         ctx.mask_scratch.fill(false);
         ctx.state.encode_obs_into(
@@ -1152,11 +1277,7 @@ impl Gameplay {
         if ctx.config.track_regret_labels {
             self.push_tile_eff_labels(&ctx.state, at_kan_select);
             self.push_furo_labels(&ctx.state, at_kan_select, label);
-            self.push_hand_value_labels(
-                &ctx.state,
-                &ctx.opponent_states,
-                at_kan_select,
-            );
+            self.push_hand_value_labels(&ctx.state, &ctx.opponent_states, at_kan_select);
         }
         self.sample_count += 1;
 
@@ -1175,6 +1296,40 @@ impl Gameplay {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn sample_folds_are_deterministic_disjoint_and_complete() {
+        let fold_count = 16;
+        for candidate_index in 0..512 {
+            let expected = sample_fold_id(1234, 2, candidate_index, fold_count, 99);
+            assert_eq!(
+                expected,
+                sample_fold_id(1234, 2, candidate_index, fold_count, 99)
+            );
+            assert!(expected < fold_count);
+            assert_eq!(1, (0..fold_count).filter(|fold| *fold == expected).count());
+        }
+    }
+
+    #[test]
+    fn sample_fold_hash_changes_with_game_player_and_seed() {
+        let baseline = (0..128)
+            .map(|index| sample_fold_id(10, 0, index, 64, 20))
+            .collect::<Vec<_>>();
+        let other_game = (0..128)
+            .map(|index| sample_fold_id(11, 0, index, 64, 20))
+            .collect::<Vec<_>>();
+        let other_player = (0..128)
+            .map(|index| sample_fold_id(10, 1, index, 64, 20))
+            .collect::<Vec<_>>();
+        let other_seed = (0..128)
+            .map(|index| sample_fold_id(10, 0, index, 64, 21))
+            .collect::<Vec<_>>();
+
+        assert_ne!(baseline, other_game);
+        assert_ne!(baseline, other_player);
+        assert_ne!(baseline, other_seed);
+    }
 
     #[test]
     fn danger_ron_loss_adds_honba() {
@@ -1200,7 +1355,10 @@ mod test {
         assert_eq!(actual.danger_value, expected.danger_value);
         assert_eq!(actual.danger_player_mask, expected.danger_player_mask);
         assert_eq!(actual.tile_eff_valid, expected.tile_eff_valid);
-        assert_eq!(actual.tile_eff_shanten_delta, expected.tile_eff_shanten_delta);
+        assert_eq!(
+            actual.tile_eff_shanten_delta,
+            expected.tile_eff_shanten_delta
+        );
         assert_eq!(actual.furo_valid, expected.furo_valid);
         assert_eq!(actual.furo_label, expected.furo_label);
         assert_eq!(actual.hand_value_valid, expected.hand_value_valid);
@@ -1300,7 +1458,9 @@ mod test {
 {"type":"end_game"}
 "#;
 
-        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false, false);
+        let loader = GameplayLoader::new(
+            4, false, None, None, false, true, false, false, false, false,
+        );
         let events = loader.parse_events(raw_log.trim(), false).unwrap();
         let actual = loader.load_events(&events).unwrap();
         let expected = [0_u8, 1, 2, 3]
@@ -1402,15 +1562,28 @@ mod test {
 {"type":"end_game"}
 "#;
 
-        let loader = GameplayLoader::new(4, false, None, None, false, true, false, false, false, false);
+        let loader = GameplayLoader::new(
+            4, false, None, None, false, true, false, false, false, false,
+        );
         let events = loader.parse_events(raw_log.trim(), false).unwrap();
-        let estimated = estimated_player_sample_capacity(events.len());
+        let estimated = estimated_player_sample_capacity(events.len(), 1);
         let actual = loader.load_events(&events).unwrap();
 
         assert!(estimated < events.len());
         for gameplay in actual {
             assert!(gameplay.sample_count <= estimated);
         }
+    }
+
+    #[test]
+    fn estimated_capacity_scales_with_native_sample_folding() {
+        let event_count = 4096;
+        let full = estimated_player_sample_capacity(event_count, 1);
+        let folded = estimated_player_sample_capacity(event_count, 64);
+
+        assert_eq!(1032, full);
+        assert_eq!(24, folded);
+        assert!(folded < full);
     }
 
     #[test]
