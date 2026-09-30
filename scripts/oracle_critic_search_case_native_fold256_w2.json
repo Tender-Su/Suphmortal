@@ -1,0 +1,27 @@
+[
+  {
+    "name": "fold256_w2",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "num_workers": 2,
+      "file_batch_size": 8,
+      "prefetch_factor": 1,
+      "state_fold_count": 256,
+      "state_fold_seed": 20260416,
+      "state_fold_backend": "native_hash",
+      "val_state_fold_count": 128,
+      "val_num_workers": 2,
+      "val_file_batch_size": 8,
+      "val_prefetch_factor": 1,
+      "exact_zero_sum": true,
+      "zero_sum_weight": 0.0,
+      "oracle_fusion_init": 0.5,
+      "oracle_first_conv_init": "legacy_mean_scaled",
+      "amp_init_scale": 2048.0,
+      "amp_growth_interval": 1000000,
+      "eval_enable_amp": false,
+      "eval_log_every_batches": 32
+    }
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "dual_residual_p0x2",
+    "critic_arch": "dual_tower",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random",
+      "target_output_weights": [2.0, 1.0, 1.0, 1.0]
+    }
+  },
+  {
+    "name": "dual_residual_p0x4",
+    "critic_arch": "dual_tower",
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random",
+      "target_output_weights": [4.0, 1.0, 1.0, 1.0]
+    }
+  }
+]

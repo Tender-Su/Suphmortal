@@ -1,0 +1,23 @@
+# Minimal input for the no-update diagnostic, never a training configuration.
+# Weight paths, independent seeds, device, games and fresh output are CLI-only.
+# The entry point records its exact effective overrides in the new run directory.
+[control]
+version = 4
+enable_cudnn_benchmark = false
+
+[env]
+pts = [2, 1, 0, -3]
+
+[aux]
+opponent_state_weight = 0.0
+danger_enabled = false
+danger_weight = 0.0
+tile_efficiency_weight = 0.0
+furo_regret_weight = 0.0
+hand_value_regret_weight = 0.0
+
+[search]
+enabled = false
+
+[oracle_guiding]
+actor_enabled = false

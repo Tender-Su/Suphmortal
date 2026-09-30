@@ -1,0 +1,17 @@
+[
+  {
+    "name": "dual_residual_value_scalar_h1024",
+    "critic_arch": "dual_tower",
+    "value_loss_mode": "mse",
+    "value_head_hidden": 1024,
+    "scheduler_peak": 0.000025,
+    "weight_decay": 0.1,
+    "pretrain": {
+      "oracle_fusion_mode": "residual_mlp",
+      "oracle_fusion_hidden": 1024,
+      "oracle_fusion_init": 0.0,
+      "oracle_tower_init": "random",
+      "oracle_first_conv_init": "random"
+    }
+  }
+]

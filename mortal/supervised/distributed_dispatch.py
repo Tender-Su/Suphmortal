@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+import base64
+import socket
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+from mortal._repo import REPO_ROOT
+from mortal.core.artifacts import atomic_write_json, load_json
+
+
+DEFAULT_REMOTE_HOST = 'mahjong-laptop'
+CONTROL_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class WorkerSpec:
+    kind: str
+    label: str
+    python: str | None
+    host: str | None = None
+    repo: str | None = None
+    ssh_key: str | None = None
+
+
+@dataclass(frozen=True)
+class JsonTaskLaunchSpec:
+    task_id: str
+    stage_name: str
+    local_result_path: Path
+    log_path: Path
+    command_args: list[str]
+    cwd: Path
+    remote_result_path: Path | None = None
+
+
+@dataclass
+class ActiveTask:
+    worker: WorkerSpec
+    stage_name: str
+    task_id: str
+    task_state: dict[str, Any]
+    process: subprocess.Popen[Any]
+    log_path: Path
+    local_result_path: Path
+    remote_result_path: Path | None = None
+
+
+def quote_ps(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def remote_powershell_command_args(script: str) -> list[str]:
+    encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
+    return ['powershell', '-NoProfile', '-EncodedCommand', encoded]
+
+
+def decode_remote_powershell_command_arg(encoded: str) -> str:
+    return base64.b64decode(encoded).decode('utf-16le')
+
+
+def path_to_scp_remote(path: str | Path) -> str:
+    text = str(path).replace('\\', '/')
+    if len(text) >= 2 and text[1] == ':':
+        return text
+    return text
+
+
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def hostname_fallback(default_label: str = 'desktop') -> str:
+    try:
+        return socket.gethostname().strip() or default_label
+    except Exception:
+        return default_label
+
+
+def summarize_task_status(tasks: dict[str, dict[str, Any]]) -> dict[str, int]:
+    counts = {'pending': 0, 'running': 0, 'completed': 0, 'failed': 0}
+    for task in tasks.values():
+        status = str(task.get('status', 'pending'))
+        counts.setdefault(status, 0)
+        counts[status] += 1
+    return counts
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def initialize_dispatch_control_state(
+    *,
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> dict[str, Any]:
+    workers = {}
+    if local_label:
+        workers[local_label] = {
+            'kind': 'local',
+            'paused': False,
+            'interrupt_requested': False,
+        }
+    if remote_label:
+        workers[remote_label] = {
+            'kind': 'remote',
+            'paused': False,
+            'interrupt_requested': False,
+            'launch_mode': remote_launch_mode,
+        }
+    now = _timestamp()
+    return {
+        'schema_version': CONTROL_SCHEMA_VERSION,
+        'created_at': now,
+        'updated_at': now,
+        'workers': workers,
+    }
+
+
+def load_dispatch_control(path: Path) -> dict[str, Any]:
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'dispatch control at {path} must be a JSON object')
+    return payload
+
+
+def write_dispatch_control(path: Path, payload: dict[str, Any]) -> None:
+    payload['updated_at'] = _timestamp()
+    atomic_write_json(path, payload)
+
+
+def ensure_control_state_workers(
+    *,
+    control_state: dict[str, Any],
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+) -> bool:
+    workers = control_state.setdefault('workers', {})
+    changed = False
+    if local_label:
+        local = workers.get(local_label)
+        if not isinstance(local, dict):
+            workers[local_label] = {
+                'kind': 'local',
+                'paused': False,
+                'interrupt_requested': False,
+            }
+            changed = True
+        else:
+            local.setdefault('kind', 'local')
+            local.setdefault('paused', False)
+            local.setdefault('interrupt_requested', False)
+    if remote_label:
+        remote = workers.get(remote_label)
+        if not isinstance(remote, dict):
+            workers[remote_label] = {
+                'kind': 'remote',
+                'paused': False,
+                'interrupt_requested': False,
+                'launch_mode': remote_launch_mode,
+            }
+            changed = True
+        else:
+            remote.setdefault('kind', 'remote')
+            remote.setdefault('paused', False)
+            remote.setdefault('interrupt_requested', False)
+            remote.setdefault('launch_mode', remote_launch_mode)
+    return changed
+
+
+def worker_control_entry(
+    control_state: dict[str, Any],
+    worker_label: str,
+) -> dict[str, Any]:
+    workers = control_state.setdefault('workers', {})
+    entry = workers.get(worker_label)
+    if not isinstance(entry, dict):
+        entry = {
+            'paused': False,
+            'interrupt_requested': False,
+        }
+        workers[worker_label] = entry
+    entry.setdefault('paused', False)
+    entry.setdefault('interrupt_requested', False)
+    return entry
+
+
+def set_worker_pause(
+    control_state: dict[str, Any],
+    *,
+    worker_label: str,
+    paused: bool,
+    stop_active: bool = False,
+) -> dict[str, Any]:
+    entry = worker_control_entry(control_state, worker_label)
+    entry['paused'] = bool(paused)
+    if paused and stop_active:
+        entry['interrupt_requested'] = True
+    elif not paused:
+        entry['interrupt_requested'] = False
+    return entry
+
+
+def update_worker_pause_control(
+    dispatch_control_path: Path,
+    *,
+    local_label: str | None,
+    remote_label: str | None,
+    remote_launch_mode: str,
+    worker_label: str,
+    paused: bool,
+    stop_active: bool = False,
+) -> dict[str, Any]:
+    if dispatch_control_path.exists():
+        control_state = load_dispatch_control(dispatch_control_path)
+    else:
+        control_state = initialize_dispatch_control_state(
+            local_label=local_label,
+            remote_label=remote_label,
+            remote_launch_mode=remote_launch_mode,
+        )
+    ensure_control_state_workers(
+        control_state=control_state,
+        local_label=local_label,
+        remote_label=remote_label,
+        remote_launch_mode=remote_launch_mode,
+    )
+    entry = set_worker_pause(
+        control_state,
+        worker_label=worker_label,
+        paused=paused,
+        stop_active=stop_active,
+    )
+    write_dispatch_control(dispatch_control_path, control_state)
+    return entry
+
+
+def reset_running_tasks_for_resume(dispatch_state: dict[str, Any]) -> None:
+    for stage_key in ('seed1', 'seed2'):
+        stage_state = dispatch_state.get(stage_key)
+        if not isinstance(stage_state, dict):
+            continue
+        for task in stage_state.get('tasks', {}).values():
+            if str(task.get('status')) != 'running':
+                continue
+            task['status'] = 'pending'
+            for key in (
+                'started_at',
+                'worker_label',
+                'local_result_path',
+                'remote_result_path',
+                'log_path',
+            ):
+                task.pop(key, None)
+
+
+def find_next_pending_task(
+    stage_state: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    pending = sorted(
+        (
+            (task_id, task)
+            for task_id, task in stage_state.get('tasks', {}).items()
+            if str(task.get('status', 'pending')) == 'pending'
+        ),
+        key=lambda item: item[0],
+    )
+    return pending[0] if pending else None
+
+
+def stage_all_tasks_completed(stage_state: dict[str, Any]) -> bool:
+    tasks = list(stage_state.get('tasks', {}).values())
+    return bool(tasks) and all(
+        str(task.get('status')) == 'completed'
+        for task in tasks
+    )
+
+
+def stage_any_task_failed(stage_state: dict[str, Any]) -> bool:
+    return any(
+        str(task.get('status')) == 'failed'
+        for task in stage_state.get('tasks', {}).values()
+    )
+
+
+def reset_task_after_operator_interrupt(
+    task_state: dict[str, Any],
+    *,
+    note: str,
+) -> None:
+    task_state['status'] = 'pending'
+    task_state['attempts'] = max(0, int(task_state.get('attempts', 0)) - 1)
+    task_state['error'] = note
+    task_state['interrupted_at'] = _timestamp()
+    for key in (
+        'finished_at',
+        'started_at',
+        'worker_label',
+        'local_result_path',
+        'remote_result_path',
+        'log_path',
+        'pid',
+    ):
+        task_state.pop(key, None)
+
+
+def build_workers(
+    *,
+    enable_remote: bool,
+    enable_local: bool = True,
+    local_python: str,
+    local_label: str,
+    remote_host: str,
+    remote_repo: str,
+    remote_python: str,
+    remote_label: str,
+    ssh_key: str | None,
+) -> list[WorkerSpec]:
+    workers = []
+    if enable_local:
+        workers.append(
+            WorkerSpec(
+                kind='local',
+                label=local_label,
+                python=local_python,
+            )
+        )
+    if enable_remote:
+        workers.append(
+            WorkerSpec(
+                kind='remote',
+                label=remote_label,
+                python=remote_python,
+                host=remote_host,
+                repo=remote_repo,
+                ssh_key=ssh_key,
+            )
+        )
+    if not workers:
+        raise ValueError('at least one dispatch worker must be enabled')
+    return workers
+
+
+def build_remote_python_command(
+    *,
+    worker: WorkerSpec,
+    script_path: Path,
+    remote_result_path: Path,
+    command_args: list[str],
+) -> list[str]:
+    repo_root = REPO_ROOT
+    try:
+        relative_script = script_path.relative_to(repo_root)
+    except ValueError:
+        relative_script = Path(script_path.name)
+    remote_script = Path(worker.repo or str(repo_root)) / relative_script
+    quoted_args = ' '.join(quote_ps(str(arg)) for arg in command_args)
+    remote_repo = str(worker.repo or repo_root)
+    ps_command = (
+        f"Set-Location {quote_ps(remote_repo)}; "
+        f"$env:PYTHONPATH = {quote_ps(remote_repo)} + [System.IO.Path]::PathSeparator + [string]$env:PYTHONPATH; "
+        f"& {quote_ps(worker.python or sys.executable)} "
+        f"{quote_ps(str(remote_script))} "
+        f"{quoted_args} "
+        f"--result-json {quote_ps(str(remote_result_path))}"
+    )
+    command = ['ssh']
+    if worker.ssh_key:
+        command.extend(['-i', worker.ssh_key])
+    command.append(worker.host or DEFAULT_REMOTE_HOST)
+    command.extend(remote_powershell_command_args(ps_command))
+    return command
+
+
+def module_name_from_script_path(script_path: Path) -> str:
+    try:
+        relative = script_path.resolve().relative_to(REPO_ROOT)
+    except ValueError as exc:
+        raise ValueError(f'script path {script_path} is outside repo root {REPO_ROOT}') from exc
+    return '.'.join(relative.with_suffix('').parts)
+
+
+def launch_json_task(
+    worker: WorkerSpec,
+    *,
+    task_state: dict[str, Any],
+    script_path: Path,
+    spec: JsonTaskLaunchSpec,
+) -> ActiveTask:
+    spec.local_result_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.log_path.parent.mkdir(parents=True, exist_ok=True)
+    if worker.kind == 'local':
+        command = [
+            worker.python or sys.executable,
+            '-m',
+            module_name_from_script_path(script_path),
+            *spec.command_args,
+            '--result-json',
+            str(spec.local_result_path),
+        ]
+    elif worker.kind == 'remote':
+        if spec.remote_result_path is None:
+            raise ValueError('remote worker requires remote_result_path')
+        command = build_remote_python_command(
+            worker=worker,
+            script_path=script_path,
+            remote_result_path=spec.remote_result_path,
+            command_args=spec.command_args,
+        )
+    else:
+        raise ValueError(f'unknown worker kind `{worker.kind}`')
+    log_handle = spec.log_path.open('w', encoding='utf-8', newline='\n')
+    process = subprocess.Popen(
+        command,
+        cwd=str(spec.cwd),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_handle.close()
+    task_state['status'] = 'running'
+    task_state['attempts'] = int(task_state.get('attempts', 0)) + 1
+    task_state['worker_label'] = worker.label
+    task_state['local_result_path'] = str(spec.local_result_path)
+    task_state['log_path'] = str(spec.log_path)
+    if spec.remote_result_path is not None:
+        task_state['remote_result_path'] = str(spec.remote_result_path)
+    if worker.kind == 'local':
+        task_state['pid'] = process.pid
+    return ActiveTask(
+        worker=worker,
+        stage_name=spec.stage_name,
+        task_id=spec.task_id,
+        task_state=task_state,
+        process=process,
+        log_path=spec.log_path,
+        local_result_path=spec.local_result_path,
+        remote_result_path=spec.remote_result_path,
+    )
+
+
+def fetch_remote_result(worker: WorkerSpec, remote_result_path: str | Path, local_result_path: Path) -> None:
+    local_result_path.parent.mkdir(parents=True, exist_ok=True)
+    command = ['scp']
+    if worker.ssh_key:
+        command.extend(['-i', worker.ssh_key])
+    command.extend(
+        [
+            f'{worker.host}:{path_to_scp_remote(remote_result_path)}',
+            str(local_result_path),
+        ]
+    )
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f'scp failed: {completed.stdout.strip()}')
+
+
+def mark_task_failed(task_state: dict[str, Any], message: str, *, max_attempts: int, finished_at: str) -> None:
+    if int(task_state.get('attempts', 0)) < max_attempts:
+        task_state['status'] = 'pending'
+    else:
+        task_state['status'] = 'failed'
+    task_state['error'] = message
+    task_state['finished_at'] = finished_at
+
+
+def handle_finished_json_task(
+    *,
+    active: ActiveTask,
+    max_attempts: int,
+    finished_at: str,
+    validate_result: Callable[[Path], Any],
+) -> None:
+    task_state = active.task_state
+    return_code = active.process.returncode
+    if return_code != 0:
+        mark_task_failed(
+            task_state,
+            f'worker `{active.worker.label}` exited with code {return_code}; see {active.log_path}',
+            max_attempts=max_attempts,
+            finished_at=finished_at,
+        )
+        return
+    local_result_path = active.local_result_path
+    try:
+        if active.worker.kind == 'remote':
+            if active.remote_result_path is None:
+                raise ValueError('remote active task requires remote_result_path')
+            fetch_remote_result(active.worker, active.remote_result_path, local_result_path)
+        if not local_result_path.exists():
+            mark_task_failed(
+                task_state,
+                f'missing task result json at {local_result_path}',
+                max_attempts=max_attempts,
+                finished_at=finished_at,
+            )
+            return
+        validate_result(local_result_path)
+    except Exception as exc:
+        if local_result_path.exists():
+            try:
+                local_result_path.unlink()
+            except OSError:
+                pass
+        mark_task_failed(
+            task_state,
+            f'worker `{active.worker.label}` result handling failed: {exc}',
+            max_attempts=max_attempts,
+            finished_at=finished_at,
+        )
+        return
+    task_state['status'] = 'completed'
+    task_state['finished_at'] = finished_at
+    task_state.pop('error', None)

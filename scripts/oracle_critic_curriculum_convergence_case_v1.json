@@ -1,0 +1,34 @@
+[
+  {
+    "name": "sf_lr200_wd000",
+    "family": "schedule_free_adamw",
+    "optimizer": {
+      "type": "schedule_free_adamw",
+      "lr": 0.0002,
+      "warmup_steps": 2000,
+      "betas": [0.9, 0.999],
+      "r": 0.0,
+      "weight_lr_power": 2.0,
+      "foreach": true
+    },
+    "scheduler": {
+      "type": "optimizer"
+    },
+    "pretrain": {
+      "oracle_tower_init": "visible_transfer",
+      "oracle_first_conv_init": "hand_aligned",
+      "convergence": {
+        "enabled": true,
+        "core_optimizer_steps": 2500000,
+        "tail_lr_levels": [0.0001, 0.00005, 0.000025, 0.00001],
+        "smoothing_checks": 5,
+        "improvement_delta": 0.0002,
+        "reduce_patience_steps": 160000,
+        "stop_patience_steps": 240000,
+        "min_level_steps": 80000,
+        "metric": "primary_loss"
+      }
+    },
+    "weight_decay": 0.0
+  }
+]
