@@ -11,6 +11,7 @@
 | [冻结 actor 的 critic pilot · 2026-09-30](frozen-actor-critic-probe-2026-09-30.md) | 不更新权重的 fixed-imputed 同轨迹诊断，复用三个已存 critic |
 | [存量权重与评测复用 · 2026-09-30](weight-reuse-2026-09-30.md) | 双机权重库存、可直接复用的评测、保存的早期分支与避免重复计算 |
 | [独立 critic-only 校准阶段](critic-only-calibration.md) | 固定 actor 状态、精确成功更新预算与重新生成 GAE 的阶段切换 |
+| [真实 critic-only 两更新工程检查](critic-only-update-check.md) | 复用注册八局、真实 train() 两次成功更新、actor 不变与 checkpoint 验证；不产生研究候选 |
 | [2026-09-30 至 10-08 研究窗口](research-window-2026-09-30.md) | 云端统一开发、两机分工、指标复议、分阶段实验与截止管理 |
 | [源码同步与研究边界 · 2026-09-30](source-sync-2026-09-30.md) | 精简证据、当前代码语义、旧评测门槛待复议和源码传输范围 |
 | [SL 独立正式确认完整结果 · 2026-09-12](sl-formal-confirmation-result-2026-09-12.md) | C50k对三家canonical的独立64k确认通过、两臂全原始验收与冻结配对复核；未自动发布 |
