@@ -246,6 +246,8 @@ class OrderedRotatingGameDataset(RotatingGameDataset):
                         if prepared['source_sha256'] != digest or draw.get('source_sha256', digest) != digest:
                             raise ValueError('prepared input changed before consumption')
                         draw['source_sha256'] = digest
+                if self.content_ledger is not None:
+                    self.content_ledger.verify(self.current['draws'])
                 game_ids = []
                 for draw, count in zip(block.draws, block.counts):
                     game_id = stable_source_game_id(draw['file'])

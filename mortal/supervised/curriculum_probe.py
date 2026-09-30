@@ -118,11 +118,12 @@ class RotatingGameDataset(IterableDataset):
     Resume reparses at most this block, then skips already consumed rows.
     """
     def __init__(self, domains, recipe, seed, loader_kwargs, *, sample_loader=None,
-                 prepare_file_batch_size=1):
+                 prepare_file_batch_size=1, content_ledger=None):
         super().__init__()
         self.sampler = RotatingGameSampler(domains, recipe, seed)
         self.loader_kwargs = dict(loader_kwargs)
         self.sample_loader = sample_loader
+        self.content_ledger = content_ledger
         if prepare_file_batch_size not in (1, 2, 4):
             raise ValueError('probe preparation must stay within its four-draw block')
         self.prepare_file_batch_size = prepare_file_batch_size
@@ -187,6 +188,11 @@ class RotatingGameDataset(IterableDataset):
                 samples.extend((game_id, sample) for sample in game_samples)
                 del game_samples
             del prepared
+            if self.content_ledger is not None:
+                for draw in self.current['draws']:
+                    if file_sha256(draw['file']) != draw['source_sha256']:
+                        raise ValueError('training input changed during preparation')
+                self.content_ledger.verify(self.current['draws'])
             order = np.random.default_rng(derived_seed(
                 self.sampler.seed, 'rows', self.current['draws'][0]['draw'],
             )).permutation(len(samples))
@@ -280,7 +286,8 @@ def learned_state_digest(state):
 
 
 class CurriculumProbe:
-    def __init__(self, config, domains, *, recipe, seed, output, horizons, eval_splits, identity):
+    def __init__(self, config, domains, *, recipe, seed, output, horizons, eval_splits, identity,
+                 reset_branch_rng=False):
         self.config = config
         self.domains = domains
         self.recipe = recipe
@@ -305,12 +312,19 @@ class CurriculumProbe:
         self.observed = []
         self.started = time.monotonic()
         self.elapsed_before = 0.0
+        self.reset_branch_rng = reset_branch_rng
 
     def restore(self, state):
         saved = state.get('curriculum_probe')
         if saved is None:
             if state['optimizer_steps'] != 0:
                 raise ValueError('a nonzero probe resume needs its consumed-data cursor')
+            if self.reset_branch_rng:
+                random.seed(self.seed)
+                np.random.seed(self.seed)
+                torch.manual_seed(self.seed)
+                if torch.cuda.is_initialized():
+                    torch.cuda.manual_seed_all(self.seed)
             return
         if saved['identity'] != self.identity:
             raise ValueError('probe contract changed during resume')
@@ -323,11 +337,15 @@ class CurriculumProbe:
         if self.dataset is None:
             sl = self.config['supervised']
             dataset_class, preparation = RotatingGameDataset, {}
+            if sl.get('probe_training_content_ledger'):
+                from mortal.supervised.early_transition import TrainingContentLedger
+                preparation['content_ledger'] = TrainingContentLedger(
+                    sl['probe_training_content_ledger'], sl['run_provenance']['experiment_id'])
             if sl.get('probe_prepare_workers', 0):
                 from mortal.supervised.ordered_preparation import OrderedRotatingGameDataset
                 dataset_class = OrderedRotatingGameDataset
-                preparation = {'prepare_workers': sl['probe_prepare_workers'],
-                               'prepare_rayon_threads': sl.get('prepare_rayon_threads', 4)}
+                preparation.update(prepare_workers=sl['probe_prepare_workers'],
+                                   prepare_rayon_threads=sl.get('prepare_rayon_threads', 4))
             self.dataset = dataset_class(
                 self.domains, RECIPES[self.recipe], self.seed, loader_kwargs,
                 prepare_file_batch_size=sl.get('probe_prepare_file_batch_size', 1), **preparation,

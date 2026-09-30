@@ -99,7 +99,7 @@ class SearchDistillConfig:
         return cls(
             enabled=bool(cfg.get("enabled", False)),
             weight=float(cfg.get("weight", 0.05) or 0.05),
-            hard_only=_as_bool(cfg.get("hard_only", True), True),
+            hard_only=_as_bool(cfg.get("hard_only", True), default=True),
             min_teacher_gap=float(cfg.get("min_teacher_gap", 0.03) or 0.03),
         )
 

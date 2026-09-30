@@ -2564,6 +2564,9 @@ def train(
         )
         validate_exact_resume_auxiliary_recipe(state, config, config_section=cfg_prefix)
         validate_exact_resume_heads(state)
+        if run_provenance.get('branch_mode') == 'preserve_adam_declared_phase_lr':
+            from mortal.supervised.early_transition import validate_optimizer_mapping
+            validate_optimizer_mapping(state['optimizer_param_groups'], optimizer_param_groups)
         load_optional_head_states(state)
         optimizer_loaded = load_optimizer_state_compat(
             state.get('optimizer'),
