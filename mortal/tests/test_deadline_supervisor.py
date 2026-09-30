@@ -193,6 +193,35 @@ class DeadlineSupervisorTests(unittest.TestCase):
         self.assertEqual(self.manifest()['role_results']['role0']['returncode'], 87)
         self.assertTrue(self.manifest()['graceful_exit'])
 
+    def test_progress_write_failure_does_not_end_work_or_extend_deadline(self):
+        helper = ROOT / 'scripts/controller_progress.py'
+        saved = self.root / 'saved_progress_count'
+        code = '\n'.join([
+            'import importlib.util,os,pathlib,time',
+            f'spec=importlib.util.spec_from_file_location("progress", {str(helper)!r})',
+            'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)',
+            'progress=module.ProgressJournal("observer.jsonl")',
+            'original=pathlib.Path.open',
+            'def denied(path, *args, **kwargs):',
+            '    if path.name == "observer.jsonl": raise PermissionError("observer conflict")',
+            '    return original(path, *args, **kwargs)',
+            'pathlib.Path.open=denied',
+            'stop=pathlib.Path(os.environ["MORTAL_STOP_FILE"])',
+            'while not stop.exists():',
+            '    progress.publish({"status":"running"}); time.sleep(.02)',
+            f'pathlib.Path({str(saved)!r}).write_text(str(progress.failures))',
+            'raise SystemExit(75)',
+        ])
+        started = time.monotonic()
+        result = self.run_spec(self.spec([code], seconds=2, grace=.6))
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(self.manifest()['status'], 'deadline')
+        self.assertTrue(self.manifest()['graceful_exit'])
+        self.assertGreater(int(saved.read_text()), 1)
+        stderr = (self.output / 'role0.stderr.log').read_text()
+        self.assertEqual(stderr.count('workload continues'), 1)
+
     def test_noncooperative_deadline_preserves_unrelated_process(self):
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
         self.addCleanup(lambda: (unrelated.kill(), unrelated.wait()) if unrelated.poll() is None else None)
