@@ -32,7 +32,7 @@ Get-Process python, pythonw -ErrorAction SilentlyContinue | Select-Object Id, Pa
 
 ## 源码同步与 runner
 
-笔记本所需修复先在台式机完成并提交，再通过 Git 同步到目标 checkout。项目脚本、测试和配置模板也走同一路径；不在笔记本编辑、打补丁或复制未提交源码搭建 overlay。运行配置、日志、构建和进程管理可在远端直接进行。
+2026-09-30 起按用户要求，本轮源码修复统一在云端完成并提交，再通过 Git 同步到台式机与笔记本的独立 checkout。项目脚本、测试和配置模板也走同一路径；两台 runner 均不编辑、打补丁或复制未提交源码搭建 overlay。机器专属运行配置、日志、构建和进程管理可在对应运行端进行。私有 Git bundle 可用于有界提交传输；不得向公开远端发布此前未公开代码或实验材料。
 
 [sync_laptop_repo.ps1](../../scripts/sync_laptop_repo.ps1) 的两个动作不同：
 

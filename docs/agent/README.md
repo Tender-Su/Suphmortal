@@ -8,6 +8,7 @@
 | SL 训练、selector、发布 | [SL 状态](../status/supervised-mainline.md) |
 | Oracle critic 训练、验证、接入 | [Oracle 状态](../status/oracle-critic-mainline.md) |
 | PPO、replay、value / GAE | [RL 状态](../status/online-rl-mainline.md) |
+| 本轮研究截止与进程管理 | [截止监督器](deadline-supervisor.md) + [研究窗口](../research/research-window-2026-09-30.md) |
 | 启动或评测 | [运行流程](workflows.md) + [机器与资源](../status/machine-benchmarks.md) |
 | 笔记本、同步或恢复 | [远程流程](remote-ops.md) |
 | 修改或重构代码 | [代码地图](code-map.md) + [验证要求](code-health.md) |

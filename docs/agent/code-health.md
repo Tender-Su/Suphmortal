@@ -18,7 +18,7 @@
 DataLoader spawn、supervisor 恢复和阶段切换可能重新导入代码。修改前核对进程、supervisor 和 source fingerprint：
 
 1. 保持活跃进程及恢复链路可能读取的源码、配置和原生扩展不变。
-2. 在本地台式机的独立源码快照 / runtime overlay 中修复；笔记本所需代码通过 Git 同步到独立 checkout 后验证，在安全 checkpoint 后以新指纹切换。源码修改边界见 [AGENTS.md](../../AGENTS.md#双机与提交)。
+2. 按 2026-09-30 用户更新，在云端 Git 工作副本修复、测试并提交；台式机和笔记本均通过 Git 同步到独立 checkout 后验证，在安全 checkpoint 后以新指纹切换。源码修改边界见 [AGENTS.md](../../AGENTS.md#双机与提交)。
 3. 不改旧 manifest 来伪装源码一致，不覆盖正在使用的 checkpoint。
 4. exact resume 需要 checkpoint 内部 step、optimizer、scaler、scheduler 和 data cursor；缺失时明确标记分支或重启。
 

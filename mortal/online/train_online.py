@@ -8,6 +8,9 @@ from mortal.eval.oracle_experiments import (
     apply_oracle_input_mode,
     normalize_oracle_input_mode,
 )
+from mortal.core.artifacts import atomic_torch_save
+from mortal.core.training_stop import ONLINE_STOP_REQUEST_EXIT_CODE, training_stop_requested
+from mortal.core.update_clock import OptimizerUpdateClock, observed_scaler_step
 from mortal.core.turn_weighting import compute_turn_bucket_weights, resolve_turn_weighting_cfg
 from mortal.online.policy_objective import (
     ACTOR_OBJECTIVE_VERSION, actor_surrogate, behavior_version_is_usable,
@@ -2097,7 +2100,7 @@ def train():
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': no_decay_params},
         ]
-    optimizer = optim.AdamW(param_groups, lr=1, weight_decay=0, betas=betas, eps=eps)
+    optimizer = optim.AdamW(param_groups, lr=1, weight_decay=0, betas=betas, eps=eps, fused=False)
     scheduler = LinearWarmUpCosineAnnealingLR(optimizer, **config['optim']['scheduler'])
     apply_independent_actor_lr_clock(optimizer, scheduler, config, steps=0)
     scaler = GradScaler(device.type, enabled=enable_amp)
@@ -2108,7 +2111,7 @@ def train():
     }
 
     steps = 0
-    optimizer_steps = 0
+    update_clock = OptimizerUpdateClock()
     state_file = config['control']['state_file']
     init_state_file = resolve_online_init_state_file(config)
     oracle_critic_init_state_file = (
@@ -2211,11 +2214,8 @@ def train():
             scaler.load_state_dict(state['scaler'])
             best_perf = state['best_perf']
             steps = state['steps']
-            optimizer_steps = int(
-                state.get(
-                    'optimizer_steps',
-                    (int(steps) + max(int(opt_step_every), 1) - 1) // max(int(opt_step_every), 1),
-                )
+            update_clock = OptimizerUpdateClock.from_checkpoint(
+                state, opt_step_every=opt_step_every,
             )
             if 'dynamic_entropy_weight' in state:
                 dynamic_entropy_weight = state['dynamic_entropy_weight']
@@ -2232,19 +2232,16 @@ def train():
         else:
             if state_file_model_signature_matches and 'steps' in state:
                 steps = int(state.get('steps', 0) or 0)
-                optimizer_steps = int(
-                    state.get(
-                        'optimizer_steps',
-                        (int(steps) + max(int(opt_step_every), 1) - 1) // max(int(opt_step_every), 1),
-                    )
+                update_clock = OptimizerUpdateClock.from_checkpoint(
+                    state, opt_step_every=opt_step_every, weights_only=True,
                 )
             logging.info(
                 'initialized training from checkpoint weights only; '
                 'optimizer/scheduler/scaler/best_perf were reset; '
-                'steps=%s optimizer_steps=%s '
+                'steps=%s optimizer_progress=%s '
                 '(brain bridge loaded=%s skipped=%s)',
                 steps,
-                optimizer_steps,
+                update_clock.progress,
                 len(bridge_info['loaded_keys']),
                 len(bridge_info['skipped_keys']),
             )
@@ -2327,6 +2324,7 @@ def train():
                 init_metadata,
             )
 
+    logging.info('optimizer update clock (exact counts exclude legacy/inherited offsets): %s', update_clock.state_dict())
     apply_independent_actor_lr_clock(optimizer, scheduler, config, steps=steps)
     effective_aux_training_cfg = resolve_effective_online_aux_training_cfg(
         config,
@@ -2640,9 +2638,9 @@ def train():
             )
             ensure_parent_dir_for_file(best_state_file)
             if actor_oracle_enabled:
-                torch.save(build_zero_oracle_export_state(state), best_state_file)
+                atomic_torch_save(build_zero_oracle_export_state(state), best_state_file)
             else:
-                torch.save(state, best_state_file)
+                atomic_torch_save(state, best_state_file)
         return stat
 
     def build_live_training_state(reward_target_metadata_dict=None):
@@ -2662,7 +2660,9 @@ def train():
             'scheduler': scheduler.state_dict(),
             'scaler': scaler.state_dict(),
             'steps': steps,
-            'optimizer_steps': optimizer_steps,
+            # Compatibility progress includes legacy/inherited offsets, if any.
+            'optimizer_steps': update_clock.progress,
+            'optimizer_update_clock': update_clock.state_dict(),
             'timestamp': datetime.now().timestamp(),
             'best_perf': best_perf,
             'config': config,
@@ -2679,8 +2679,21 @@ def train():
             reward_target_metadata_dict=reward_target_metadata_dict,
         )
         ensure_parent_dir_for_file(state_file)
-        torch.save(state, state_file)
+        atomic_torch_save(state, state_file)
         return state
+
+    def stop_after_checkpoint_if_requested():
+        if training_stop_requested():
+            persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
+            writer.flush()
+            logging.info(
+                'supervisor stop requested; saved latest checkpoint at microbatch=%s '
+                '(optimizer boundary; replay cursor/old-policy snapshot are not persisted)',
+                steps,
+            )
+            sys.exit(ONLINE_STOP_REQUEST_EXIT_CODE)
+
+    stop_after_checkpoint_if_requested()
 
     if online and steps == 0 and test_play_eval_enabled and initial_test_eval_enabled:
         logging.info(
@@ -3217,7 +3230,6 @@ def train():
             nonlocal stats
             nonlocal Old_mortal
             nonlocal Old_policy_net
-            nonlocal optimizer_steps
             nonlocal dynamic_entropy_weight
             nonlocal log_entropy_alpha
 
@@ -3701,7 +3713,7 @@ def train():
                     )
                     if effective_aux_training_cfg['danger_ramp_steps'] > 0:
                         danger_ramp = min(
-                            float(optimizer_steps) / max(float(effective_aux_training_cfg['danger_ramp_steps']), 1.0),
+                            float(update_clock.progress) / max(float(effective_aux_training_cfg['danger_ramp_steps']), 1.0),
                             1.0,
                         )
                     else:
@@ -3908,10 +3920,10 @@ def train():
                     scaler.unscale_(optimizer)
                     params = chain.from_iterable(g['params'] for g in optimizer.param_groups)
                     clip_grad_norm_(params, max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                observed_scaler_step(scaler, optimizer, update_clock)
                 optimizer.zero_grad(set_to_none=True)
-                optimizer_steps += 1
+            # Deliberately preserve existing microbatch-based LR/phase clocks.
+            # Migrating schedules to successful updates needs separate calibration.
             scheduler.step()
             apply_independent_actor_lr_clock(
                 optimizer,
@@ -3931,6 +3943,10 @@ def train():
                     param_group['lr'] = base_lr * actor_oracle_lr_scale
             pb.update(1)
 
+            if idx % opt_step_every == 0:
+                # Check before network publication/evaluation can block shutdown.
+                stop_after_checkpoint_if_requested()
+
             if old_policy_update_due(steps, old_update_every):
                 refresh_old_policy_snapshot(Old_mortal, Old_policy_net, mortal, policy_net)
 
@@ -3941,6 +3957,10 @@ def train():
             if steps % save_every == 0:
                 pb.close()
                 aux_metrics = finalize_online_aux_monitor_stats(stats['aux_monitor'])
+                for name in ('attempts', 'successes', 'skips', 'legacy_attempt_offset', 'inherited_progress_offset'):
+                    writer.add_scalar(f'optimizer_clock/{name}', getattr(update_clock, name), steps)
+                writer.add_scalar('optimizer_clock/progress', update_clock.progress, steps)
+                logging.info('optimizer update clock: %s', update_clock.state_dict())
 
                 writer.add_scalar('important_ratio/ratio', stats['important_ratio'] / save_every, steps)
                 writer.add_scalar('policy_drift/approx_kl', stats['approx_kl'] / save_every, steps)
@@ -4208,6 +4228,8 @@ def main():
         **os.environ.copy(),
     }
     while True:
+        if training_stop_requested():
+            return
         child = Popen(
             cmd,
             stdin = sys.stdin,
@@ -4216,7 +4238,9 @@ def main():
             env = env,
         )
         code = child.wait()
-        if code == ONLINE_MAX_STEPS_EXIT_CODE:
+        if code in (ONLINE_MAX_STEPS_EXIT_CODE, ONLINE_STOP_REQUEST_EXIT_CODE):
+            return
+        if training_stop_requested():
             return
         if code != 0:
             sys.exit(code)

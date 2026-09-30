@@ -37,11 +37,12 @@
 - RL 启动权重优先级：`[control].state_file` → `[online].init_state_file` → `[supervised].best_loss_state_file` → `[supervised].best_state_file`。
 - `1v3` challenger 使用 `[1v3.challenger].state_file`；训练默认关闭 `search`，推理增强单独 A/B。
 - Oracle critic 保留 `all_players` 与真实 outcome / `score_rank` / return-to-go 标签；不为方便改成 GRP 伪标签或缩窄输出。
-- 选择遵守预声明主指标和全部 guardrail；平局未决，不默认选择更大权重，不按已实现的结果幅度加权样本。offline finalist 决策前不打开 sealed test。
+- 每轮选择依据该轮预声明目标和判据；旧实验的 guardrail 仅用于解释旧结论，不自动成为新研究不可变的要求。用户明确要求重新验证指标与实际牌力的关系；MAE 及按事后回报分组的误差不能未经论证一票否决条件均值预测器。保留历史结果，不事后改门槛宣布旧实验成功。平局未决，不默认选择更大权重，不按已实现的结果幅度加权样本。offline finalist 决策前不打开 sealed test。
 
 ## 双机与提交
 
-- 源码只在本地台式机修改，`main` 工作树是源码真源；笔记本代码只能通过 Git 同步，禁止在笔记本直接修改源码。
+- 2026-09-30 用户更新：本轮研究的源码统一在云端工作副本修改、测试和提交；ModelKits（RTX 5070 Ti）与 ABANDON（RTX 4060 Laptop）仅通过 Git 同步到独立、固定 commit 的运行工作树，不在两台 runner 上直接编辑源码。保留既有用户改动及正在运行的旧版本。
+- 本轮算力授权截止为北京时间 2026-10-08 19:00（UTC 11:00）。所有本轮进程须有本机独立截止管理、明确归属及保存/停止余量；不得越过截止，不影响其他进程。
 - 远程操作与本机采用同等授权，不因 SSH 额外要求确认；操作参考[远程流程](docs/agent/remote-ops.md)。
 - 笔记本是独立 runner，默认不共享梯度、replay 或 checkpoint；同阶段双机运行的 run name、输出目录与 checkpoint 路径带机器区分。
 - 后续所有笔记本计算任务都须在避免 RAM / VRAM OOM、保持训练与评测语义的前提下，最大限度利用计算资源，提高持续有效吞吐。按[性能与容量验收](docs/agent/remote-ops.md#性能与容量验收)验证峰值、并存负载与安全余量；持续低利用率须定位并优化，不能仅凭进程存活或未 OOM 判定调优完成。
