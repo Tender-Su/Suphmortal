@@ -36,10 +36,14 @@ def fingerprint(payload):
     ).encode()).hexdigest()
 
 
-def validation_input_contract(file_list, *, settings, native_file):
+def validation_input_contract(file_list, *, settings, native_file, verified_file_sha256=None):
     # Hash actual validation bytes, not just a mutable index or filename list.
     # Preserve order: max_batches and state folds make it part of the input contract.
-    files = [{'name': str(Path(name).resolve()), 'sha256': sha256_file(name)}
+    # Current-policy manifests already hash every train/dev/test file at startup.
+    # Reuse only that process-local verified ledger, never a user-provided hash cache.
+    files = [{'name': str(Path(name).resolve()),
+              'sha256': (sha256_file(name) if verified_file_sha256 is None
+                         else verified_file_sha256[str(Path(name).resolve())])}
              for name in file_list]
     result = {'schema_version': 1, 'files': files, 'settings': settings,
               'native_sha256': sha256_file(native_file)}

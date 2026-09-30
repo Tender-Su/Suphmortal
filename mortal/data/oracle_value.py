@@ -278,6 +278,7 @@ class OracleTerminalValueDataset(IterableDataset):
         resume_cursors=None,
         emit_progress=False,
         emit_game_id=False,
+        game_id_by_source=None,
         state_fold_count=1,
         state_fold_seed=0,
         state_fold_backend='python_permutation',
@@ -309,6 +310,20 @@ class OracleTerminalValueDataset(IterableDataset):
         }
         self.emit_progress = bool(emit_progress)
         self.emit_game_id = bool(emit_game_id)
+        self.game_id_by_source = None if game_id_by_source is None else {
+            path.normcase(path.realpath(str(name))): int(group_id)
+            for name, group_id in game_id_by_source.items()
+        }
+        if self.game_id_by_source is not None:
+            if self.player_names != ['trainee'] or self.value_target_mode != 'all_players':
+                raise ValueError('seed-group datasets require trainee decisions with all_players targets')
+            if any(not 0 <= group_id < 2**63 for group_id in self.game_id_by_source.values()):
+                raise ValueError('manifest cluster IDs must fit int63')
+            for filename in self.file_list:
+                if path.normcase(path.realpath(str(filename))) not in self.game_id_by_source:
+                    raise ValueError(f'missing manifest group mapping for {filename}')
+        self.cluster_unit = ('full_seed_key_four_seat_group'
+                             if self.game_id_by_source is not None else 'source_game')
         if self.emit_progress and self.emit_game_id:
             raise ValueError('emit_progress and emit_game_id are mutually exclusive')
         self.state_fold_count = int(state_fold_count)
@@ -475,6 +490,7 @@ class OracleTerminalValueDataset(IterableDataset):
         progress_token=None,
         state_fold_index=0,
     ):
+        seen_sources = set()
         for source_name, gameplay_batch in iter_loaded_gameplay_batches(
             loader,
             file_list,
@@ -483,13 +499,24 @@ class OracleTerminalValueDataset(IterableDataset):
                 and not self.emit_game_id
             ),
         ):
-            game_id = np.int64(deterministic_game_id(source_name))
+            if self.game_id_by_source is None:
+                game_id = np.int64(deterministic_game_id(source_name))
+            else:
+                source_key = path.normcase(path.realpath(str(source_name)))
+                if source_key not in self.game_id_by_source:
+                    raise ValueError(f'missing manifest group mapping for {source_name}')
+                if source_key in seen_sources or len(gameplay_batch) != 1:
+                    raise ValueError(f'expected one complete trainee trajectory: {source_name}')
+                seen_sources.add(source_key)
+                game_id = np.int64(self.game_id_by_source[source_key])
             for game_index, game in enumerate(gameplay_batch):
                 obs = np.asarray(game.take_obs_batch(), dtype=np.float32)
                 invisible_obs = np.asarray(game.take_invisible_obs_batch(), dtype=np.float32)
                 at_kyoku = np.asarray(game.take_at_kyoku_batch(), dtype=np.int64)
                 game_size = int(obs.shape[0])
                 if game_size == 0:
+                    if self.game_id_by_source is not None:
+                        raise ValueError(f'empty trainee trajectory: {source_name}')
                     continue
                 if at_kyoku.shape != (game_size,):
                     raise ValueError(
@@ -550,3 +577,7 @@ class OracleTerminalValueDataset(IterableDataset):
                     )
                 else:
                     buffer.extend(rows)
+        if self.game_id_by_source is not None:
+            expected_sources = {path.normcase(path.realpath(str(name))) for name in file_list}
+            if seen_sources != expected_sources:
+                raise ValueError('native loader omitted registered current-policy games')

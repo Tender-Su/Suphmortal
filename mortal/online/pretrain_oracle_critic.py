@@ -47,6 +47,7 @@ from mortal.data.dataloader import (
     resolve_rayon_num_threads,
     worker_init_fn,
 )
+from mortal.data.current_policy_manifest import load_current_policy_manifest
 from mortal.data.oracle_value import (
     ORACLE_STATE_FOLDING_VERSION,
     ORACLE_IMPUTATION_VERSION,
@@ -105,6 +106,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Pretrain Oracle critic on non-GRP rank returns without actor imitation.'
     )
+    parser.add_argument('--current-policy-manifest', type=str, default=None)
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--val-every-steps', type=int, default=None)
     parser.add_argument('--dependency-val-every-steps', type=int, default=None)
@@ -274,7 +276,62 @@ def capped_split_count(total, *, ratio, minimum, maximum):
     return max(count, 0)
 
 
+def current_policy_data(cfg):
+    """Resolve and verify the opt-in fixed rollout ledger once at startup."""
+    manifest = cfg.get('current_policy_manifest')
+    if not manifest:
+        return None
+    cached = cfg.get('_current_policy_data')
+    if cached is not None:
+        return cached
+    required = {'target_mode': 'all_players', 'return_mode': 'score_rank_mc',
+                'discount_gamma': 1.0, 'exact_zero_sum': True,
+                'critic_arch': 'dual_tower', 'train_scope': 'all'}
+    for name, value in required.items():
+        if cfg.get(name) != value:
+            raise ValueError(f'current-policy calibration requires {name}={value!r}')
+    if config['env']['pts'] != [2, 1, 0, -3] or config['control']['version'] != 4:
+        raise ValueError('current-policy calibration requires v4 and pts=[2,1,0,-3]')
+    if cfg.get('player_names', ['trainee']) != ['trainee']:
+        raise ValueError('current-policy calibration requires player_names=["trainee"]')
+    if normalize_eval_input_modes(cfg.get('eval_input_modes', ['true'])) != ('true',):
+        raise ValueError('current-policy calibration uses only the existing true/imputed Oracle input')
+    cfg.setdefault('eval_input_modes', ['true'])
+    for name in ('max_train_files', 'max_val_files', 'max_test_files', 'val_batches', 'test_batches'):
+        if int(cfg.get(name, 0) or 0) != 0:
+            raise ValueError(f'current-policy calibration disallows {name} truncation')
+    # Explicitly override the legacy bounded-validation default, retaining all groups.
+    cfg.setdefault('val_batches', 0)
+    cfg.setdefault('test_batches', 0)
+    for name in ('train_file_index', 'dev_file_index', 'test_file_index', 'file_index', 'globs'):
+        if cfg.get(name):
+            raise ValueError('current_policy_manifest is the only file/split authority; remove ' + name)
+    if int(cfg.get('val_state_fold_count', 1) or 1) != 1:
+        raise ValueError('current-policy dev requires all trainee states')
+    if int(cfg.get('val_game_id_modulus', 1) or 1) != 1:
+        raise ValueError('select complete dev groups in the manifest, not evaluator subsets')
+    data = load_current_policy_manifest(manifest)
+    import libriichi
+    source_files = (
+        'mortal/online/pretrain_oracle_critic.py', 'mortal/data/oracle_value.py',
+        'mortal/data/dataloader.py', 'mortal/data/current_policy_manifest.py',
+        'mortal/core/model.py', 'mortal/core/checkpoint_utils.py', 'mortal/config.py',
+        'mortal/core/evidence_contract.py', 'mortal/core/adaptive_curriculum.py',
+        'mortal/core/oracle_checkpoint_selection.py',
+    )
+    data['contract']['training_runtime'] = {
+        'native_sha256': sha256_file(native_module_file(libriichi)),
+        'source_sha256': {name: sha256_file(REPO_ROOT / name) for name in source_files},
+        'torch_version': torch.__version__, 'numpy_version': np.__version__,
+    }
+    cfg['_current_policy_data'] = data
+    return data
+
+
 def build_file_splits(cfg):
+    policy_data = current_policy_data(cfg)
+    if policy_data is not None:
+        return tuple(list(policy_data['splits'][name]) for name in ('train', 'dev', 'test'))
     explicit_indexes = {
         split: str(cfg.get(f'{split}_file_index', '') or '').strip()
         for split in ('train', 'dev', 'test')
@@ -385,7 +442,7 @@ def summarize_file_splits(cfg, train_files, val_files, test_files):
 
 
 def data_stream_signature(cfg):
-    return {
+    signature = {
         'worker_sharding': ORACLE_STREAM_SHARDING_VERSION,
         'batch_size': int(cfg.get('batch_size', config['control'].get('batch_size', 512)) or 512),
         'num_workers': int(cfg.get('num_workers', config['dataset'].get('num_workers', 0)) or 0),
@@ -408,6 +465,10 @@ def data_stream_signature(cfg):
         ),
         'native_state_folding_version': ORACLE_STATE_FOLDING_VERSION,
     }
+    policy_data = current_policy_data(cfg)
+    if policy_data is not None:
+        signature['current_policy'] = copy.deepcopy(policy_data['contract'])
+    return signature
 
 
 def initial_data_progress(signature):
@@ -456,6 +517,7 @@ def validate_resume_data_stream(state, signature):
 
 def make_dataset(file_list, cfg, *, train, stream_state=None):
     stream_state = stream_state or {}
+    policy_data = current_policy_data(cfg)
     num_workers = int(
         cfg.get(
             'num_workers' if train else 'val_num_workers',
@@ -484,7 +546,7 @@ def make_dataset(file_list, cfg, *, train, stream_state=None):
             float(cfg.get('reserve_ratio', config['dataset'].get('reserve_ratio', 0.0)) or 0.0)
             if train else 0.0
         ),
-        player_names=None,
+        player_names=['trainee'] if policy_data is not None else None,
         excludes=None,
         num_epochs=int(cfg.get('num_epochs', config['dataset'].get('num_epochs', 1)) or 1),
         enable_augmentation=(
@@ -513,6 +575,7 @@ def make_dataset(file_list, cfg, *, train, stream_state=None):
         resume_cursors=stream_state.get('resume_cursors', {}),
         emit_progress=bool(train),
         emit_game_id=not train,
+        game_id_by_source=None if policy_data is None else policy_data['group_ids'],
         state_fold_count=int(
             cfg.get(
                 'state_fold_count' if train else 'val_state_fold_count',
@@ -582,8 +645,10 @@ def evaluation_files(file_list, cfg, *, game_id_modulus=1, game_id_remainders=()
         return file_list
     if len(remainders) == modulus:
         return file_list
+    policy_data = current_policy_data(cfg)
     selected = [filename for filename in file_list
-                if deterministic_game_id(filename) % modulus in remainders]
+                if (policy_data['group_ids'][path.realpath(filename)] if policy_data is not None
+                    else deterministic_game_id(filename)) % modulus in remainders]
     logging.info('evaluation file subset: %s/%s files before feature encoding',
                  len(selected), len(file_list))
     return selected
@@ -1933,13 +1998,20 @@ def evaluate_modes(
             )
     oracle_brain.train()
     value_net.train()
-    return {
-        mode: finalize_metrics(
-            parts,
-            include_cluster_records=include_cluster_records,
-        )
+    results = {
+        mode: finalize_metrics(parts, include_cluster_records=include_cluster_records)
         for mode, parts in parts_by_mode.items()
     }
+    if getattr(getattr(loader, 'dataset', None), 'cluster_unit', None) == 'full_seed_key_four_seat_group':
+        for metrics in results.values():
+            metrics['ci_cluster_unit'] = 'full_seed_key_four_seat_group'
+            metrics['ci_estimand'] = 'state_weighted_mean_with_seed_group_cluster_se'
+            # Keep legacy keys for controllers; name their changed unit explicitly.
+            metrics['num_seed_groups'] = metrics.get('num_games', 0)
+            metrics['num_games_key_unit'] = 'seed_groups'
+            metrics['seed_group_balanced_loss'] = metrics.get('game_balanced_loss')
+            metrics['seed_group_balanced_loss_se'] = metrics.get('game_balanced_loss_se')
+    return results
 
 
 def evaluate(
@@ -2265,6 +2337,9 @@ def training_contract(
     normalized_convergence = convergence_contract(convergence_config)
     if normalized_convergence is not None:
         contract['convergence'] = normalized_convergence
+    policy_data = current_policy_data(cfg)
+    if policy_data is not None:
+        contract['current_policy'] = copy.deepcopy(policy_data['contract'])
     normalized_adaptive = adaptive_curriculum_contract(adaptive_config)
     if normalized_adaptive is not None:
         contract['adaptive_curriculum'] = normalized_adaptive
@@ -2315,7 +2390,7 @@ def checkpoint_payload(
         **({'best_observed_primary_loss': float(best_observed_primary_loss)}
            if best_observed_primary_loss is not None else {}),
         'config': copy.deepcopy(config),
-        'oracle_critic_pretrain': dict(cfg),
+        'oracle_critic_pretrain': {key: value for key, value in cfg.items() if key != '_current_policy_data'},
         'init_info': init_info,
         'train_info': train_info_payload,
         'file_splits': copy.deepcopy(split_info),
@@ -2460,6 +2535,8 @@ def train():
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
+    if args.current_policy_manifest:
+        cfg['current_policy_manifest'] = resolve_cli_path(args.current_policy_manifest)
     if args.device:
         cfg['device'] = args.device
     if args.run_name:
@@ -2804,6 +2881,12 @@ def train():
     scheduler_horizon_steps = int(cfg.get('scheduler_horizon_steps', max_steps) or max_steps)
     convergence_config = resolve_convergence_config(cfg)
     adaptive_config = resolve_adaptive_curriculum_config(cfg)
+    if current_policy_data(cfg) is not None:
+        for name in ('max_steps', 'val_every_steps', 'save_every'):
+            if name not in cfg or int(cfg[name]) <= 0:
+                raise ValueError('current-policy training needs an explicit positive ' + name)
+        if adaptive_config is None or adaptive_config.selection_protocol != 'primary_with_diagnostics':
+            raise ValueError('current-policy calibration requires primary_with_diagnostics selection')
     primary_with_diagnostics = (adaptive_config is not None and
                                 adaptive_config.selection_protocol == 'primary_with_diagnostics')
     if primary_with_diagnostics:
@@ -2852,9 +2935,11 @@ def train():
         adaptive_config,
     )
     import libriichi
+    policy_data = current_policy_data(cfg)
     validation_contract = validation_input_contract(
         val_files,
         native_file=native_module_file(libriichi),
+        verified_file_sha256=None if policy_data is None else policy_data['file_sha256'],
         settings={
             'oracle_imputation_version': ORACLE_IMPUTATION_VERSION,
             'imputation_seed': int(cfg.get('val_oracle_imputation_seed', 20260905)),
@@ -2862,6 +2947,8 @@ def train():
             'target': {key: training_contract_info[key] for key in (
                 'return_mode', 'discount_gamma', 'centered_rank_points', 'target_mode',
             )},
+            **({'current_policy': training_contract_info['current_policy']}
+               if 'current_policy' in training_contract_info else {}),
             'validation_stream': {
                 key: value for key, value in cfg.items()
                 if key.startswith('val_') or key in {

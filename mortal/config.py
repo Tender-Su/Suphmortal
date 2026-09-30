@@ -17,6 +17,7 @@ PATH_KEYS = {
     'tensorboard_dir',
     'log_dir',
     'file_index',
+    'current_policy_manifest',
     'buffer_dir',
     'drain_dir',
     'dir',
