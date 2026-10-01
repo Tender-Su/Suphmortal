@@ -6,6 +6,7 @@
 
 | 报告 | 影响范围 |
 | --- | --- |
+| [SL 单主线连续 phase 扩展](sl-continuous-phase.md) | 单 checkpoint 完整状态迁移、同 phase 扩预算、latest/trend/full 解耦与显式封存 |
 | [SL early / late A→B→C 工程入口](sl-early-transition-runner.md) | 两臂共享 B/C、显式 phase LR 与预算、Adam/辅助时钟保留、独立新输出与验证边界 |
 | [Oracle primary-with-diagnostics 选择协议](oracle-primary-selection-protocol.md) | 显式 opt-in 的 paired primary 晋级、诊断与候选保存解耦、checkpoint 角色及恢复契约 |
 | [研究意图与恢复后的决策 · 2026-09-30](research-intent-2026-09-30.md) | Oracle/GRP/C-D-E 设计、成熟度、SL 可塑性问题、MSE 保存与诊断解耦及恢复边界 |

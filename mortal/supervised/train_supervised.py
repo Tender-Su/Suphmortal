@@ -699,6 +699,7 @@ def train(
     }
     action_group_names = tuple(action_group_specs.keys())
     num_action_groups = len(action_group_names)
+    action_group_ids = torch.arange(num_action_groups, dtype=torch.int64, device=device)
     action_to_group = torch.empty(ACTION_SPACE, dtype=torch.int64, device=device)
     for idx, (start, end) in enumerate(action_group_specs.values()):
         action_to_group[start:end] = idx
@@ -1478,12 +1479,14 @@ def train(
         )
         weights.mul_(compute_context_turn_weights(context_meta, rank_turn_weighting))
         if rank_aux_south_factor > 0 and rank_aux_south_factor != 1.0:
-            weights[context_meta[:, context_meta_specs['round_stage']] == 1] *= float(
-                rank_aux_south_factor
+            weights = torch.where(
+                context_meta[:, context_meta_specs['round_stage']] == 1,
+                weights * float(rank_aux_south_factor), weights,
             )
         if rank_aux_all_last_factor > 0 and rank_aux_all_last_factor != 1.0:
-            weights[context_meta[:, context_meta_specs['is_all_last']].to(torch.bool)] *= float(
-                rank_aux_all_last_factor
+            weights = torch.where(
+                context_meta[:, context_meta_specs['is_all_last']].to(torch.bool),
+                weights * float(rank_aux_all_last_factor), weights,
             )
         if rank_aux_gap_focus_points > 0 and rank_aux_gap_close_bonus > 0:
             nearest_gap = torch.minimum(
@@ -1797,8 +1800,11 @@ def train(
 
     def compute_action_group_stats(pred_actions, actions):
         group_indices = action_to_group[actions]
-        count = torch.bincount(group_indices, minlength=num_action_groups)
-        correct = torch.bincount(group_indices[pred_actions == actions], minlength=num_action_groups)
+        # Known fixed groups avoid CUDA bincount/nonzero shape discovery and its
+        # host synchronization. Counts remain exact int64, including empty groups.
+        membership = group_indices.unsqueeze(-1) == action_group_ids
+        count = membership.sum(dim=0, dtype=torch.int64)
+        correct = (membership & (pred_actions == actions).unsqueeze(-1)).sum(dim=0, dtype=torch.int64)
         return {
             'correct': correct,
             'count': count,
