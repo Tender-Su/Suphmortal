@@ -1,5 +1,6 @@
 """State-preserving phase extension and independently scheduled observations."""
 from copy import deepcopy
+from contextlib import closing
 import importlib.util
 import io
 from pathlib import Path
@@ -211,7 +212,7 @@ class ContinuationContracts(unittest.TestCase):
             receipt = ledger_snapshot(source, target, 'old', {'consumed'})
             self.assertEqual(receipt['pinned_games'], 2)
             self.assertEqual(file_sha256(source), before)
-            with sqlite3.connect(source) as left, sqlite3.connect(target) as right:
+            with closing(sqlite3.connect(source)) as left, closing(sqlite3.connect(target)) as right:
                 self.assertEqual(left.execute('SELECT * FROM games ORDER BY path').fetchall(),
                                  right.execute('SELECT * FROM games ORDER BY path').fetchall())
             with self.assertRaises(FileExistsError):
@@ -244,14 +245,14 @@ class ContinuationContracts(unittest.TestCase):
             ledger = TrainingContentLedger(inherited, 'old', create=True)
             ledger.verify([{'file': 'game', 'source_sha256': 'a' * 64}])
             shutil.copy2(inherited, live)
-            with sqlite3.connect(live) as db:
+            with closing(sqlite3.connect(live)) as db, db:
                 db.execute('UPDATE metadata SET identity=?', ('new',))
             validate_inherited_pins(inherited, live, 'new', ['game'])
-            with sqlite3.connect(live) as db:
+            with closing(sqlite3.connect(live)) as db, db:
                 db.execute('UPDATE games SET sha256=? WHERE path=?', ('b' * 64, 'game'))
             with self.assertRaisesRegex(ValueError, 'lost or changed'):
                 validate_inherited_pins(inherited, live, 'new')
-            with sqlite3.connect(live) as db:
+            with closing(sqlite3.connect(live)) as db, db:
                 db.execute('DELETE FROM games')
             with self.assertRaisesRegex(ValueError, 'lost or changed'):
                 validate_inherited_pins(inherited, live, 'new')
@@ -473,7 +474,7 @@ class ContinuationTorchTests(unittest.TestCase):
                 self.assertIn('declared microbatch numerical branch', actual_manifest['resume_scope'])
             self.assertEqual(before, {path: file_sha256(path) for path in before})
             self.assertEqual(actual_manifest['gpu_memory_fraction'], 0.5)
-            with sqlite3.connect(target / 'training_content.sqlite3') as db:
+            with closing(sqlite3.connect(target / 'training_content.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT identity FROM metadata').fetchone()[0], actual_manifest['identity'])
                 self.assertEqual(db.execute('SELECT count(*) FROM games').fetchone()[0], 1)
 
