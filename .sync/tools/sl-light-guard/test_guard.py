@@ -13,6 +13,11 @@ class GuardTests(unittest.TestCase):
   loop=next(n for n in ast.walk(main) if isinstance(n,ast.For) and isinstance(n.target,ast.Name) and n.target.id=='iteration')
   self.assertFalse(any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='audit' for n in ast.walk(loop)))
   self.assertEqual(sum(isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='audit' for n in ast.walk(main)),1)
+ def test_budget_and_counters_are_not_b7000_specific(self):
+  s=P.read_text()
+  for obsolete in ('update-5000','skipped-2','delta<=2000','range(1200)','max(0,7000-update)'):
+   self.assertNotIn(obsolete,s)
+  self.assertIn("bounds['target_update']",s)
  def test_seal_contract(self):
   s=P.read_text();self.assertIn("'sealed.json' if bounds.get('validation_only')",s)
   self.assertIn("delta==bounds['maximum_new_successful_updates']",s)

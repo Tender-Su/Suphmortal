@@ -63,7 +63,7 @@ def main():
  assert state['run_id'] and os.environ['MORTAL_RUN_DEADLINE_UTC']==end.isoformat()
  log=LEASE/'sl512_fast.stderr.log';seen_steps=initial['steps'];saved_mtime=(NEW/'state_file.pth').stat().st_mtime_ns;first=None;last_audit=0;resource_errors=0;seen_saves=set()
  try:
-  for iteration in range(1200):
+  for iteration in range(max(1,math.ceil((end-now()).total_seconds()/10)+1)):
    if now()>=end:break
    assert read(LEASE/'manifest.json')['run_id']==state['run_id']
    result=LEASE/'sl512_fast.result.json'
@@ -87,12 +87,12 @@ def main():
    if rows:
     steps=int(rows[-1][0].replace(',',''));loss=float(rows[-1][1]);assert math.isfinite(loss)
     if steps>seen_steps:
-     update=steps//2-skipped;record={'utc':now().isoformat(),'microsteps':steps,'optimizer_updates':update,'new_successful_updates':update-5000,'skipped_optimizer_updates':skipped,'loss':loss}
-     event({'event':'training_progress',**record});state.update(latest_training=record,new_successful_updates=update-5000,new_skipped_updates=skipped-2);seen_steps=steps
+     update=steps//2-skipped;record={'utc':now().isoformat(),'microsteps':steps,'optimizer_updates':update,'new_successful_updates':update-initial['optimizer_steps'],'skipped_optimizer_updates':skipped,'loss':loss}
+     event({'event':'training_progress',**record});state.update(latest_training=record,new_successful_updates=update-initial['optimizer_steps'],new_skipped_updates=skipped-initial['skipped_optimizer_steps']);seen_steps=steps
      if first is None:first=record;state['first_real_update']=record;put('first_real_update.json',record)
      if update>first['optimizer_updates']:
       seconds=(now()-dt.datetime.fromisoformat(first['utc'])).total_seconds();rate=(update-first['optimizer_updates'])/seconds
-      state['logged_training_updates_per_second']=rate;state['training_only_eta_utc']=(now()+dt.timedelta(seconds=max(0,7000-update)/rate)).isoformat();state['eta_scope']='Short startup log interval; excludes remaining full validation, capped by hard deadline.'
+      state['logged_training_updates_per_second']=rate;state['training_only_eta_utc']=(now()+dt.timedelta(seconds=max(0,bounds['target_update']-update)/rate)).isoformat();state['eta_scope']='Short startup log interval; excludes remaining full validation, capped by hard deadline.'
    for line in text.splitlines():
     if 'saved latest ' in line and 'optimizer_steps=' in line and line not in seen_saves:
      seen_saves.add(line);event({'event':'checkpoint_save_completed','log':line[-650:]})
@@ -108,7 +108,7 @@ def main():
   final=audit();put('final_checkpoint.json',final)
   delta=final['optimizer_steps']-initial['optimizer_steps'];skipped_delta=final['skipped_optimizer_steps']-initial['skipped_optimizer_steps']
   assert final['identity']==initial['identity'] and final['source_commit']==initial['source_commit'] and final['microbatch']==512 and final['accumulation']==2
-  assert final['allow_tf32'] and final['enable_cudnn_benchmark'] and 0<=delta<=2000 and skipped_delta>=0
+  assert final['allow_tf32'] and final['enable_cudnn_benchmark'] and 0<=delta<=bounds['maximum_new_successful_updates'] and skipped_delta>=0
   assert final['auxiliary_optimizer_steps']-initial['auxiliary_optimizer_steps']==delta
   assert final['adam_step_min']-initial['adam_step_min']==delta and final['adam_step_max']-initial['adam_step_max']==delta
   assert final['scheduler']['last_epoch']-initial['scheduler']['last_epoch']==delta
@@ -121,7 +121,7 @@ def main():
   validations=[read(p) for p in sorted((NEW/'full').glob('update_*.json'))] if (NEW/'full').exists() else []
   eval_seconds=sum(v.get('evaluation_seconds',0) for v in validations)
   wall=(dt.datetime.fromisoformat(state['trainer_result']['finished_utc'])-dt.datetime.fromisoformat(bounds['lease_start_utc'])).total_seconds()
-  success=state['trainer_result']['returncode']==0 and delta==bounds['maximum_new_successful_updates'] and completed is not None and completed['optimizer_updates']==7000 and any(v['optimizer_updates']==7000 for v in validations)
+  success=state['trainer_result']['returncode']==0 and delta==bounds['maximum_new_successful_updates'] and completed is not None and completed['optimizer_updates']==bounds['target_update'] and any(v['optimizer_updates']==bounds['target_update'] for v in validations)
   state.update(status='completed_verified' if success else 'stopped_or_failed_state_preserved',new_successful_updates=delta,new_skipped_updates=skipped_delta,new_nonfinite_batches=final['nonfinite_batches']-initial['nonfinite_batches'],final_checkpoint_sha256=final['checkpoint_sha256'],full_state_clocks_and_consumption_verified=True,protected_inputs_unchanged=unchanged,end_to_end_wall_seconds=wall,end_to_end_updates_per_second=delta/wall,validation_seconds=eval_seconds,phase_elapsed_delta_seconds=final['elapsed_seconds']-initial['elapsed_seconds'],completed=completed,profile_available=profile['status']=='available')
   return 0 if success or state['trainer_result']['returncode']==75 else 1
  except BaseException as exc:
