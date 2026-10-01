@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from mortal.core.artifacts import atomic_torch_save, atomic_write_json, file_sha256, stable_json_digest
 from mortal.supervised.continuation import (
-    ledger_snapshot, observation_plan, rebind_saved_state, relocate_config, trend_splits,
+    ledger_snapshot, microbatch_migration, observation_plan, rebind_saved_state, relocate_config, trend_splits,
     validate_inherited_pins, validate_saved_phase,
 )
 from mortal.supervised.early_transition import parent_record
@@ -42,14 +42,19 @@ def require_stable_checkpoint(path, expected):
         raise ValueError('source checkpoint changed during preparation; select a complete immutable saved point')
 
 
-def verify_rebind(source, rebound):
+def verify_rebind(source, rebound, *, migration=None):
     from mortal.supervised.curriculum_probe import learned_state_digest
     from scripts.verify_sl_probe_resume import equal
 
     before = learned_state_digest(source)
     if before != learned_state_digest(rebound):
         raise ValueError('learned/Adam/AMP/scheduler/auxiliary state changed during relocation')
+    if migration is not None and (migration != microbatch_migration(
+            source, migration['target_microbatch'], migration['reason']) or rebound['steps'] != migration['target_microsteps']):
+        raise ValueError('saved microstep clock differs from the declared decision-based conversion')
     for key in source:
+        if key == 'steps' and migration is not None:
+            continue
         if key not in ('config', 'run_provenance', 'checkpoint_id', 'curriculum_probe') and not equal(source[key], rebound[key]):
             raise ValueError('saved phase state changed: ' + key)
     for key in source['curriculum_probe']:
@@ -81,6 +86,8 @@ def prepare(args):
         raise ValueError('checkpoint index differs from the frozen experiment index')
     index = torch.load(source_index, map_location='cpu', weights_only=True)
     contract = validate_saved_phase(state, index['domains'], RECIPES)
+    migration = microbatch_migration(state, getattr(args, 'microbatch', None),
+                                    getattr(args, 'microbatch_change_reason', ''))
     require_stable_checkpoint(checkpoint, checkpoint_sha)
     plan = observation_plan(start=contract['optimizer_updates'], until=args.until_update,
         save_updates=args.save_every_updates, save_seconds=args.save_every_seconds,
@@ -92,6 +99,7 @@ def prepare(args):
     parent = parent_record(state, path=output / 'parent.pth', sha256=checkpoint_sha, phase=contract['phase'])
     if args.check_only:
         print(json.dumps({'state_contract': contract, 'plan': plan, 'runtime_differences': differences,
+                          'microbatch_migration': migration,
                           'status': 'checkpoint_structure_only; ledger/copy/equality not yet verified'}))
         return
     fresh_directory(output)
@@ -139,7 +147,9 @@ def prepare(args):
             'manifest_sha256': file_sha256(source_root / 'manifest.json'), 'checkpoint': str(checkpoint),
             'checkpoint_sha256': checkpoint_sha}, 'ledger_snapshot': ledger,
         'runtime_differences': differences, 'runtime_change_reason': args.runtime_change_reason,
-        'resume_scope': 'exact saved-state relocation; not a cross-runtime bitwise trajectory proof',
+        'microbatch_migration': migration,
+        'resume_scope': ('declared microbatch numerical branch; preserved learned/data/RNG state, converted microstep units'
+                         if migration else 'exact saved-state relocation; not a cross-runtime bitwise trajectory proof'),
         'runtime_versions': {'torch': torch.__version__, 'python': sys.version},
         'phase_transfer': 'none; B-to-C requires a separate explicitly declared phase plan', 'created_at': time.time()}
     manifest['identity'] = stable_json_digest(manifest)
@@ -147,9 +157,10 @@ def prepare(args):
     with closing(sqlite3.connect(output / 'training_content.sqlite3')) as db, db:
         db.execute('UPDATE metadata SET identity=?', (manifest['identity'],))
     config = relocate_config(state['config'], output, manifest['identity'], parent, commit, original['identity'],
-                             runtime_sha256=stable_json_digest(manifest['source_sha256']))
-    rebound = rebind_saved_state(state, config, manifest['identity'])
-    learned_digest = verify_rebind(state, rebound)
+                             runtime_sha256=stable_json_digest(manifest['source_sha256']), migration=migration)
+    rebound = rebind_saved_state(state, config, manifest['identity'], migration=migration)
+    learned_digest = verify_rebind(state, rebound, migration=migration)
+    rebound_contract = validate_saved_phase(rebound, index['domains'], RECIPES)
     write_toml_file(output / 'config.toml', config)
     atomic_torch_save(rebound, output / 'state_file.pth')
     require_stable_checkpoint(checkpoint, checkpoint_sha)
@@ -157,7 +168,10 @@ def prepare(args):
     verify_manifest(output)
     receipt = {'identity': manifest['identity'], 'state_contract': contract,
         'parent_sha256': checkpoint_sha, 'relocated_sha256': file_sha256(output / 'state_file.pth'),
-        'learned_state_sha256': learned_digest, 'all_saved_state_preserved_except_declared_metadata': True,
+        'learned_state_sha256': learned_digest, 'microbatch_migration': migration,
+        'relocated_state_contract': rebound_contract,
+        'all_saved_state_preserved_except_declared_metadata': migration is None,
+        'all_saved_state_preserved_except_metadata_and_declared_microstep_conversion': True,
         'ledger_snapshot': ledger, 'no_source_files_modified': True}
     atomic_write_json(output / 'continuation_receipt.json', receipt)
     print(json.dumps(receipt))
@@ -176,9 +190,9 @@ def run(args):
     config = load_toml_file(output / 'config.toml')
     expected_config = relocate_config(read_json(output / 'source_config.json'), output, manifest['identity'],
         manifest['parents']['same_phase'], manifest['source_git_commit'], manifest['source_experiment']['identity'],
-        runtime_sha256=stable_json_digest(manifest['source_sha256']))
+        runtime_sha256=stable_json_digest(manifest['source_sha256']), migration=manifest.get('microbatch_migration'))
     if config != expected_config:
-        raise ValueError('continuation configuration differs from the declared metadata-only relocation')
+        raise ValueError('continuation configuration differs from the declared relocation/numerical protocol')
     state = torch.load(output / 'state_file.pth', map_location='cpu', weights_only=False)
     if (state['config'] != config or state['run_provenance']['plan_id'] != manifest['identity']
             or state['run_provenance'] != config['supervised']['run_provenance']):
@@ -228,6 +242,9 @@ def parser():
         prep.add_argument('--' + name, type=int, required=True)
     prep.add_argument('--save-every-seconds', type=float, required=True)
     prep.add_argument('--runtime-change-reason', default='')
+    prep.add_argument('--microbatch', type=int, choices=(256, 512),
+                      help='Explicit 256<->512 numerical branch; retains logical batch1024 and consumed cursor')
+    prep.add_argument('--microbatch-change-reason', default='')
     prep.add_argument('--check-only', action='store_true')
     execute = commands.add_parser('run')
     execute.add_argument('--directory', required=True)

@@ -16,6 +16,71 @@ STATE_PATHS = ('state_file', 'best_state_file', 'best_loss_state_file', 'best_ac
                'best_rank_state_file', 'best_policy_state_file', 'adaptive_best_state_file')
 RELOCATION_FIELDS = (*STATE_PATHS, 'file_index', 'tensorboard_dir', 'probe_training_content_ledger',
                      'run_provenance')
+SAVED_PHASE_FIELDS = frozenset('''checkpoint_id run_provenance mortal policy_net aux_net opponent_aux_net
+    danger_aux_net optimizer optimizer_param_groups scheduler scaler steps optimizer_steps auxiliary_optimizer_steps
+    skipped_optimizer_steps nonfinite_batches epoch epoch_complete timestamp best_val_loss best_val_action_acc
+    best_val_action_score best_val_rank_acc best_full_recent_loss best_full_recent_policy_loss
+    best_full_recent_action_acc best_full_recent_action_score best_full_recent_rank_acc patience_val_loss
+    patience_counter num_lr_reductions validation_checks full_validation_checks old_regression_checks
+    last_monitor_recent_metrics last_full_recent_metrics last_old_regression_metrics convergence_state
+    adaptive_curriculum_state config_section stage_label checkpoint_label config curriculum_probe'''.split())
+
+
+def microbatch_migration(state, target, reason):
+    """Only a declared 256x4 <-> 512x2 numerical branch, never gradient equivalence."""
+    if target is None:
+        if reason:
+            raise ValueError('microbatch change reason requires an explicit target microbatch')
+        return None
+    config = state['config']
+    sl, control, probe = config['supervised'], config['control'], state['curriculum_probe']
+    source, accumulation = sl['batch_size'], control['opt_step_every']
+    if (type(target) is not int or type(source) is not int or type(accumulation) is not int
+            or {source, target} != {256, 512} or source * accumulation != 1024 or not reason.strip()):
+        raise ValueError('explicit reason and 256<->512 migration with unchanged logical batch1024 required')
+    if set(state) - SAVED_PHASE_FIELDS or set(probe) - {
+            'identity', 'dataset', 'observed', 'rng', 'elapsed_seconds', 'continuous_observation'}:
+        raise ValueError('unknown saved state/counter; inspect its units before microbatch migration')
+    if any(sl.get(key, {}).get('enabled', False) for key in ('convergence', 'adaptive_curriculum', 'gradient_calibration')):
+        raise ValueError('microbatch migration requires disabled historical controllers/calibration')
+    if any(state.get(key) is not None for key in ('convergence_state', 'adaptive_curriculum_state')):
+        raise ValueError('controller state has unknown microstep history; migration refused')
+    if (any(type(sl.get(key)) is not int or sl[key] != 0 for key in ('max_steps', 'val_every_steps', 'save_every'))
+            or sl.get('num_workers') != 0 or control.get('enable_cuda_prefetch') is not False):
+        raise ValueError('microbatch migration requires existing consumed-cursor probe clocks')
+    steps, updates, skipped = (state[key] for key in ('steps', 'optimizer_steps', 'skipped_optimizer_steps'))
+    data = probe['dataset']
+    if (set(data) != {'sampler', 'current', 'offset', 'consumed', 'files'}
+            or set(data['sampler']) != {'seed', 'recipe', 'positions', 'rng', 'draws'}
+            or ('continuous_observation' in probe and set(probe['continuous_observation']) != {'done', 'last_saved_update'})):
+        raise ValueError('unknown cursor/observation counter; inspect its units before microbatch migration')
+    if (any(type(n) is not int or n < 0 for n in (steps, updates, skipped)) or updates == 0
+            or steps != (updates + skipped) * accumulation or state['epoch_complete']
+            or type(state['nonfinite_batches']) is not int or state['nonfinite_batches'] != 0 or not data['consumed']
+            or any(type(n) is not int or n < 0 for n in data['consumed'].values())):
+        raise ValueError('microbatch migration requires a complete optimizer boundary and known counters')
+    decisions = sum(data['consumed'].values())
+    log_every = sl.get('log_every')
+    if (decisions != steps * source or decisions % target or type(log_every) is not int
+            or log_every <= 0 or log_every * source % target):
+        raise ValueError('consumed decisions/log cadence cannot be exactly converted to target microbatches')
+    return {'mode': 'declared_microbatch_numerical_branch', 'reason': reason,
+            'source_checkpoint_id': state['checkpoint_id'], 'logical_batch': 1024,
+            'source_microbatch': source, 'target_microbatch': target,
+            'source_accumulation': accumulation, 'target_accumulation': 1024 // target,
+            'source_microsteps': steps, 'target_microsteps': decisions // target,
+            'consumed_decisions': decisions, 'optimizer_updates': updates, 'skipped_optimizer_updates': skipped,
+            'source_log_every': log_every, 'target_log_every': log_every * source // target,
+            'numerical_equivalence': 'not_bitwise_or_gradient_equivalent',
+            'historical_statistics': 'prior metrics/observations/elapsed time retain their original numerical protocol; '
+                                     'unsaved running log window restarts as in ordinary resume'}
+
+
+def apply_microbatch_config(config, migration):
+    if migration is not None:
+        config['supervised'].update(batch_size=migration['target_microbatch'], log_every=migration['target_log_every'])
+        config['control']['opt_step_every'] = migration['target_accumulation']
+    return config
 
 
 def observation_plan(*, start, until, save_updates, save_seconds, trend_every, full_every):
@@ -137,7 +202,8 @@ def validate_saved_phase(state, domains, recipes):
             'elapsed_seconds': probe['elapsed_seconds']}
 
 
-def relocate_config(config, output, identity, parent, source_commit, source_identity, *, runtime_sha256):
+def relocate_config(config, output, identity, parent, source_commit, source_identity, *, runtime_sha256,
+                    migration=None):
     result = deepcopy(config)
     sl = result['supervised']
     for key in STATE_PATHS:
@@ -154,8 +220,11 @@ def relocate_config(config, output, identity, parent, source_commit, source_iden
                                     'mode': 'same_phase_state_preserving_extension',
                                     'numerical_equivalence': 'not_a_cross_runtime_bitwise_proof'})
     provenance['parent_chain'] = [*provenance.get('parent_chain', []), deepcopy(parent)]
+    if migration is not None:
+        provenance['continuation'].update(mode=migration['mode'], numerical_equivalence=migration['numerical_equivalence'])
+        provenance['microbatch_migrations'] = [*provenance.get('microbatch_migrations', []), deepcopy(migration)]
     sl['run_provenance'] = provenance
-    return result
+    return apply_microbatch_config(result, migration)
 
 
 def training_semantics(config):
@@ -165,14 +234,20 @@ def training_semantics(config):
     return result
 
 
-def rebind_saved_state(state, config, identity):
-    if training_semantics(state['config']) != training_semantics(config):
+def rebind_saved_state(state, config, identity, *, migration=None):
+    if migration is not None and migration != microbatch_migration(
+            state, migration['target_microbatch'], migration['reason']):
+        raise ValueError('microbatch migration differs from verified source counters')
+    expected = apply_microbatch_config(deepcopy(state['config']), migration)
+    if training_semantics(expected) != training_semantics(config):
         raise ValueError('continuation cannot change training settings, LR, warmup, seed, or batch size')
     result = deepcopy(state)
     result['config'] = deepcopy(config)
     result['run_provenance'] = deepcopy(config['supervised']['run_provenance'])
     result['curriculum_probe']['identity'] = identity
     result['checkpoint_id'] = stable_json_digest({'source_checkpoint_id': state['checkpoint_id'], 'identity': identity})
+    if migration is not None:
+        result['steps'] = migration['target_microsteps']
     return result
 
 

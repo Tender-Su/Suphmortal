@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from mortal.core.artifacts import atomic_write_json, file_sha256, stable_json_digest
 from mortal.supervised.continuation import (
-    evaluation_horizons, evaluation_kind, ledger_snapshot, observation_plan, rebind_saved_state,
+    evaluation_horizons, evaluation_kind, ledger_snapshot, microbatch_migration, observation_plan, rebind_saved_state,
     relocate_config, training_semantics, trend_splits, validate_inherited_pins, validate_saved_phase,
 )
 from mortal.supervised.early_transition import TrainingContentLedger, parent_record
@@ -53,7 +53,70 @@ def plan_fixture(start=10, until=30):
                             trend_every=5, full_every=10)
 
 
+def microbatch_fixture(state=None, batch=256):
+    state = deepcopy(state if state is not None else saved_fixture())
+    state['config']['supervised'].update(batch_size=batch, log_every=32768 // batch)
+    state['config']['control']['opt_step_every'] = 1024 // batch
+    state.update(steps=(state['optimizer_steps'] + state['skipped_optimizer_steps']) * (1024 // batch),
+                 convergence_state=None, adaptive_curriculum_state=None)
+    state['curriculum_probe']['dataset']['consumed'] = {1: state['steps'] * batch}
+    return state
+
+
 class ContinuationContracts(unittest.TestCase):
+    def test_microbatch_migration_converts_only_microstep_units_in_both_directions(self):
+        for old, new in ((256, 512), (512, 256)):
+            source = microbatch_fixture(batch=old)
+            source['optimizer_steps'] = 1000
+            source['skipped_optimizer_steps'] = 1
+            source = microbatch_fixture(source, old)
+            migration = microbatch_migration(source, new, 'measured throughput')
+            self.assertEqual(migration['source_microsteps'], 1001 * (1024 // old))
+            self.assertEqual(migration['target_microsteps'], 1001 * (1024 // new))
+            self.assertEqual(migration['consumed_decisions'], 1001 * 1024)
+            parent = parent_record(source, path='new/parent.pth', sha256='source', phase='B')
+            config = relocate_config(source['config'], 'new', 'new', parent, 'commit', 'old',
+                                     runtime_sha256='new-runtime', migration=migration)
+            rebound = rebind_saved_state(source, config, 'new', migration=migration)
+            self.assertEqual(rebound['steps'], 1001 * (1024 // new))
+            for key in source:
+                if key not in ('steps', 'config', 'run_provenance', 'checkpoint_id', 'curriculum_probe'):
+                    self.assertEqual(source[key], rebound[key])
+            self.assertEqual(rebound['curriculum_probe']['dataset'], source['curriculum_probe']['dataset'])
+            self.assertEqual(rebound['config']['supervised']['log_every'] * new, 32768)
+            self.assertEqual(rebound['run_provenance']['microbatch_migrations'], [migration])
+            self.assertEqual(rebound['run_provenance']['continuation']['mode'], 'declared_microbatch_numerical_branch')
+            self.assertEqual(rebound['config']['supervised']['val_batch_size'], 1024)
+            for section, key, value in (('supervised', 'lr', 1e-3), ('supervised', 'seed', 3),
+                                        ('supervised', 'log_every', 13), ('control', 'opt_step_every', 1)):
+                bad = deepcopy(config)
+                bad[section][key] = value
+                with self.assertRaisesRegex(ValueError, 'training settings'):
+                    rebind_saved_state(source, bad, 'new', migration=migration)
+
+    def test_microbatch_migration_rejects_unknown_or_incomplete_clocks(self):
+        source = microbatch_fixture()
+        edits = [lambda x: x.__setitem__('steps', 39), lambda x: x.__setitem__('nonfinite_batches', 1),
+                 lambda x: x.__setitem__('epoch_complete', True), lambda x: x.__setitem__('future_microsteps', 2),
+                 lambda x: x.__setitem__('skipped_optimizer_steps', 0.0),
+                 lambda x: x['config']['control'].__setitem__('opt_step_every', 2),
+                 lambda x: x['config']['supervised'].__setitem__('batch_size', 128),
+                 lambda x: x['config']['supervised'].__setitem__('log_every', 127),
+                 lambda x: x['config']['supervised'].__setitem__('save_every', 128),
+                 lambda x: x['config']['supervised'].__setitem__('convergence', {'enabled': True}),
+                 lambda x: x.__setitem__('adaptive_curriculum_state', {'last_gate_step': 32}),
+                 lambda x: x['curriculum_probe']['dataset']['consumed'].__setitem__(1, 10241),
+                 lambda x: x['curriculum_probe']['dataset'].__setitem__('micro_counter', 20)]
+        for edit in edits:
+            changed = deepcopy(source)
+            edit(changed)
+            with self.assertRaises(ValueError):
+                microbatch_migration(changed, 512, 'throughput')
+        for target, reason in ((256, 'same'), (128, 'unsupported'), (512, ''), (None, 'missing target')):
+            with self.assertRaises(ValueError):
+                microbatch_migration(source, target, reason)
+        self.assertIsNone(microbatch_migration(source, None, ''))
+
     def test_large_horizon_and_cadences_are_explicit_not_maturity(self):
         plan = observation_plan(start=1000, until=200000, save_updates=1000, save_seconds=1800,
                                 trend_every=2000, full_every=10000)
@@ -295,10 +358,66 @@ class ContinuationTorchTests(unittest.TestCase):
             self.assertEqual([next(stream) for _ in range(64)], [next(continued) for _ in range(64)])
             self.assertTrue(equal(original.state_dict(), resumed.state_dict()))
 
+    def test_microbatch_migration_preserves_real_state_and_next_logical_1024_rows(self):
+        from mortal.supervised.curriculum_probe import RotatingGameDataset
+        from scripts.continue_sl_phase import verify_rebind
+        from scripts.verify_sl_probe_resume import equal
+        names = {'2024game': 1, '2012game': 2}
+        module = SimpleNamespace(stable_source_game_id=lambda filename: names[filename])
+        loader = lambda filename: [(filename, row) for row in range(513)]
+        source = microbatch_fixture(self.source)
+        with patch.dict('sys.modules', {'mortal.data.dataloader': module}):
+            original = RotatingGameDataset(DOMAINS, RECIPES['B'], 31, {}, sample_loader=loader)
+            stream = iter(original)
+            for _ in range(10240):
+                next(stream)
+            source['curriculum_probe']['dataset'] = original.state_dict()
+            for draw in source['curriculum_probe']['dataset']['current']['draws']:
+                draw['source_sha256'] = 'f' * 64
+            validate_saved_phase(source, DOMAINS, RECIPES)
+            migration = microbatch_migration(source, 512, 'declared throughput protocol')
+            parent = parent_record(source, path='new/parent.pth', sha256='parent', phase='B')
+            config = relocate_config(source['config'], 'new', 'new', parent, 'commit', 'old',
+                                     runtime_sha256='new-runtime', migration=migration)
+            rebound = rebind_saved_state(source, config, 'new', migration=migration)
+            verify_rebind(source, rebound, migration=migration)
+            buffer = io.BytesIO()
+            self.torch.save(rebound, buffer)
+            buffer.seek(0)
+            rebound = self.torch.load(buffer, weights_only=False)
+            verify_rebind(source, rebound, migration=migration)
+            validate_saved_phase(rebound, DOMAINS, RECIPES)
+            rows, datasets = [], []
+            for state, microbatch in ((source, 256), (rebound, 512)):
+                dataset = RotatingGameDataset(DOMAINS, RECIPES['B'], 31, {}, sample_loader=loader)
+                dataset.load_state_dict(state['curriculum_probe']['dataset'])
+                batches = iter(self.torch.utils.data.DataLoader(dataset, batch_size=microbatch,
+                    num_workers=0, generator=self.torch.Generator().manual_seed(31)))
+                logical = []
+                for _ in range(1024 // microbatch):
+                    filenames, offsets = next(batches)
+                    logical.extend(zip(filenames, offsets.tolist()))
+                rows.append(logical)
+                datasets.append(dataset)
+            self.assertEqual(len(rows[0]), 1024)
+            self.assertEqual(rows[0], rows[1])
+            self.assertTrue(equal(datasets[0].state_dict(), datasets[1].state_dict()))
+            self.assertEqual(rebound['optimizer_steps'], 10)
+            self.assertEqual(rebound['steps'], 20)
+            self.assertEqual(rebound['scheduler'], source['scheduler'])
+
     def test_prepare_materializes_independent_identity_and_frozen_inputs_without_reset(self):
+        self.check_prepare_materialization(migrate=False)
+
+    def test_prepare_materializes_declared_microbatch_protocol_identity(self):
+        self.check_prepare_materialization(migrate=True)
+
+    def check_prepare_materialization(self, *, migrate):
         from scripts.continue_sl_phase import prepare, verify_rebind
         from scripts.run_sl_early_transition import verify_manifest
         from mortal.core.toml_utils import load_toml_file
+        if migrate:
+            self.source = microbatch_fixture(self.source)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_root, target = root / 'old', root / 'new'
@@ -334,7 +453,8 @@ class ContinuationTorchTests(unittest.TestCase):
             args = SimpleNamespace(source_run=str(source_root), directory=str(target), source_commit='new-fixed-commit',
                 checkpoint=str(checkpoint), until_update=100, save_every_updates=10, save_every_seconds=1800,
                 trend_every_updates=20, full_every_updates=50, trend_recent_games=1, trend_old_games=1,
-                trend_seed=3, runtime_change_reason='', check_only=False)
+                trend_seed=3, runtime_change_reason='', check_only=False,
+                microbatch=512 if migrate else None, microbatch_change_reason='measured throughput' if migrate else '')
             with patch('scripts.continue_sl_phase.fixed_source', return_value='new-fixed-commit'), patch('sys.stdout', new=io.StringIO()):
                 prepare(args)
             actual_manifest = verify_manifest(target)
@@ -343,7 +463,14 @@ class ContinuationTorchTests(unittest.TestCase):
             self.assertNotEqual(actual_manifest['identity'], manifest['identity'])
             self.assertEqual(actual['curriculum_probe']['identity'], actual_manifest['identity'])
             self.assertEqual(actual['config'], load_toml_file(target / 'config.toml'))
-            verify_rebind(self.source, actual)
+            verify_rebind(self.source, actual, migration=actual_manifest['microbatch_migration'])
+            if migrate:
+                self.assertEqual(actual['steps'], 20)
+                self.assertEqual(actual['config']['control']['opt_step_every'], 2)
+                self.assertEqual(actual['config']['supervised']['batch_size'], 512)
+                self.assertEqual(actual_manifest['source_state_contract']['microsteps'], 40)
+                self.assertEqual(actual_manifest['microbatch_migration']['source_microsteps'], 40)
+                self.assertIn('declared microbatch numerical branch', actual_manifest['resume_scope'])
             self.assertEqual(before, {path: file_sha256(path) for path in before})
             self.assertEqual(actual_manifest['gpu_memory_fraction'], 0.5)
             with sqlite3.connect(target / 'training_content.sqlite3') as db:
