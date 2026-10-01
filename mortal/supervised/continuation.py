@@ -26,6 +26,29 @@ SAVED_PHASE_FIELDS = frozenset('''checkpoint_id run_provenance mortal policy_net
     adaptive_curriculum_state config_section stage_label checkpoint_label config curriculum_probe'''.split())
 
 
+def backend_protocol(mode, threads, reason):
+    """Explicit execution-only numerical branch, with unchanged learning contract."""
+    if mode == 'inherit':
+        if threads is not None or reason:
+            raise ValueError('backend overrides require an explicit strict/fast protocol')
+        return None
+    if mode not in ('strict', 'fast') or type(threads) is not int or threads not in (1, 2, 4) or not reason.strip():
+        raise ValueError('explicit strict/fast mode, threads1/2/4 and reason required')
+    return {'mode': mode, 'torch_threads': threads, 'reason': reason,
+            'deterministic': mode == 'strict', 'allow_tf32': mode == 'fast',
+            'enable_cudnn_benchmark': mode == 'fast',
+            'numerical_equivalence': 'not_bitwise_or_gradient_equivalent'}
+
+
+def apply_backend_config(config, backend):
+    if backend is not None:
+        if backend != backend_protocol(backend['mode'], backend['torch_threads'], backend['reason']):
+            raise ValueError('backend protocol is not canonical')
+        for key in ('allow_tf32', 'enable_cudnn_benchmark'):
+            config['control'][key] = backend[key]
+    return config
+
+
 def microbatch_migration(state, target, reason):
     """Only a declared 256x4 <-> 512x2 numerical branch, never gradient equivalence."""
     if target is None:
@@ -203,7 +226,7 @@ def validate_saved_phase(state, domains, recipes):
 
 
 def relocate_config(config, output, identity, parent, source_commit, source_identity, *, runtime_sha256,
-                    migration=None):
+                    migration=None, backend=None):
     result = deepcopy(config)
     sl = result['supervised']
     for key in STATE_PATHS:
@@ -223,8 +246,10 @@ def relocate_config(config, output, identity, parent, source_commit, source_iden
     if migration is not None:
         provenance['continuation'].update(mode=migration['mode'], numerical_equivalence=migration['numerical_equivalence'])
         provenance['microbatch_migrations'] = [*provenance.get('microbatch_migrations', []), deepcopy(migration)]
+    if backend is not None:
+        provenance['backend_protocols'] = [*provenance.get('backend_protocols', []), deepcopy(backend)]
     sl['run_provenance'] = provenance
-    return apply_microbatch_config(result, migration)
+    return apply_backend_config(apply_microbatch_config(result, migration), backend)
 
 
 def training_semantics(config):
@@ -234,11 +259,11 @@ def training_semantics(config):
     return result
 
 
-def rebind_saved_state(state, config, identity, *, migration=None):
+def rebind_saved_state(state, config, identity, *, migration=None, backend=None):
     if migration is not None and migration != microbatch_migration(
             state, migration['target_microbatch'], migration['reason']):
         raise ValueError('microbatch migration differs from verified source counters')
-    expected = apply_microbatch_config(deepcopy(state['config']), migration)
+    expected = apply_backend_config(apply_microbatch_config(deepcopy(state['config']), migration), backend)
     if training_semantics(expected) != training_semantics(config):
         raise ValueError('continuation cannot change training settings, LR, warmup, seed, or batch size')
     result = deepcopy(state)

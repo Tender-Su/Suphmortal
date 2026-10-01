@@ -54,3 +54,13 @@ learned heads、Adam 所有状态和 mapping、AMP、scheduler clock/下一步 L
 准备要求 clean 固定 Git commit，复制冻结 Python/native 源码；只能从 `NEW/source/scripts/continue_sl_phase.py run --directory NEW` 执行。allocator cap 原样保留，run 检查 config 仅包含声明的 metadata relocation 和可选 microbatch 迁移。使用既有[独立截止 supervisor](../agent/deadline-supervisor.md)；外部 stop 保存后退出 75，不自动续租/重启。
 
 测试入口：`python -m unittest mortal.tests.test_sl_continuation mortal.tests.test_sl_early_transition mortal.tests.test_train_fixed_shape`。标准库覆盖缺状态拒绝、计数、cadence、ledger backup、不可覆盖目录、双向 microstep 转换与未知 counter 拒绝；真实 Torch CPU 覆盖 Adam/scaler/scheduler/RNG 序列化后的下一 update、mid-block 下一批顺序、迁移前后 DataLoader 下一 logical1024 样本相同、无 U0/无验证保存、trend/full 与结果中断恢复。native parser 在 cursor 单测中使用 fixture；仍需 Windows/native/CUDA 实际恢复，不以这些单测冒充完整生产训练或要求 512 梯度完全相同。
+
+## 2026-10-01：显式 backend 分支及端到端验收
+
+`--backend fast --torch-threads 1 --backend-change-reason REASON` 仅声明 TF32、cuDNN benchmark、确定性算法和 Torch 线程数的数值执行协议。strict 使用确定性算法并关闭前两项。没有声明则保留已记录的 backend；历史无记录源按原 strict/2 执行。manifest/config provenance 固定该协议，LR、recipe、optimizer、data/RNG、logical batch 不随之改变。此选项可与已验收的512×2迁移组合，不声称轨迹等价。验证也使用声明的 backend，和历史 strict 的微小数值差需保留解释。
+
+4060 30项短缓存扫描：baseline285 samples/s，512/t1/fast641，512/t1/strict530，1024六格在.75 allocator下OOM。reference max/min1.00375；最佳首步梯度relative L2差0.28545%。这是局部计算吞吐证据，不是端到端或棋力结论。
+
+下一次技术验收从已保存 early B5000 出发，单条512/t1/fast继续至B7000，完整保存与终点评估；2000更新只用于跨越多个真实数据准备/保存周期测持续吞吐，不用于判断阶段收敛或长期研究收益。沿用.5 allocator上限、原数据及学习配方，保存每500update或300秒，trend每5000、full每10000（7000终点强制full），固定trend128recent/64old、seed20261001。运行总预算3小时，包含10分钟保存退出，内存/显存与外部监督保护仍在。迁移状态和输入hash必须实机核对，任何结构异常先停止。
+
+主要工程判断：比此前同臂256完整训练约0.2575updates/s是否有显著实际提升；分别记录准备/训练/保存/验证耗时、RAM/VRAM、成功/skip及有限性，短缓存2.25倍不可直接套用。若稳定并有明显节省，保留完整B7000状态继续更长B窗口，无需从头重训；若收益消失，优先定位数据管线而非重复全格扫描。研究阶段时机结论仍需要与历史几十万更新相称的证据，不用本次2000update技术验收代替。
