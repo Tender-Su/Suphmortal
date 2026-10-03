@@ -1,8 +1,10 @@
 """One declared B-to-C branch; existing same-phase and balanced gates stay intact."""
 from copy import deepcopy
+import json
+from pathlib import Path
 import time
 
-from mortal.core.artifacts import atomic_torch_save, atomic_write_json, file_sha256
+from mortal.core.artifacts import atomic_torch_save, atomic_write_json, file_sha256, stable_json_digest
 from mortal.supervised.continuation import STATE_PATHS
 from mortal.supervised.curriculum_probe import CurriculumProbe, learned_state_digest
 
@@ -71,7 +73,37 @@ class PhaseForkProbe(CurriculumProbe):
             return
         result_path = self.output / f'update_{optimizer_steps:07d}.json'
         checkpoint = self.output / f'update_{optimizer_steps:07d}.pth'
-        if result_path.exists() or checkpoint.exists():
+        if result_path.exists():
+            # As in ContinuousPhaseProbe, JSON commits the completed observation.
+            # A crash before latest was saved must not re-evaluate or replace it.
+            if not checkpoint.is_file():
+                raise FileExistsError('unpaired observation result; inspect before resuming')
+            result = json.loads(result_path.read_text(encoding='utf-8'))
+            required = {'identity', 'optimizer_updates', 'recipe', 'seed', 'splits', 'exposure',
+                        'elapsed_seconds', 'evaluation_seconds', 'checkpoint', 'checkpoint_sha256',
+                        'learned_state_sha256', 'successful_decisions', 'skipped_optimizer_steps'}
+            if not isinstance(result, dict) or not required.issubset(result):
+                raise ValueError('existing phase-fork observation is incomplete')
+            if ((result['identity'], result['optimizer_updates'], result['recipe'], result['seed']) !=
+                    (self.identity, optimizer_steps, self.recipe, self.seed)
+                    or Path(result['checkpoint']).resolve() != checkpoint.resolve()
+                    or result.get('kind', 'full') != 'full'
+                    or result.get('split_identity', stable_json_digest(self.eval_splits)) !=
+                    stable_json_digest(self.eval_splits)):
+                raise ValueError('existing phase-fork observation has different provenance')
+            if (not isinstance(result['splits'], dict) or set(result['splits']) != set(self.eval_splits)
+                    or any(not isinstance(metrics, dict) or not metrics for metrics in result['splits'].values())):
+                raise ValueError('existing phase-fork observation has incomplete panels')
+            if file_sha256(checkpoint) != result['checkpoint_sha256']:
+                raise ValueError('archived phase-fork checkpoint changed')
+            if learned_state_digest(build_state(epoch, epoch_complete=False)) != result['learned_state_sha256']:
+                raise ValueError('existing phase-fork observation has different learned state')
+            self.observed.append(optimizer_steps)
+            self.last_saved_update = optimizer_steps
+            self.last_saved_time = time.monotonic()
+            save_latest(epoch, epoch_complete=False, reason='recover_completed_observation')
+            return
+        if checkpoint.exists():
             # Preserve partial evidence. No implicit rerun or archive overwrite.
             raise FileExistsError('existing unacknowledged observation; inspect before resuming')
         save_latest(epoch, epoch_complete=False, reason='before_phase_fork_observation')

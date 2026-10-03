@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from mortal.core.artifacts import stable_json_digest
+import torch
+
+from mortal.core.artifacts import atomic_torch_save, stable_json_digest
 from mortal.supervised.curriculum_probe import capture_rng, learned_state_digest
 from mortal.supervised.early_transition import LEARNED_KEYS, parent_record, phase_spec, prepare_transition_state
 from mortal.supervised.phase_fork import PhaseForkProbe, fork_config, validate_baseline
@@ -131,9 +133,131 @@ class PhaseForkTests(unittest.TestCase):
                 probe.observe(1000, Mock(), Mock(return_value=state), Mock(), 0)
             self.assertEqual(path.read_bytes(), b'existing partial evidence')
 
+    def interrupt_after_observation(self, output, update):
+        baseline = {'identity': 'B-parent', 'optimizer_updates': 50000, 'seed': 1, 'recipe': 'B',
+                    'splits': {name: {'policy_loss': .45}
+                               for name in ('controller_recent', 'controller_old')}} if update == 0 else None
+        _, state, probe = self.make_probe(output, baseline)
+        probe.restore(state)
+        probe.observed = [value for value in [0, *probe.horizons] if value < update]
+        probe.pending_dataset = {'C_cursor': 123}
+        state.update(optimizer_steps=update, steps=update * state['config']['control']['opt_step_every'])
+        latest = output / 'latest.pth'
+
+        def build(*args, **kwargs):
+            return {**state, 'curriculum_probe': probe.state_dict()}
+
+        def save(*args, reason, **kwargs):
+            if reason != 'before_phase_fork_observation':
+                raise OSError('injected latest write failure')
+            atomic_torch_save(build(), latest)
+
+        def evaluate(*args, **kwargs):
+            random.random()
+            return {'policy_loss': .45}, 1
+
+        with self.assertRaisesRegex(OSError, 'injected latest write failure'):
+            probe.observe(update, evaluate, build, save, 0)
+        saved = torch.load(latest, map_location='cpu', weights_only=False)
+        self.assertNotIn(update, saved['curriculum_probe']['observed'])
+        paths = [output / f'full/update_{update:07d}.{suffix}' for suffix in ('json', 'pth')]
+        self.assertTrue(all(path.is_file() for path in paths))
+        return saved, baseline, latest, paths
+
+    def test_recover_completed_observation_after_latest_write_failure(self):
+        for update in (0, 1000, 5000, 10000, 20000, 50000):
+            with self.subTest(update=update), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                saved, baseline, latest, paths = self.interrupt_after_observation(output, update)
+                evidence = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+                _, _, resumed = self.make_probe(output, baseline)
+                resumed.restore(saved)
+
+                def build(*args, **kwargs):
+                    return {**saved, 'curriculum_probe': resumed.state_dict()}
+
+                save = Mock(side_effect=lambda *a, **kw: atomic_torch_save(build(), latest))
+                evaluate = Mock()
+                resumed.observe(update, evaluate, build, save, 0)
+                evaluate.assert_not_called()
+                save.assert_called_once_with(0, epoch_complete=False, reason='recover_completed_observation')
+                self.assertEqual(resumed.observed, [*saved['curriculum_probe']['observed'], update])
+                self.assertEqual(resumed.last_saved_update, update)
+                recovered = torch.load(latest, map_location='cpu', weights_only=False)
+                self.assertEqual(recovered['curriculum_probe']['observed'], resumed.observed)
+                self.assertEqual(recovered['curriculum_probe']['dataset'], saved['curriculum_probe']['dataset'])
+                self.assertTrue(equal(recovered['curriculum_probe']['rng'], saved['curriculum_probe']['rng']))
+                self.assertEqual(evidence, [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths])
+                resumed.observe(update, evaluate, build, save, 0)
+                self.assertEqual(save.call_count, 1)
+                self.assertFalse(torch.cuda.is_initialized())
+
+    def test_recovery_rejects_partial_or_mismatched_evidence_without_writing(self):
+        changes = {'identity': 'foreign', 'optimizer_updates': 999, 'recipe': 'B', 'seed': 17,
+                   'kind': 'trend', 'split_identity': 'foreign-panel', 'checkpoint': 'foreign.pth',
+                   'checkpoint_sha256': 'changed', 'learned_state_sha256': 'changed',
+                   'splits': {'controller_recent': {'policy_loss': .45}}}
+        cases = [*changes, 'empty_metrics', 'missing_field', 'invalid_json', 'missing_json',
+                 'missing_checkpoint', 'changed_checkpoint']
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                saved, baseline, latest, paths = self.interrupt_after_observation(output, 1000)
+                result_path, checkpoint = paths
+                result = json.loads(result_path.read_text(encoding='utf-8'))
+                if case in changes:
+                    result[case] = changes[case]
+                    result_path.write_text(json.dumps(result), encoding='utf-8')
+                elif case == 'empty_metrics':
+                    result['splits']['controller_old'] = {}
+                    result_path.write_text(json.dumps(result), encoding='utf-8')
+                elif case == 'missing_field':
+                    del result['evaluation_seconds']
+                    result_path.write_text(json.dumps(result), encoding='utf-8')
+                elif case == 'invalid_json':
+                    result_path.write_text('{', encoding='utf-8')
+                elif case == 'missing_json':
+                    result_path.unlink()
+                elif case == 'missing_checkpoint':
+                    checkpoint.unlink()
+                else:
+                    checkpoint.write_bytes(b'changed archive')
+
+                def evidence():
+                    return [(path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+                            for path in [*paths, latest]]
+
+                before = evidence()
+                _, _, resumed = self.make_probe(output, baseline)
+                resumed.restore(saved)
+                evaluate, save = Mock(), Mock()
+                with self.assertRaises((FileExistsError, ValueError)):
+                    resumed.observe(1000, evaluate, Mock(return_value=saved), save, 0)
+                evaluate.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(resumed.observed, saved['curriculum_probe']['observed'])
+                self.assertEqual(before, evidence())
+
+    def test_recovery_requires_latest_to_have_the_observed_learned_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            saved, baseline, _, paths = self.interrupt_after_observation(output, 1000)
+            before = [path.read_bytes() for path in paths]
+            saved['auxiliary_optimizer_steps'] += 1
+            _, _, resumed = self.make_probe(output, baseline)
+            resumed.restore(saved)
+            evaluate, save = Mock(), Mock()
+            with self.assertRaisesRegex(ValueError, 'different learned state'):
+                resumed.observe(1000, evaluate, Mock(return_value=saved), save, 0)
+            evaluate.assert_not_called()
+            save.assert_not_called()
+            self.assertEqual(resumed.observed, saved['curriculum_probe']['observed'])
+            self.assertEqual(before, [path.read_bytes() for path in paths])
+
     def test_sparse_observations_periodic_save_and_fixed_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, probe = self.make_probe(Path(tmp))
+            self.assertEqual([0, *probe.horizons], [0, 1000, 5000, 10000, 20000, 50000])
             probe.observe = Mock()
             save = Mock()
             self.assertFalse(probe.after_update(64, None, None, save, 0))
