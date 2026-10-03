@@ -63,6 +63,56 @@ def load_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding='utf-8-sig'))
 
 
+def read_shared_text(path: str | Path, *, tail: int | None = None) -> str:
+    """Read live telemetry with delete sharing and short-lived Windows handles.
+
+    Keep the FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE contract
+    used by the existing remote SL observer. The open handle is always closed;
+    writer-side retries remain necessary for transient replacement failures.
+    """
+    if tail is not None and tail < 0:
+        raise ValueError('tail must be nonnegative')
+    path = Path(path)
+    errors = 'replace' if tail is not None else 'strict'
+    if os.name != 'nt':
+        with path.open('rb') as handle:
+            if tail is not None:
+                handle.seek(max(0, path.stat().st_size - tail))
+            return handle.read().decode('utf-8-sig', errors=errors)
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                               ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    kernel.ReadFile.restype = wintypes.BOOL
+    kernel.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong,
+                                       ctypes.POINTER(ctypes.c_longlong), wintypes.DWORD]
+    kernel.SetFilePointerEx.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if tail is not None and not kernel.SetFilePointerEx(handle, max(0, path.stat().st_size - tail), None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        parts = []
+        while True:
+            buffer = ctypes.create_string_buffer(65536)
+            count = wintypes.DWORD()
+            if not kernel.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not count.value:
+                return b''.join(parts).decode('utf-8-sig', errors=errors)
+            parts.append(buffer.raw[:count.value])
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def atomic_write_text(target: str | Path, text: str) -> None:
     with atomic_output_path(target) as temporary:
         temporary.write_text(text, encoding='utf-8', newline='\n')
