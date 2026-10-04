@@ -245,6 +245,9 @@ def run(args, root):
     modes=[g.get('train_mode') for g in critic_state['optimizer']['param_groups']]
     if not modes or any(x is not False for x in modes):raise ValueError('selected ScheduleFree eval readout not proven')
     cfg=build_config(load_toml_file(files['config']),actor_state['config'],critic_state,args,root)
+    from datetime import datetime
+    hard_deadline=datetime.fromisoformat(os.environ['MORTAL_RUN_DEADLINE_UTC']).timestamp()
+    cfg['online']['calibration_stop_unix']=hard_deadline-540
     atomic_write_toml(root/'effective_config.toml',cfg)
     os.environ['MORTAL_CFG']=str(root/'effective_config.toml')
     from mortal.config import config

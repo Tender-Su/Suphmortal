@@ -68,6 +68,26 @@ class LimitsTests(unittest.TestCase):
                       text[text.index('def stop_at_calibration_boundary'):text.index('def stop_after_checkpoint_if_requested')])
         self.assertIn("v_tgt = complete_mc_target(traj)",text)
         self.assertNotIn('clip',text[text.index('value_loss_val = nn.functional.mse_loss'):text.index('value_loss_val = nn.functional.mse_loss')+70])
+    def test_production_cutoff_saves_before_new_optimizer_clock(self):
+        import ast
+        text=(Path(__file__).resolve().parents[1]/'online/train_online.py').read_text()
+        tree=ast.parse(text)
+        nodes={node.name:node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef)}
+        saved=[];flushed=[]
+        env={'config':{'online':{'calibration_stop_unix':660}},'calibration_bounds':(3,318),
+             'training_stop_requested':lambda:False,'_time':SimpleNamespace(time=lambda:660.),
+             'persist_live_training_state':lambda **kw:saved.append(kw),'reward_target_metadata':{},
+             'writer':SimpleNamespace(flush=lambda:flushed.append(True)),
+             'logging':SimpleNamespace(info=lambda *a:None),'steps':17,
+             'sys':SimpleNamespace(exit=lambda code:(_ for _ in ()).throw(SystemExit(code))),
+             'ONLINE_STOP_REQUEST_EXIT_CODE':87}
+        module=ast.Module(body=[nodes['stop_after_checkpoint_if_requested']],type_ignores=[])
+        exec(compile(ast.fix_missing_locations(module),'real_production_cutoff','exec'),env)
+        with self.assertRaises(SystemExit) as stop:env['stop_after_checkpoint_if_requested']()
+        self.assertEqual(stop.exception.code,87);self.assertEqual(len(saved),1);self.assertEqual(flushed,[True])
+        marker=text.index('# A forward begun before cutoff')
+        self.assertLess(text.index('stop_after_checkpoint_if_requested()',marker),text.index('steps += 1',marker))
+
     def test_three_readonly_drains_and_no_fourth(self):
         from mortal.core.artifacts import file_sha256
         with tempfile.TemporaryDirectory() as d:

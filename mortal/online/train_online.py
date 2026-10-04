@@ -1,4 +1,5 @@
 import math as _math
+import time as _time
 import numpy as _np
 from collections import OrderedDict
 
@@ -2721,7 +2722,8 @@ def train(*, calibration_observer=None):
             sys.exit(ONLINE_STOP_REQUEST_EXIT_CODE)
 
     def stop_after_checkpoint_if_requested():
-        if training_stop_requested():
+        calibration_deadline = config.get("online", {}).get("calibration_stop_unix", float("inf"))
+        if training_stop_requested() or (any(calibration_bounds) and _time.time() >= calibration_deadline):
             persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
             writer.flush()
             logging.info(
@@ -3971,6 +3973,10 @@ def train(*, calibration_observer=None):
                     replay_is_gap_max,
                 )
 
+            if any(calibration_bounds):
+                # A forward begun before cutoff may finish after it. Save the
+                # previous exact update boundary before starting another step.
+                stop_after_checkpoint_if_requested()
             steps += 1
             idx += 1
             if idx % opt_step_every == 0:
