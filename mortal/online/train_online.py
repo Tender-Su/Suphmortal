@@ -1539,7 +1539,7 @@ def ensure_parent_dir_for_file(file_path):
         os.makedirs(parent, exist_ok=True)
 
 
-def train():
+def train(*, calibration_observer=None):
     import mortal.core.prelude
     import logging
     import sys
@@ -1685,6 +1685,8 @@ def train():
     value_enabled = value_cfg.get('enabled', False)
     critic_only = critic_only_enabled(config)
     successful_step_limit = successful_optimizer_step_limit(config)
+    from mortal.online.calibration_bounds import calibration_limits, calibration_limit_reason, complete_mc_target
+    calibration_bounds = calibration_limits(config)
     value_weight = value_cfg.get('weight', 0.5) if value_enabled else 0.0
     oracle_critic = value_cfg.get('oracle_critic', True) if value_enabled else False
     oracle_critic_arch = normalize_oracle_critic_arch(
@@ -2300,6 +2302,8 @@ def train():
             len(bridge_info['loaded_keys']),
             len(bridge_info['skipped_keys']),
         )
+    if calibration_observer is not None:
+        calibration_observer("before_critic_load", locals())
     if oracle_critic_init_state_file and oracle_brain is not None and value_net is not None:
         if not should_load_oracle_critic_init_checkpoint(
             state_file_exists=state_file_exists,
@@ -2336,6 +2340,8 @@ def train():
                 init_metadata,
             )
 
+    if calibration_observer is not None:
+        calibration_observer("after_critic_load", locals())
     logging.info('optimizer update clock (exact counts exclude legacy/inherited offsets): %s', update_clock.state_dict())
     apply_independent_actor_lr_clock(optimizer, scheduler, config, steps=steps)
     effective_aux_training_cfg = resolve_effective_online_aux_training_cfg(
@@ -2704,6 +2710,16 @@ def train():
             )
             sys.exit(ONLINE_MAX_STEPS_EXIT_CODE)
 
+    def stop_at_calibration_boundary(completed_passes=0):
+        reason = calibration_limit_reason(calibration_bounds, completed_passes=completed_passes,
+                                          attempts=update_clock.attempts)
+        if reason:
+            persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
+            writer.flush()
+            logging.info('bounded calibration saved at %s: passes=%s clock=%s',
+                         reason, completed_passes, update_clock.state_dict())
+            sys.exit(ONLINE_STOP_REQUEST_EXIT_CODE)
+
     def stop_after_checkpoint_if_requested():
         if training_stop_requested():
             persist_live_training_state(reward_target_metadata_dict=dict(reward_target_metadata))
@@ -2752,6 +2768,7 @@ def train():
         nonlocal log_entropy_alpha
         if online:
             player_names = ['trainee']
+            stop_after_checkpoint_if_requested()
             dirname = drain()
             file_list = list(map(lambda p: path.join(dirname, p), sorted(os.listdir(dirname))))
         else:
@@ -2806,6 +2823,7 @@ def train():
             infer_chunk = online_gae_inference_batch_size(config)
 
             for chunk_start in range(0, len(fl), chunk_size):
+                stop_after_checkpoint_if_requested()
                 chunk_files = fl[chunk_start:chunk_start + chunk_size]
                 chunk_trajs = list(traj_loader.iter_game_trajectories(chunk_files))
                 if online_replay_is and replay_is_drop_untracked:
@@ -3008,6 +3026,9 @@ def train():
                             )
                             player_v_target = player_adv + v_pred[:, player_idx]
                         v_tgt[:, player_idx] = np.asarray(player_v_target, dtype=np.float32)
+                    if value_cfg.get('fixed_mc_targets', False):
+                        # Direct full-game MC, independent of changing critic predictions.
+                        v_tgt = complete_mc_target(traj)
                     buf['obs'].append(traj['obs'])
                     if traj['invisible_obs'] is not None:
                         buf['invisible_obs'].append(traj['invisible_obs'])
@@ -3261,6 +3282,10 @@ def train():
             nonlocal dynamic_entropy_weight
             nonlocal log_entropy_alpha
 
+            stop_after_checkpoint_if_requested()
+            stop_at_calibration_boundary()
+            if calibration_observer is not None:
+                calibration_observer("batch_offered", locals())
             aux_monitor = stats['aux_monitor']
             obs = obs.to(dtype=torch.float32, device=device)
             actions = actions.to(dtype=torch.int64, device=device)
@@ -3545,6 +3570,8 @@ def train():
                     drift['approx_kl'].item() > float(policy_cfg.get('target_kl', 0.02))
                     or drift['clip_fraction'].item() > float(policy_cfg.get('max_clip_fraction', 0.5))
                 ):
+                    if calibration_observer is not None:
+                        calibration_observer("drift_rejected", locals())
                     logging.warning('skipping drifted batch before optimizer update: KL=%.6g clip_fraction=%.4f',
                                     drift['approx_kl'].item(), drift['clip_fraction'].item())
                     writer.add_scalar('policy_drift/rejected_kl', drift['approx_kl'], steps)
@@ -3951,7 +3978,11 @@ def train():
                     scaler.unscale_(optimizer)
                     params = chain.from_iterable(g['params'] for g in optimizer.param_groups)
                     clip_grad_norm_(params, max_grad_norm)
-                observed_scaler_step(scaler, optimizer, update_clock)
+                if calibration_observer is not None:
+                    calibration_observer("before_step", locals())
+                step_succeeded = observed_scaler_step(scaler, optimizer, update_clock)
+                if calibration_observer is not None:
+                    calibration_observer("after_step", locals())
                 optimizer.zero_grad(set_to_none=True)
             # Deliberately preserve existing microbatch-based LR/phase clocks.
             # Migrating schedules to successful updates needs separate calibration.
@@ -3977,6 +4008,7 @@ def train():
             if idx % opt_step_every == 0:
                 # Check before network publication/evaluation can block shutdown.
                 stop_at_successful_optimizer_step_limit()
+                stop_at_calibration_boundary()
                 stop_after_checkpoint_if_requested()
 
             if old_policy_update_due(steps, old_update_every):
@@ -4228,8 +4260,13 @@ def train():
         return dict(reward_target_metadata)
 
 
+    completed_replay_passes = 0
     while True:
+        stop_after_checkpoint_if_requested()
         train_epoch()
+        completed_replay_passes += 1
+        stop_at_calibration_boundary(completed_replay_passes)
+        stop_after_checkpoint_if_requested()
         gc.collect()
         # torch.cuda.empty_cache()
         # torch.cuda.synchronize()

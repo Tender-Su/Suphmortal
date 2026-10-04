@@ -67,6 +67,9 @@ def parse_args(argv=None):
     parser.add_argument('--reference-sha256')
     parser.add_argument('--reference-steps', type=int)
     parser.add_argument('--reuse-rollout-dir', help='Read-only original probe rollout; never arbitrary logs')
+    parser.add_argument('--candidate')
+    parser.add_argument('--candidate-sha256')
+    parser.add_argument('--candidate-steps', type=int)
     parser.add_argument('--shuffle-hidden', action='store_true', help='One shared fixed within-game hidden-input derangement')
     parser.add_argument('--shuffle-seed', type=int, default=20260930)
     parser.add_argument('--games', type=int, default=256, help='8 for smoke; 256 for pilot')
@@ -88,6 +91,11 @@ def parse_args(argv=None):
             parser.error('--reference requires its SHA256 and nonnegative internal step')
     elif not all(getattr(args, name) for name in CRITICS) or args.reference_sha256 or args.reference_steps is not None:
         parser.error('provide either --reference identity or all three legacy critic roles')
+    if args.candidate:
+        if not args.reference or args.candidate_steps != 256 or not re.fullmatch('[0-9a-f]{64}', args.candidate_sha256 or ''):
+            parser.error('paired calibration requires reference plus exact candidate256 identity')
+    elif args.candidate_sha256 or args.candidate_steps is not None:
+        parser.error('candidate identity requires candidate')
     if args.games < 8 or args.games % 4:
         parser.error('--games must be a multiple of four, at least eight')
     if args.batch_size < 1 or args.torch_threads < 1 or args.rayon_threads < 1:
@@ -320,8 +328,10 @@ def run(args, root, *, timings):
     from mortal.research.frozen_probe_cache import (
         ProbeBudget, BudgetExpired, prediction_stream, temporal_fields, reference_summary, inference_slices,
     )
-    names = ('reference',) if args.reference else CRITICS
-    budget = ProbeBudget.from_environment() if args.reference else None
+    candidate = getattr(args, 'candidate', None)
+    from mortal.research.paired_critic_calibration import PairedBudget, input_fingerprint, paired_summary
+    names = ('reference', 'candidate') if candidate else ('reference',) if args.reference else CRITICS
+    budget = (PairedBudget if candidate else ProbeBudget).from_environment() if args.reference else None
     if budget:
         budget.check()
     # Must precede any module importing mortal.config or the native Rayon pool.
@@ -353,6 +363,8 @@ def run(args, root, *, timings):
     hashes = {name: file_sha256(path) for name, path in files.items()}
     if args.reference and hashes['reference'] != args.reference_sha256:
         raise ValueError('reference checkpoint SHA256 mismatch')
+    if candidate and hashes['candidate'] != args.candidate_sha256:
+        raise ValueError('candidate checkpoint SHA256 mismatch')
     if args.reference:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
@@ -423,7 +435,7 @@ def run(args, root, *, timings):
                          'mortal/online/pretrain_oracle_critic.py'):
             provenance['source_hashes'][relative] = file_sha256(source_root / relative)
         provenance.update(
-            mode='single_reference', budget=budget.manifest(),
+            mode='paired_calibration256' if candidate else 'single_reference', budget=budget.manifest(),
             planned_groups=[{'seed': seed, 'seed_key': args.seed_key, 'seats': [0, 1, 2, 3]}
                             for seed in range(args.seed_start, args.seed_start + args.games // 4)],
             distribution_scope='frozen sampled actor versus the exact original baseline file',
@@ -463,8 +475,14 @@ def run(args, root, *, timings):
     for name in names:
         state = torch.load(files[name], map_location='cpu', weights_only=True, mmap=True)
         pre = validate_critic_contract(state, version=version, pts=pts, role=None if args.reference else name)
-        if args.reference and state.get('steps') != args.reference_steps:
-            raise ValueError('reference checkpoint internal step mismatch')
+        expected_step = args.candidate_steps if name == 'candidate' else args.reference_steps
+        if args.reference and state.get('steps') != expected_step:
+            raise ValueError(f'{name} checkpoint internal step mismatch')
+        if name == 'candidate':
+            clock = state.get('optimizer_update_clock', {})
+            if (clock.get('successes') != 256 or state.get('artifact_role') != 'calibration256_eval_weights_only'
+                    or state.get('reference_sha256') != hashes['reference']):
+                raise ValueError('candidate is not the fixed256 endpoint from this reference')
         brain = OracleDualTowerBrain(version=version, **state['config']['resnet'], Norm='GN',
                                     oracle_fusion_mode=pre.get('oracle_fusion_mode', 'linear'),
                                     oracle_fusion_hidden=pre.get('oracle_fusion_hidden', 512)).eval()
@@ -533,6 +551,7 @@ def run(args, root, *, timings):
     clustered = defaultdict(lambda: defaultdict(list))
     identity_max = {name: 0.0 for name in names}
     game_counts = []
+    input_fingerprints = []
     with prediction_stream(root, reference=bool(args.reference)) as stream:
         try:
             for game_index, game in enumerate(games):
@@ -576,6 +595,7 @@ def run(args, root, *, timings):
                                                             seat=game['challenger_seat'], shuffle_seed=args.shuffle_seed)
                     shuffle_mappings.append({'game_index': game_index, 'states': len(obs),
                                              'indices_sha256': hashlib.sha256(shuffle_indices.astype('<i8').tobytes()).hexdigest()})
+                fingerprints = input_fingerprint(trajectory, target) if candidate else None
                 per_game, per_game_shuffled, raw_temporal = {}, {}, {}
                 for name, (brain, value) in critics.items():
                     timings.switch('critic_inference')
@@ -612,10 +632,16 @@ def run(args, root, *, timings):
                     if not np.isfinite(adv95).all():
                         raise ValueError('non-finite production GAE')
                     advantages[name].append(adv95)
-                    if args.reference:
+                    if args.reference and name == 'reference':
                         raw_temporal = temporal_fields(trajectory, game, rewards, target, pred,
                                                        compute_gae_advantages_from_step_rewards)
 
+                if candidate:
+                    if fingerprints != input_fingerprint(trajectory, target):
+                        raise ValueError('shared paired scoring inputs mutated')
+                    input_fingerprints.append({'seed':game['seed'],'seed_key':game['seed_key'],
+                        'seat':game['challenger_seat'],'states':len(target),'shared_C0_C1':fingerprints})
+                    atomic_write_json(root / 'input_fingerprints.json', input_fingerprints)
                 timings.switch('prediction_write')
                 for i in range(len(target)):
                     stream.write(json.dumps({'game_index': game_index, 'seed': game['seed'], 'seed_key': game['seed_key'],
@@ -645,9 +671,15 @@ def run(args, root, *, timings):
     timings.switch('aggregation_statistics')
     if args.reference:
         completed_count = stream.completed_games
-        result = reference_summary(args, games[:completed_count], targets[:completed_count],
-                                   predictions['reference'][:completed_count], all_context[:completed_count],
-                                   advantages['reference'][:completed_count], stream.groups)
+        if candidate:
+            result = paired_summary(args, games[:completed_count], targets[:completed_count],
+                                    predictions['reference'][:completed_count], predictions['candidate'][:completed_count],
+                                    all_context[:completed_count], advantages['reference'][:completed_count], stream.groups)
+            result['shared_input_fingerprints_sha256'] = file_sha256(root / 'input_fingerprints.json') if input_fingerprints else None
+        else:
+            result = reference_summary(args, games[:completed_count], targets[:completed_count],
+                                       predictions['reference'][:completed_count], all_context[:completed_count],
+                                       advantages['reference'][:completed_count], stream.groups)
         timings.switch('final_integrity_write')
         if hashes != {name: file_sha256(path) for name, path in files.items()}:
             raise RuntimeError('input checkpoint or configuration changed during probe')
