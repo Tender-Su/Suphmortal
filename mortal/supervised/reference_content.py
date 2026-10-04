@@ -99,7 +99,7 @@ def reference_ledger_snapshot(source, destination, source_identity, consumed_fil
         shutil.copyfileobj(src, dst)
         dst.flush()
         os.fsync(dst.fileno())
-    with closing(sqlite3.connect(building)) as db, db:
+    with closing(sqlite3.connect(building.resolve().as_uri() + '?mode=rw', uri=True)) as db, db:
         db.execute('ATTACH DATABASE ? AS reference',
                    (reference.resolve().as_uri() + '?mode=ro',))
         mismatch = db.execute(
