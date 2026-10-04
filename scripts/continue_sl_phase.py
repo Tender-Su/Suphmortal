@@ -106,6 +106,16 @@ def prepare(args):
     if index.get('trend_roles') is not None and index['trend_roles'] != trend:
         raise ValueError('continuing the same phase must retain its existing fixed trend panel')
     parent = parent_record(state, path=output / 'parent.pth', sha256=checkpoint_sha, phase=contract['phase'])
+    reference_binding = None
+    if getattr(args, 'reference_content_contract', None):
+        from mortal.supervised.reference_content import bind_reference_contract
+        descriptor = read_json(args.reference_content_contract)
+        reference = verify_manifest(descriptor['reference_directory'])
+        reference_index = torch.load(Path(reference['directory']) / 'indexes.pth',
+                                     map_location='cpu', weights_only=True)
+        reference_binding = bind_reference_contract(
+            descriptor, original, index, state, checkpoint_sha, reference, reference_index)
+        del reference_index
     if args.check_only:
         print(json.dumps({'state_contract': contract, 'plan': plan, 'runtime_differences': differences,
                           'microbatch_migration': migration, 'backend_protocol': backend,
@@ -118,9 +128,16 @@ def prepare(args):
     consumed_files = {state['curriculum_probe']['dataset']['files'][key]['file']
                       for key in state['curriculum_probe']['dataset']['consumed']}
     current_draws = (state['curriculum_probe']['dataset']['current'] or {}).get('draws', [])
-    ledger = ledger_snapshot(state['config']['supervised']['probe_training_content_ledger'],
-                             output / 'inherited_content.sqlite3', original['identity'], consumed_files,
-                             current_hashes={row['file']: row['source_sha256'] for row in current_draws})
+    snapshot = ledger_snapshot
+    snapshot_options = {}
+    if reference_binding is not None:
+        from mortal.supervised.reference_content import reference_ledger_snapshot
+        snapshot = reference_ledger_snapshot
+        snapshot_options['binding'] = reference_binding
+    ledger = snapshot(state['config']['supervised']['probe_training_content_ledger'],
+                      output / 'inherited_content.sqlite3', original['identity'], consumed_files,
+                      current_hashes={row['file']: row['source_sha256'] for row in current_draws},
+                      **snapshot_options)
     index['trend_roles'] = trend
     atomic_torch_save(index, output / 'indexes.pth')
     atomic_write_json(output / 'source_config.json', state['config'])
@@ -162,6 +179,10 @@ def prepare(args):
                                             if backend else 'exact saved-state relocation; not a cross-runtime bitwise trajectory proof')),
         'runtime_versions': {'torch': torch.__version__, 'python': sys.version},
         'phase_transfer': 'none; B-to-C requires a separate explicitly declared phase plan', 'created_at': time.time()}
+    if reference_binding is not None:
+        manifest['reference_content'] = reference_binding
+        manifest['input_sha256'].update(ledger['snapshot_sha256'])
+        manifest['training_content'] = ledger['scope']
     manifest['identity'] = stable_json_digest(manifest)
     shutil.copy2(output / 'inherited_content.sqlite3', output / 'training_content.sqlite3')
     with closing(sqlite3.connect(output / 'training_content.sqlite3')) as db, db:
@@ -183,6 +204,8 @@ def prepare(args):
         'all_saved_state_preserved_except_declared_metadata': migration is None and backend is None,
         'all_saved_state_preserved_except_metadata_and_declared_microstep_conversion': True,
         'ledger_snapshot': ledger, 'no_source_files_modified': True}
+    if reference_binding is not None:
+        receipt['reference_content_contract_sha256'] = reference_binding['contract_sha256']
     atomic_write_json(output / 'continuation_receipt.json', receipt)
     print(json.dumps(receipt))
 
@@ -195,6 +218,13 @@ def run(args):
     from mortal.supervised.continuous_probe import ContinuousPhaseProbe
 
     output = Path(manifest['directory'])
+    if manifest.get('reference_content') is not None:
+        receipt = read_json(output / 'continuation_receipt.json')
+        if (receipt.get('identity') != manifest['identity']
+                or receipt.get('reference_content_contract_sha256')
+                != manifest['reference_content']['contract_sha256']
+                or receipt.get('parent_sha256') != manifest['parents']['same_phase']['sha256']):
+            raise ValueError('reference continuation preparation is not complete')
     if (output / 'sealed.json').exists() and not args.seal:
         raise ValueError('sealed phase requires another explicit continuation experiment')
     config = load_toml_file(output / 'config.toml')
@@ -261,6 +291,8 @@ def parser():
     prep.add_argument('--backend', choices=('inherit', 'strict', 'fast'), default='inherit')
     prep.add_argument('--torch-threads', type=int, choices=(1, 2, 4))
     prep.add_argument('--backend-change-reason', default='')
+    prep.add_argument('--reference-content-contract',
+                      help='Optional immutable reference pin union; never imports reference progress')
     prep.add_argument('--check-only', action='store_true')
     execute = commands.add_parser('run')
     execute.add_argument('--directory', required=True)

@@ -413,7 +413,10 @@ class ContinuationTorchTests(unittest.TestCase):
     def test_prepare_materializes_declared_microbatch_protocol_identity(self):
         self.check_prepare_materialization(migrate=True)
 
-    def check_prepare_materialization(self, *, migrate):
+    def test_reference_pins_preserve_late_state_and_require_complete_receipt(self):
+        self.check_prepare_materialization(migrate=True, reference=True)
+
+    def check_prepare_materialization(self, *, migrate, reference=False):
         from scripts.continue_sl_phase import prepare, verify_rebind
         from scripts.run_sl_early_transition import verify_manifest
         from mortal.core.toml_utils import load_toml_file
@@ -450,12 +453,45 @@ class ContinuationTorchTests(unittest.TestCase):
                 run_provenance=deepcopy(self.source['run_provenance']))
             checkpoint = source_root / 'point.pth'
             self.torch.save(self.source, checkpoint)
+            reference_contract = None
+            if reference:
+                ref = root / 'reference'
+                ref.mkdir()
+                self.torch.save(index, ref / 'indexes.pth')
+                atomic_write_json(ref / 'source_config.json', self.source['config'])
+                ref_manifest = dict(manifest, directory=str(ref), phase='B',
+                    input_sha256={name: file_sha256(ref / name) for name in
+                                  ('indexes.pth', 'source_config.json')})
+                ref_manifest.pop('identity')
+                ref_manifest['identity'] = stable_json_digest(ref_manifest)
+                atomic_write_json(ref / 'manifest.json', ref_manifest)
+                ref_ledger = TrainingContentLedger(ref / 'training_content.sqlite3',
+                                                   ref_manifest['identity'], create=True)
+                ref_ledger.verify([{'file': '2024game', 'source_sha256': 'a' * 64},
+                                   {'file': '2012game', 'source_sha256': 'b' * 64}])
+                first = ledger_snapshot(source_ledger, root / 'first.sqlite3',
+                                         manifest['identity'], ('2024game',))
+                second = ledger_snapshot(ref_ledger.path, root / 'second.sqlite3',
+                                          ref_manifest['identity'], ())
+                descriptor = dict(format='sl_reference_content_contract_v1',
+                    source_identity=manifest['identity'], source_manifest_sha256=file_sha256(source_root / 'manifest.json'),
+                    source_checkpoint_sha256=file_sha256(checkpoint), source_ledger_content_sha256=first['content_sha256'],
+                    reference_directory=str(ref), reference_identity=ref_manifest['identity'],
+                    reference_manifest_sha256=file_sha256(ref / 'manifest.json'),
+                    reference_ledger_content_sha256=second['content_sha256'],
+                    domains_sha256=stable_json_digest(index['domains']), roles_sha256=stable_json_digest(index['roles']),
+                    phase='B', seed=31, recipe=RECIPES['B'],
+                    order_evidence={'artifact_sha256': 'fixture', 'next_logical_1024_row_identity_sha256': 'fixture',
+                                    'reference_end_checkpoint_sha256': 'fixture'})
+                reference_contract = root / 'reference_contract.json'
+                atomic_write_json(reference_contract, descriptor)
             before = {path: file_sha256(path) for path in source_root.rglob('*') if path.is_file()}
             args = SimpleNamespace(source_run=str(source_root), directory=str(target), source_commit='new-fixed-commit',
                 checkpoint=str(checkpoint), until_update=100, save_every_updates=10, save_every_seconds=1800,
                 trend_every_updates=20, full_every_updates=50, trend_recent_games=1, trend_old_games=1,
                 trend_seed=3, runtime_change_reason='', check_only=False,
-                microbatch=512 if migrate else None, microbatch_change_reason='measured throughput' if migrate else '')
+                microbatch=512 if migrate else None, microbatch_change_reason='measured throughput' if migrate else '',
+                reference_content_contract=str(reference_contract) if reference_contract else None)
             with patch('scripts.continue_sl_phase.fixed_source', return_value='new-fixed-commit'), patch('sys.stdout', new=io.StringIO()):
                 prepare(args)
             actual_manifest = verify_manifest(target)
@@ -476,7 +512,16 @@ class ContinuationTorchTests(unittest.TestCase):
             self.assertEqual(actual_manifest['gpu_memory_fraction'], 0.5)
             with closing(sqlite3.connect(target / 'training_content.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT identity FROM metadata').fetchone()[0], actual_manifest['identity'])
-                self.assertEqual(db.execute('SELECT count(*) FROM games').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM games').fetchone()[0], 2 if reference else 1)
+            if reference:
+                self.assertEqual(actual['curriculum_probe']['dataset'], self.source['curriculum_probe']['dataset'])
+                self.assertFalse(actual_manifest['ledger_snapshot']['reference_progress_imported'])
+                self.assertEqual(actual_manifest['reference_content']['reference_identity'], ref_manifest['identity'])
+                self.assertEqual(file_sha256(ref / 'manifest.json'), descriptor['reference_manifest_sha256'])
+                (target / 'continuation_receipt.json').unlink()
+                from scripts.continue_sl_phase import run
+                with patch('scripts.continue_sl_phase.require_frozen_runtime'), self.assertRaises(FileNotFoundError):
+                    run(SimpleNamespace(directory=str(target), seal=False))
 
     def test_latest_update_and_wall_clock_saves_do_not_call_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
