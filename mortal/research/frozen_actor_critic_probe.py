@@ -59,8 +59,13 @@ class ProbePhaseTimings:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('config', 'actor', 'opponent', 'warm0', 'warm40k', 'clean40k', 'output-dir'):
+    for name in ('config', 'actor', 'opponent', 'output-dir'):
         parser.add_argument('--' + name, required=True)
+    for name in CRITICS:
+        parser.add_argument('--' + name)
+    parser.add_argument('--reference', help='One selected critic; mutually exclusive with the legacy three roles')
+    parser.add_argument('--reference-sha256')
+    parser.add_argument('--reference-steps', type=int)
     parser.add_argument('--reuse-rollout-dir', help='Read-only original probe rollout; never arbitrary logs')
     parser.add_argument('--shuffle-hidden', action='store_true', help='One shared fixed within-game hidden-input derangement')
     parser.add_argument('--shuffle-seed', type=int, default=20260930)
@@ -76,6 +81,13 @@ def parse_args(argv=None):
     parser.add_argument('--torch-threads', type=int, default=1)
     parser.add_argument('--rayon-threads', type=int, default=4)
     args = parser.parse_args(argv)
+    if args.reference:
+        if any(getattr(args, name) for name in CRITICS) or args.reuse_rollout_dir or args.shuffle_hidden:
+            parser.error('--reference requires a new rollout without legacy roles or hidden shuffle')
+        if not re.fullmatch('[0-9a-f]{64}', args.reference_sha256 or '') or args.reference_steps is None or args.reference_steps < 0:
+            parser.error('--reference requires its SHA256 and nonnegative internal step')
+    elif not all(getattr(args, name) for name in CRITICS) or args.reference_sha256 or args.reference_steps is not None:
+        parser.error('provide either --reference identity or all three legacy critic roles')
     if args.games < 8 or args.games % 4:
         parser.error('--games must be a multiple of four, at least eight')
     if args.batch_size < 1 or args.torch_threads < 1 or args.rayon_threads < 1:
@@ -305,6 +317,13 @@ def load_policy(path, torch):
 
 
 def run(args, root, *, timings):
+    from mortal.research.frozen_probe_cache import (
+        ProbeBudget, BudgetExpired, prediction_stream, temporal_fields, reference_summary, inference_slices,
+    )
+    names = ('reference',) if args.reference else CRITICS
+    budget = ProbeBudget.from_environment() if args.reference else None
+    if budget:
+        budget.check()
     # Must precede any module importing mortal.config or the native Rayon pool.
     os.environ['MORTAL_CFG'] = str(Path(args.config).resolve())
     os.environ['TRAIN_PLAY_PROFILE'] = 'frozen_critic_probe'
@@ -330,8 +349,14 @@ def run(args, root, *, timings):
         raise RuntimeError('native loader lacks fixed Oracle imputation support; no arena started')
     native_probe.set_oracle_imputation_seed(args.imputation_seed)
     del native_probe
-    files = {name: Path(getattr(args, name)).resolve() for name in ('config', 'actor', 'opponent', *CRITICS)}
+    files = {name: Path(getattr(args, name)).resolve() for name in ('config', 'actor', 'opponent', *names)}
     hashes = {name: file_sha256(path) for name, path in files.items()}
+    if args.reference and hashes['reference'] != args.reference_sha256:
+        raise ValueError('reference checkpoint SHA256 mismatch')
+    if args.reference:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
     actor, policy, actor_cfg, actor_steps = load_policy(files['actor'], torch)
     opponent, opponent_policy, opponent_cfg, opponent_steps = load_policy(files['opponent'], torch)
     version, pts = actor_cfg['control']['version'], [2, 1, 0, -3]
@@ -393,6 +418,34 @@ def run(args, root, *, timings):
                   'actor_agari_guard': False, 'opponent_agari_guard': True,
                   'search_enabled': False, 'actor_oracle_guiding': False,
                   'optimizer_created': False, 'actor_strength_proof': False}
+    if args.reference:
+        for relative in ('mortal/research/frozen_probe_cache.py', 'mortal/data/oracle_value.py',
+                         'mortal/online/pretrain_oracle_critic.py'):
+            provenance['source_hashes'][relative] = file_sha256(source_root / relative)
+        provenance.update(
+            mode='single_reference', budget=budget.manifest(),
+            planned_groups=[{'seed': seed, 'seed_key': args.seed_key, 'seats': [0, 1, 2, 3]}
+                            for seed in range(args.seed_start, args.seed_start + args.games // 4)],
+            distribution_scope='frozen sampled actor versus the exact original baseline file',
+            numerical={'critic_amp': False, 'critic_dtype': 'float32', 'actor_amp': device.type == 'cuda',
+                       'opponent_amp': device.type == 'cuda', 'matmul_tf32': False, 'cudnn_tf32': False,
+                       'cudnn_benchmark': False, 'physical_critic_batch': args.batch_size},
+            value_unit_mapping={'head': 'four scalar MSE ValueHead outputs; not rank probabilities',
+                'mapping': 'identity: scale=1, offset=0; score_rank_mc return-to-go in original rank-point units',
+                'rank_points': pts, 'centering': 'training subtracts mean(pts)=0',
+                'training_target': 'sum of successive kyoku rank-point changes through end_game',
+                'source': ['mortal/data/oracle_value.py:score_rank_delta_rewards_by_kyoku',
+                           'mortal/data/oracle_value.py:discounted_returns_from_step_rewards',
+                           'mortal/online/pretrain_oracle_critic.py:output_weighted_mse'],
+                'head_coordinate': 'absolute seat (trainee_seat + head) % 4; p0 is controlled actor',
+                'no_new_label_scaling': True},
+            temporal_contract={'observation': 'pre-action, full native trainee decision clock, no fold or shuffle',
+                'reward': 'all intervening kyoku rank-point deltas until this actor next decides; final remainder once',
+                'done': 'last controlled decision of a verified end_game only; end_kyoku does not terminate',
+                'terminal_next_value': 0, 'truncation': 'partial games/groups excluded, never bootstrapped as complete MC',
+                'gamma': 1.0, 'production_lambda': .95, 'identity_lambda': 1.0,
+                'normalization': 'none', 'lambda1_tolerance': {'atol': 2e-5, 'rtol': 2e-5,
+                    'source': 'existing frozen probe FP32 identity check'}})
     native_dir = Path(libriichi.__file__).resolve().parent
     native_extensions = sorted(set(native_dir.glob('*.pyd')) | set(native_dir.glob('*.so')))
     provenance['hidden_shuffle'] = {
@@ -407,9 +460,11 @@ def run(args, root, *, timings):
     atomic_write_json(root / 'effective_config.json', config)
     # Validate all three critics before spending any arena computation.
     critics = {}
-    for name in CRITICS:
+    for name in names:
         state = torch.load(files[name], map_location='cpu', weights_only=True, mmap=True)
-        pre = validate_critic_contract(state, version=version, pts=pts, role=name)
+        pre = validate_critic_contract(state, version=version, pts=pts, role=None if args.reference else name)
+        if args.reference and state.get('steps') != args.reference_steps:
+            raise ValueError('reference checkpoint internal step mismatch')
         brain = OracleDualTowerBrain(version=version, **state['config']['resnet'], Norm='GN',
                                     oracle_fusion_mode=pre.get('oracle_fusion_mode', 'linear'),
                                     oracle_fusion_hidden=pre.get('oracle_fusion_hidden', 512)).eval()
@@ -423,6 +478,8 @@ def run(args, root, *, timings):
         provenance.setdefault('critics', {})[name] = {'steps': state.get('steps'), 'contract': pre}
         del state
     atomic_write_json(root / 'provenance.json', provenance)
+    if budget:
+        budget.check()
     timings.switch('rollout_reuse_validation' if args.reuse_rollout_dir else 'arena_generation_validation')
     if args.reuse_rollout_dir:
         games, reuse = load_verified_rollout(args.reuse_rollout_dir, provenance,
@@ -455,6 +512,8 @@ def run(args, root, *, timings):
         del player
         if device.type == 'cuda':
             torch.cuda.synchronize(device)
+    if args.reference:
+        games.sort(key=lambda game: (game['seed'], game['seed_key'], game['challenger_seat']))
     atomic_write_json(root / 'outcomes.json', games)
     atomic_write_json(root / 'provenance.json', provenance)
     timings.switch('scoring_setup')
@@ -467,16 +526,18 @@ def run(args, root, *, timings):
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     targets, all_context = [], []
-    predictions = {name: [] for name in CRITICS}
-    shuffled_predictions = {name: [] for name in CRITICS}
+    predictions = {name: [] for name in names}
+    shuffled_predictions = {name: [] for name in names}
     shuffle_mappings = []
-    advantages = {name: [] for name in CRITICS}
+    advantages = {name: [] for name in names}
     clustered = defaultdict(lambda: defaultdict(list))
-    identity_max = {name: 0.0 for name in CRITICS}
+    identity_max = {name: 0.0 for name in names}
     game_counts = []
-    with atomic_output_path(root / 'predictions.jsonl.gz') as temporary:
-        with gzip.open(temporary, 'wt', encoding='utf-8', compresslevel=3) as stream:
+    with prediction_stream(root, reference=bool(args.reference)) as stream:
+        try:
             for game_index, game in enumerate(games):
+                if budget and budget.stopping():
+                    break
                 timings.switch('replay_decode_validation')
                 path = game['log_path']
                 dataset = FileDatasetsIter(version=version, file_list=[path], pts=pts, oracle=True,
@@ -495,6 +556,9 @@ def run(args, root, *, timings):
                             raise ValueError(f'fixed-imputation A/A mismatch: {field}')
                     del repeated
                 obs, invisible = trajectory['obs'], trajectory['invisible_obs']
+                if args.reference and trajectory['player_id'] != game['challenger_seat']:
+                    raise ValueError('native controlled player does not match arena seat')
+
                 rewards = expand_kyoku_rewards_to_steps(trajectory['kyoku_value_target'], trajectory['at_kyoku'])
                 target = discounted_returns_from_step_rewards(rewards, 1.0)
                 context = trajectory['context_meta']
@@ -512,14 +576,14 @@ def run(args, root, *, timings):
                                                             seat=game['challenger_seat'], shuffle_seed=args.shuffle_seed)
                     shuffle_mappings.append({'game_index': game_index, 'states': len(obs),
                                              'indices_sha256': hashlib.sha256(shuffle_indices.astype('<i8').tobytes()).hexdigest()})
-                per_game, per_game_shuffled = {}, {}
+                per_game, per_game_shuffled, raw_temporal = {}, {}, {}
                 for name, (brain, value) in critics.items():
                     timings.switch('critic_inference')
                     with torch.inference_mode():
                         pred = torch.cat([value(brain(
                             torch.as_tensor(obs[i:i + args.batch_size], device=device, dtype=torch.float32),
                             invisible_obs=torch.as_tensor(invisible[i:i + args.batch_size], device=device, dtype=torch.float32)
-                        )).cpu() for i in range(0, len(obs), args.batch_size)]).numpy()
+                        )).cpu() for i in inference_slices(len(obs), args.batch_size, budget)]).numpy()
                     timings.switch('aggregation_statistics')
                     summary = summarize_predictions(target, pred)
                     cluster_key = (game['seed'], game['seed_key'])
@@ -530,7 +594,7 @@ def run(args, root, *, timings):
                             shuffled = torch.cat([value(brain(
                                 torch.as_tensor(obs[i:i + args.batch_size], device=device, dtype=torch.float32),
                                 invisible_obs=torch.as_tensor(invisible[shuffle_indices[i:i + args.batch_size]], device=device, dtype=torch.float32)
-                            )).cpu() for i in range(0, len(obs), args.batch_size)]).numpy()
+                            )).cpu() for i in inference_slices(len(obs), args.batch_size, budget)]).numpy()
                         timings.switch('aggregation_statistics')
                         shuffle_summary = summarize_predictions(target, shuffled)
                         clustered[name + '_shuffle'][cluster_key].append(
@@ -548,17 +612,24 @@ def run(args, root, *, timings):
                     if not np.isfinite(adv95).all():
                         raise ValueError('non-finite production GAE')
                     advantages[name].append(adv95)
+                    if args.reference:
+                        raw_temporal = temporal_fields(trajectory, game, rewards, target, pred,
+                                                       compute_gae_advantages_from_step_rewards)
+
                 timings.switch('prediction_write')
                 for i in range(len(target)):
                     stream.write(json.dumps({'game_index': game_index, 'seed': game['seed'], 'seed_key': game['seed_key'],
                                              'trainee_seat': game['challenger_seat'], 'state_index': i,
                                              'current_rank': int(context[i, 4]), 'all_last': bool(context[i, 3]),
+                                             **({key: value[i] for key, value in raw_temporal.items()} if args.reference else {}),
                                              **({'hidden_source_index': int(shuffle_indices[i]),
-                                                 'pred_shuffled': {name: per_game_shuffled[name][i].tolist() for name in CRITICS}}
+                                                 'pred_shuffled': {name: per_game_shuffled[name][i].tolist() for name in names}}
                                                 if args.shuffle_hidden else {}),
                                              'target': target[i].tolist(),
-                                             'pred': {name: per_game[name][i].tolist() for name in CRITICS}},
+                                             'pred': {name: per_game[name][i].tolist() for name in names}},
                                             separators=(',', ':'), allow_nan=False) + '\n')
+                if args.reference:
+                    stream.finish_game(game)
                 timings.switch('aggregation_statistics')
                 zero_summary = summarize_predictions(target, np.zeros_like(target))
                 clustered['constant_zero'][(game['seed'], game['seed_key'])].append(
@@ -568,7 +639,27 @@ def run(args, root, *, timings):
                 game_counts.append(len(target))
                 print(json.dumps({'scored_games': game_index + 1, 'total_games': len(games), 'states': sum(game_counts)}), flush=True)
                 timings.switch('prediction_write')  # Includes gzip close and atomic publication on the last game.
+        except BudgetExpired:
+            if not args.reference:
+                raise
     timings.switch('aggregation_statistics')
+    if args.reference:
+        completed_count = stream.completed_games
+        result = reference_summary(args, games[:completed_count], targets[:completed_count],
+                                   predictions['reference'][:completed_count], all_context[:completed_count],
+                                   advantages['reference'][:completed_count], stream.groups)
+        timings.switch('final_integrity_write')
+        if hashes != {name: file_sha256(path) for name, path in files.items()}:
+            raise RuntimeError('input checkpoint or configuration changed during probe')
+        result['input_files_unchanged'] = True
+        result['lambda1_return_identity_max_abs'] = identity_max['reference']
+        atomic_write_json(root / 'metrics.json', result)
+        provenance.update(status=result['status'], finished_unix=time.time(),
+                          artifact_sha256={name: file_sha256(root / name) for name in
+                                           ('outcomes.json', 'metrics.json', 'effective_config.json')},
+                          completed_group_artifacts=stream.groups)
+        atomic_write_json(root / 'provenance.json', provenance)
+        return {'status': result['status'], 'output_dir': str(root), 'games': completed_count, 'states': result['states']}
     target, context = np.concatenate(targets), np.concatenate(all_context)
     result = {'games': len(games), 'seed_groups': len(groups), 'states': len(target), 'game_state_counts': game_counts,
               'rankings': rankings.tolist(), 'head_coordinate': 'relative_to_trainee_seat; p0=trainee',
@@ -582,7 +673,7 @@ def run(args, root, *, timings):
               'interpretation': 'pilot diagnostic, no readiness thresholds or strength claim; clean40k versus warm0 is a candidate contrast, not its training gain',
               'selection_adjusted': False, 'training_seed_uncertainty_included': False}
     seed_mse = {}
-    for name in CRITICS:
+    for name in names:
         pred = np.concatenate(predictions[name])
         result['metrics'][name] = summarize_predictions(target, pred)
         result['metrics'][name]['p0_calibration'] = calibration(target[:, 0], pred[:, 0])
@@ -600,10 +691,10 @@ def run(args, root, *, timings):
                    weights=np.asarray(clustered['constant_zero'][key])[:, 0]) for key in sorted(groups)])
     result['zero_baseline']['equal_seed_group_mse'] = dict(zip(
         ('p0', 'all_players'), seed_mse['constant_zero'].mean(0).tolist()))
-    comparisons = [*PAIRS, *((name, 'constant_zero') for name in CRITICS)]
+    comparisons = [*PAIRS, *((name, 'constant_zero') for name in names)]
     if args.shuffle_hidden:
         result['hidden_shuffle'] = {'protocol': provenance['hidden_shuffle'], 'mapping_hashes': shuffle_mappings, 'metrics': {}}
-        for name in CRITICS:
+        for name in names:
             key = name + '_shuffle'
             pred = np.concatenate(shuffled_predictions[name])
             result['hidden_shuffle']['metrics'][name] = summarize_predictions(target, pred)

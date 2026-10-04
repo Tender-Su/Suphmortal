@@ -482,6 +482,8 @@ class FileDatasetsIter(IterableDataset):
                     'obs': obs, 'invisible_obs': invisible_obs,
                     'actions': actions, 'masks': masks,
                     'at_kyoku': at_kyoku,
+                    'player_id': int(player_id),
+                    'decision_indices': np.arange(len(obs), dtype=np.int64),
                     'kyoku_advantage': kyoku_value_target[:, 0],
                     'kyoku_value_target': kyoku_value_target,
                     'player_rank': int(rank_by_player[player_id]),
